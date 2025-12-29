@@ -1,0 +1,10 @@
+- 尝试`readability-lxml`替代物
+    - trafilatura
+    - newspaper3k
+    - justext
+    - htmltext
+- 选择TTS引擎
+- 选择PDF生成引擎
+- wheel打包
+- 安装和配置批处理
+- macOS兼容性

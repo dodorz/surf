@@ -1,0 +1,35 @@
+[LLM]
+; OpenAI-compatible API configuration
+base_url = https://api.openai.com/v1
+api_key = your_api_key_here
+model = gpt-3.5-turbo
+
+[Output]
+; Directory to save Markdown notes
+note_dir = ./notes
+; Target language for translation (e.g., zh-cn, en, etc.)
+target_language = zh-cn
+; Directory to save PDF files (default: current directory)
+pdf_dir = .
+; Directory to save Audio files (default: current directory)
+audio_dir = .
+
+[PDF]
+; CSS file for PDF styling (optional)
+css_file = pdf_style.css
+
+[TTS]
+; Support: edge-tts
+engine = edge-tts
+; Voice example: zh-CN-XiaoxiaoNeural, zh-CN-YunxiNeural, en-US-AriaNeural
+voice = zh-CN-XiaoxiaoNeural
+; Rate: +0%, +10%, -10%
+rate = +0%
+; Volume: +0%, +10%, -10%
+volume = +0%
+
+[Network]
+; Proxy mode: default (env/system), none, custom
+proxy_mode = default
+; Custom proxy URL (e.g., http://127.0.0.1:7890)
+custom_proxy =

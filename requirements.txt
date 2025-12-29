@@ -1,0 +1,11 @@
+playwright
+readability-lxml
+markdownify
+langdetect
+openai
+weasyprint
+markdown
+requests
+beautifulsoup4
+edge-tts
+playsound==1.2.2
