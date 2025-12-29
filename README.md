@@ -7,9 +7,24 @@
 ## Features
 
 *   **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-*   **Clean Extraction**: Uses `readability` to extract only the main article content.
-*   **Markdown & PDF**: Converts content to Standard Markdown or PDF.
-*   **Auto Translation**: Detects non-Chinese content and auto-translates it using a configured LLM (e.g., OpenAI, DeepSeek). Supports **smart chunking** for long documents to avoid context limits.
+*   **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
+*   **Translation Modes**: Choose between `original` (no translation), `translated` (default), or `both` (bilingual).
+
+### Translation Mode
+By default, the content is translated to the target language. Use `--trans-mode` or short flags to change this:
+- `-o`, `--original`: No translation.
+- `translated`: Only the translation (default).
+- `-b`, `--both`: Bilingual output.
+
+```bash
+# Bilingual output
+uv run surf.py "https://example.com" -b
+
+# Original only (no translation)
+uv run surf.py "https://example.com" -o
+```
+
+*   **Multiple PDF Engines**: Support for Playwright, WeasyPrint, Pandoc, and wkhtmltopdf.
 *   **Note Integration**: Automatically saves files to your designated notes folder.
 *   **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 *   **Flexible Proxy**: Configurable proxy settings (System Default, Custom, or None) via `config.ini`.

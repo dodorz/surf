@@ -80,6 +80,20 @@ uv run surf.py "https://example.com"
 uv run surf.py "https://example.com" -n
 ```
 
+### 翻译模式
+默认情况下，内容会被翻译为目标语言。使用 `--trans-mode` 或快捷参数更改此行为：
+- `-o`, `--original`: 不进行翻译（仅原文）。
+- `translated`: 仅保留译文（默认）。
+- `-b`, `--both`: 双语对比（原文 + 译文）。
+
+```bash
+# 输出双语内容
+uv run surf.py "https://example.com" -b
+
+# 仅输出原文（不调用翻译）
+uv run surf.py "https://example.com" -o
+```
+
 ### 生成 PDF (-p)
 生成 PDF 文件。您可以在 `config.ini` 中选择引擎：
 *   **playwright** (默认): 非常可靠，使用已安装的浏览器引擎。

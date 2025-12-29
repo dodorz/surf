@@ -426,9 +426,20 @@ def main():
     parser.add_argument("-a", "--audio", action="store_true", help="Save as audio file | 保存为音频文件")
     parser.add_argument("-s", "--speak", action="store_true", help="Speak the content | 朗读内容")
     parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
+    parser.add_argument("--trans-mode", choices=['original', 'translated', 'both'], default='translated', 
+                        help="Translation mode (default: translated)")
+    parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
+    parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
     
     args = parser.parse_args()
     config = Config()
+
+    # Determine final translation mode
+    trans_mode = args.trans_mode
+    if args.original:
+        trans_mode = 'original'
+    elif args.both:
+        trans_mode = 'both'
 
     # 1. Fetch
     try:
@@ -456,7 +467,29 @@ def main():
 
     # 4. Translate
     target_lang = config.get('Output', 'target_language', fallback='zh-cn')
-    md_content, title = ContentProcessor.translate_if_needed(md_content, title=title, target_lang=target_lang, config=config)
+    
+    if trans_mode == 'original':
+        logger.info("Translation mode set to 'original'. Skipping translation.")
+    else:
+        original_md = md_content
+        original_title = title
+        
+        translated_md, translated_title = ContentProcessor.translate_if_needed(md_content, title=title, target_lang=target_lang, config=config)
+        
+        if trans_mode == 'both':
+            logger.info("Translation mode set to 'both'. Combining original and translation.")
+            # Only combine if translation actually happened (or skip logic in translate_if_needed was hit)
+            # If translate_if_needed returns the same object, we might not want to double it up.
+            if translated_md != original_md:
+                title = f"{translated_title} ({original_title})"
+                md_content = f"{translated_md}\n\n---\n\n### Original Content / 原文内容\n\n{original_md}"
+            else:
+                title = translated_title
+                md_content = translated_md
+        else:
+            # translated (default)
+            md_content = translated_md
+            title = translated_title
 
     # Output Actions
     if args.note:
