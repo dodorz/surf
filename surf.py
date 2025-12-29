@@ -282,18 +282,58 @@ class OutputHandler:
             logger.error(f"Failed to save note: {e}")
 
     @staticmethod
-    def generate_pdf(title, md_content, config):
+    def _generate_with_weasyprint(full_html, filepath, css_file):
         try:
-            import markdown
             from weasyprint import HTML, CSS
-        except ImportError:
-            logger.error("Missing dependencies for PDF generation (markdown, weasyprint).")
-            return
+            stylesheets = [CSS(css_file)] if css_file and os.path.exists(css_file) else []
+            HTML(string=full_html).write_pdf(filepath, stylesheets=stylesheets)
+            return True
+        except (ImportError, OSError) as e:
+            logger.error(f"WeasyPrint failed: {e}")
+            return False
 
-        logger.info("Generating PDF...")
-        # Convert MD to HTML for PDF generation
-        html_body = markdown.markdown(md_content)
+    @staticmethod
+    def _generate_with_playwright(full_html, filepath, config):
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.set_content(full_html)
+                page.pdf(path=filepath, format="A4")
+                browser.close()
+            return True
+        except Exception as e:
+            logger.error(f"Playwright PDF failed: {e}")
+            return False
+
+    @staticmethod
+    def _generate_with_pandoc(md_content, filepath):
+        try:
+            import pypandoc
+            pypandoc.convert_text(md_content, 'pdf', format='md', outputfile=filepath)
+            return True
+        except Exception as e:
+            logger.error(f"Pandoc failed: {e}. Note: pandoc and a PDF engine (like pdflatex) must be installed.")
+            return False
+
+    @staticmethod
+    def _generate_with_wkhtmltopdf(full_html, filepath):
+        try:
+            import pdfkit
+            pdfkit.from_string(full_html, filepath)
+            return True
+        except Exception as e:
+            logger.error(f"wkhtmltopdf failed: {e}. Note: wkhtmltopdf binary must be installed and in PATH.")
+            return False
+
+    @staticmethod
+    def generate_pdf(title, md_content, config):
+        engine = config.get('PDF', 'engine', fallback='playwright').lower()
+        logger.info(f"Generating PDF with engine: {engine}...")
         
+        import markdown
+        html_body = markdown.markdown(md_content)
         full_html = f"""
         <html>
         <head>
@@ -315,26 +355,29 @@ class OutputHandler:
         """
 
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        
         pdf_dir = config.get('Output', 'pdf_dir', fallback='.')
         if not os.path.exists(pdf_dir):
             os.makedirs(pdf_dir)
-            
-        filename = f"{safe_title}.pdf"
-        filepath = os.path.join(pdf_dir, filename)
-        
-        try:
-            # Check for custom CSS
-            css_file = config.get('PDF', 'css_file')
-            stylesheets = []
-            if css_file and os.path.exists(css_file):
-                HTML(string=full_html).write_pdf(filepath, stylesheets=[CSS(css_file)])
-            else:
-                HTML(string=full_html).write_pdf(filepath)
-            
+        filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
+        css_file = config.get('PDF', 'css_file')
+
+        success = False
+        if engine == 'playwright':
+            success = OutputHandler._generate_with_playwright(full_html, filepath, config)
+        elif engine == 'weasyprint':
+            success = OutputHandler._generate_with_weasyprint(full_html, filepath, css_file)
+        elif engine == 'pandoc':
+            success = OutputHandler._generate_with_pandoc(md_content, filepath)
+        elif engine == 'wkhtmltopdf':
+            success = OutputHandler._generate_with_wkhtmltopdf(full_html, filepath)
+        else:
+            logger.error(f"Unsupported PDF engine: {engine}")
+            return
+
+        if success:
             logger.info(f"PDF saved to {filepath}")
-        except Exception as e:
-            logger.error(f"Generate PDF failed: {e}")
+        else:
+            logger.error("All attempts to generate PDF failed.")
 
 class TTSHandler:
     @staticmethod

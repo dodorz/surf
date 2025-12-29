@@ -9,3 +9,5 @@ requests
 beautifulsoup4
 edge-tts
 playsound==1.2.2
+pypandoc
+pdfkit

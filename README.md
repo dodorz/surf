@@ -81,10 +81,17 @@ uv run surf.py "https://example.com" -n
 ```
 
 ### Generate PDF (-p)
-Generate a PDF file in the current directory.
+Generate a PDF file. You can choose the engine in `config.ini`:
+*   **playwright** (Default): Highly reliable, uses the installed browser.
+*   **weasyprint**: High quality, requires GTK3 on Windows.
+*   **pandoc**: Requires `pandoc` and `pdflatex` (or equivalent) installed on your system.
+*   **wkhtmltopdf**: Requires `wkhtmltopdf` binary installed and in PATH.
+
 ```bash
 uv run surf.py "https://example.com" -p
 ```
+
+> **Note for Windows Users**: The default **playwright** engine is recommended as it doesn't require extra system libraries like GTK3. If you prefer **weasyprint**, you must install the **GTK3 Runtime** from [here](https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases).
 
 ### Text-to-Speech (-a / -s)
 Save content as an MP3 audio file:

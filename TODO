@@ -1,10 +1,19 @@
+- 中间产物缓存
+- 调试模式，可查中间文件
+- 解决图片消失问题
 - 尝试`readability-lxml`替代物
     - trafilatura
     - newspaper3k
     - justext
     - htmltext
+- 缓存
 - 选择TTS引擎
-- 选择PDF生成引擎
+- [x] 选择PDF生成引擎
 - wheel打包
 - 安装和配置批处理
+- PDF生成增加手机小屏优化选项
 - macOS兼容性
+- 特定网站的处理
+    - 小红书（题图ocr）
+- Termux兼容性
+- 简单Android应用包装
