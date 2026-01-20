@@ -15,6 +15,8 @@ import re
 from bs4 import BeautifulSoup
 import trafilatura
 
+__version__ = "0.2.0"
+
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
@@ -35,6 +37,29 @@ class Config:
 
 class Fetcher:
     @staticmethod
+    def _get_system_proxy_win():
+        """
+        Get Windows system proxy from WinINET (registry or IE settings).
+        Returns dict or None.
+        """
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+            # Enable proxy
+            enable = winreg.QueryValueEx(key, "ProxyEnable")[0]
+            if enable:
+                proxy = winreg.QueryValueEx(key, "ProxyServer")[0]
+                if proxy:
+                    # Check for override (per-protocol)
+                    override = winreg.QueryValueEx(key, "ProxyOverride")[0] if False else None
+                    return {'http': proxy, 'https': proxy}
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get Windows proxy: {e}")
+            return None
+
+    @staticmethod
     def _get_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Returns a dictionary of proxies based on configuration.
@@ -43,28 +68,36 @@ class Fetcher:
         
         Args:
             config: Config object
-            proxy_mode_override: Override proxy_mode from command line (default/none/custom)
+            proxy_mode_override: Override proxy_mode from command line (auto/win/no/set)
             custom_proxy_override: Override custom_proxy from command line
         """
         # Use command line override if provided, otherwise use config
-        mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='default').lower()
+        mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='auto').lower()
         
-        if mode == 'none':
+        if mode == 'no':
             return None, None
             
-        if mode == 'custom':
+        if mode == 'set':
             # Use command line override if provided, otherwise use config
             custom = custom_proxy_override if custom_proxy_override else config.get('Network', 'custom_proxy')
             if custom:
-                # requests format
                 req_proxies = {'http': custom, 'https': custom}
-                # playwright format
                 pw_proxy = {'server': custom}
                 return req_proxies, pw_proxy
             else:
-                logger.warning("Custom proxy mode selected but no custom_proxy defined. Falling back to default.")
-                
-        # mode == 'default' (Check env vars)
+                logger.warning("Custom proxy mode selected but no custom_proxy defined. Falling back to auto.")
+                mode = 'auto'
+        
+        if mode == 'win':
+            # Windows system proxy
+            win_proxy = Fetcher._get_system_proxy_win()
+            if win_proxy:
+                return win_proxy, {'server': win_proxy.get('http')}
+            else:
+                logger.warning("No Windows proxy configured. Falling back to auto.")
+                mode = 'auto'
+        
+        # mode == 'auto' (Check env vars)
         http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
         https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
         no_proxy = os.environ.get('no_proxy') or os.environ.get('NO_PROXY')
@@ -497,41 +530,43 @@ class TTSHandler:
 
 def main():
     parser = argparse.ArgumentParser(description="Convert URL to Markdown/PDF")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("url", help="The URL to process")
     parser.add_argument("-p", "--pdf", action="store_true", help="Generate PDF")
     parser.add_argument("-n", "--note", action="store_true", help="Save to note directory")
-    parser.add_argument("-a", "--audio", action="store_true", help="Save as audio file | 保存为音频文件")
-    parser.add_argument("-s", "--speak", action="store_true", help="Speak the content | 朗读内容")
+    parser.add_argument("-a", "--audio", action="store_true", help="Save as audio file")
+    parser.add_argument("-s", "--speak", action="store_true", help="Speak the content")
     parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
     parser.add_argument("--trans-mode", choices=['original', 'translated', 'both'], default='translated', 
                         help="Translation mode (default: translated)")
-    parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
-    parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
-    parser.add_argument("-x", "--proxy-mode", choices=['default', 'none', 'custom'], 
-                        help="Proxy mode: default (env/system), none (no proxy), custom (use --proxy) | 代理模式")
-    parser.add_argument("--proxy", 
-                        help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
+    parser.add_argument("-o", action="store_true", help="Same as --trans-mode original")
+    parser.add_argument("-b", action="store_true", help="Same as --trans-mode both")
+    parser.add_argument("-x", "--proxy", choices=['auto', 'win', 'no', 'set'], default='auto',
+                        help="Proxy mode: auto (env), win (system), no (none), set (custom)")
+    parser.add_argument("--set-proxy", help="Custom proxy URL (requires -x set)")
     
     args = parser.parse_args()
     config = Config()
-    
-    # Validate proxy arguments
-    if args.proxy and args.proxy_mode != 'custom':
-        parser.error("--proxy requires --proxy-mode custom")
-    if args.proxy_mode == 'custom' and not args.proxy:
-        parser.error("--proxy-mode custom requires --proxy")
+
+    # Validate proxy argument
+    if args.proxy == 'set' and not args.set_proxy and not config.get('Network', 'custom_proxy'):
+        parser.error("--proxy set requires --set-proxy or custom_proxy in config.ini")
 
     # Determine final translation mode
     trans_mode = args.trans_mode
-    if args.original:
+    if args.o:
         trans_mode = 'original'
-    elif args.both:
+    elif args.b:
         trans_mode = 'both'
+
+    # Determine proxy mode
+    proxy_mode = args.proxy
+    custom_proxy = args.set_proxy
 
     # 1. Fetch
     try:
         html_content = Fetcher.fetch(args.url, config=config, use_browser=args.browser, 
-                                     proxy_mode_override=args.proxy_mode, custom_proxy_override=args.proxy)
+                                     proxy_mode_override=proxy_mode, custom_proxy_override=custom_proxy)
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
         sys.exit(1)

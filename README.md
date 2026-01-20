@@ -11,10 +11,10 @@
 *   **Translation Modes**: Choose between `original` (no translation), `translated` (default), or `both` (bilingual).
 
 ### Translation Mode
-By default, the content is translated to the target language. Use `--trans-mode` or short flags to change this:
-- `-o`, `--original`: No translation.
-- `translated`: Only the translation (default).
-- `-b`, `--both`: Bilingual output.
+By default, the content is translated to the target language. Use `--trans-mode` or shortcuts to change this:
+- `--trans-mode original` or `-o`: No translation.
+- `--trans-mode translated`: Only the translation (default).
+- `--trans-mode both` or `-b`: Bilingual output.
 
 ```bash
 # Bilingual output
@@ -27,7 +27,7 @@ uv run surf.py "https://example.com" -o
 *   **PDF Generation**: Generate PDF files using Playwright.
 *   **Note Integration**: Automatically saves files to your designated notes folder.
 *   **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
-*   **Flexible Proxy**: Configurable proxy settings (System Default, Custom, or None) via `config.ini`.
+*   **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
 
 ## Installation
 
@@ -74,8 +74,8 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: default (env/system), none, custom
-proxy_mode = default
+; Proxy mode: auto (env vars), win (system), no (none), set (custom)
+proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
 ```

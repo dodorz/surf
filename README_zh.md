@@ -12,7 +12,7 @@
 *   **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 *   **笔记集成**：自动将文件保存到您指定的笔记文件夹。
 *   **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
-*   **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
+*   **灵活代理**：通过 `config.ini` 或 `-x/--proxy` 选项配置代理（auto/win/no/set）。
 
 ## 安装
 
@@ -59,8 +59,8 @@ rate = +0%
 volume = +0%
 
 [Network]
-; 代理模式: default (使用系统/环境代理), none (不使用), custom (使用自定义地址)
-proxy_mode = default
+; 代理模式: auto (环境变量), win (系统代理), no (不使用), set (自定义地址)
+proxy_mode = auto
 ; 自定义代理地址 (例如 http://127.0.0.1:7890)
 custom_proxy =
 ```
@@ -81,9 +81,9 @@ uv run surf.py "https://example.com" -n
 
 ### 翻译模式
 默认情况下，内容会被翻译为目标语言。使用 `--trans-mode` 或快捷参数更改此行为：
-- `-o`, `--original`: 不进行翻译（仅原文）。
-- `translated`: 仅保留译文（默认）。
-- `-b`, `--both`: 双语对比（原文 + 译文）。
+- `--trans-mode original` 或 `-o`: 不进行翻译（仅原文）。
+- `--trans-mode translated`: 仅保留译文（默认）。
+- `--trans-mode both` 或 `-b`: 双语对比（原文 + 译文）。
 
 ```bash
 # 输出双语内容
