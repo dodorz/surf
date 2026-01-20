@@ -14,12 +14,6 @@ pdf_dir = .
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
 
-[PDF]
-; PDF engine: weasyprint, playwright, pandoc, wkhtmltopdf
-engine = playwright
-; CSS file for PDF styling (optional)
-css_file = pdf_style.css
-
 [TTS]
 ; Support: edge-tts
 engine = edge-tts
@@ -31,7 +25,7 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: default (env/system), none, custom
-proxy_mode = default
+; Proxy mode: auto (env vars), win (system), no (none), set (custom)
+proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
