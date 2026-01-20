@@ -12,6 +12,9 @@ import warnings
 import asyncio
 import edge_tts
 from playsound import playsound
+import re
+from bs4 import BeautifulSoup
+import trafilatura
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -33,19 +36,26 @@ class Config:
 
 class Fetcher:
     @staticmethod
-    def _get_proxies(config):
+    def _get_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Returns a dictionary of proxies based on configuration.
         For requests: {'http': '...', 'https': '...'} or None
         For playwright: {'server': '...'} or None
+        
+        Args:
+            config: Config object
+            proxy_mode_override: Override proxy_mode from command line (default/none/custom)
+            custom_proxy_override: Override custom_proxy from command line
         """
-        mode = config.get('Network', 'proxy_mode', fallback='default').lower()
+        # Use command line override if provided, otherwise use config
+        mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='default').lower()
         
         if mode == 'none':
             return None, None
             
         if mode == 'custom':
-            custom = config.get('Network', 'custom_proxy')
+            # Use command line override if provided, otherwise use config
+            custom = custom_proxy_override if custom_proxy_override else config.get('Network', 'custom_proxy')
             if custom:
                 # requests format
                 req_proxies = {'http': custom, 'https': custom}
@@ -76,15 +86,22 @@ class Fetcher:
         return req_proxies, pw_proxy
 
     @staticmethod
-    def fetch(url, config, use_browser=False):
+    def fetch(url, config, use_browser=False, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetches the content of a URL.
         If use_browser is True, uses Playwright.
         Otherwise, uses requests.
+        
+        Args:
+            url: URL to fetch
+            config: Config object
+            use_browser: Force use browser
+            proxy_mode_override: Override proxy_mode from command line
+            custom_proxy_override: Override custom_proxy from command line
         """
         logger.info(f"Fetching {url}...")
         
-        req_proxies, pw_proxy = Fetcher._get_proxies(config)
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         
         if not use_browser:
             try:
@@ -98,21 +115,21 @@ class Fetcher:
                 # Check if likely dynamic (heuristic: very short content or explicit noscript)
                 if len(response.text) < 1000 or '<noscript>' in response.text:
                     logger.info("Content seems short or requires JS. Switching to browser...")
-                    return Fetcher.fetch_with_browser(url, config)
+                    return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
                     
                 return response.text
             except Exception as e:
                 logger.warning(f"Requests failed: {e}. Switching to browser...")
-                return Fetcher.fetch_with_browser(url, config)
+                return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
         else:
-            return Fetcher.fetch_with_browser(url, config)
+            return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
 
     @staticmethod
-    def fetch_with_browser(url, config):
+    def fetch_with_browser(url, config, proxy_mode_override=None, custom_proxy_override=None):
         logger.info("Launching browser...")
         from playwright.sync_api import sync_playwright
         
-        _, pw_proxy = Fetcher._get_proxies(config)
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         
         if pw_proxy:
              logger.info(f"Playwright Proxy: {pw_proxy}")
@@ -139,14 +156,112 @@ class Fetcher:
 
 class ContentProcessor:
     @staticmethod
+    def _preprocess_html(html):
+        """
+        Preprocesses HTML to normalize complex image structures (like <picture> or lazy-loaded images)
+        so that extraction engines can find them more easily.
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+        for img in soup.find_all('img'):
+            # Normalize src
+            if not img.get('src'):
+                for attr in ['data-src', 'data-original', 'data-url', 'data-srcset', 'srcset']:
+                    if img.get(attr):
+                        # For srcset, take the first URL
+                        val = img[attr].split(',')[0].split(' ')[0]
+                        img['src'] = val
+                        break
+            
+            # Flatten picture/source
+            parent = img.parent
+            while parent and parent.name in ['picture', 'source', 'figure']:
+                if parent.name in ['picture', 'source']:
+                    # Replace the entire picture/source with just the img
+                    parent.replace_with(img)
+                    parent = img.parent
+                else:
+                    break
+        return soup
+
+    @staticmethod
+    def _rescue_content(preprocessed_soup, summary_html):
+        """
+        Uses a fingerprint from Readability's summary to find the original, 
+        uncleaned container in the preprocessed soup, preserving images.
+        """
+        summary_soup = BeautifulSoup(summary_html, 'html.parser')
+        text = summary_soup.get_text(strip=True)
+        if len(text) < 50:
+            return summary_html
+        
+        # Take a fingerprint from the start of the text
+        fingerprint = text[:100]
+        
+        # Find the node in the full preprocessed soup
+        node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
+        if not node:
+            # Try a fuzzy/smaller search
+            fingerprint = text[:30]
+            node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
+        
+        if not node:
+            return summary_html
+
+        # Traverse up to find a suitable article container
+        curr = node.parent
+        best_candidate = curr
+        
+        # Heuristic: go up until we hit a very broad container or body
+        while curr and curr.name not in ['body', 'html']:
+            # If this parent has images, it's a better candidate
+            if curr.find_all('img'):
+                best_candidate = curr
+            
+            # Stop if we hit a semantic article boundary
+            if curr.name in ['article', 'main'] or (curr.get('id') and curr.get('id').lower() in ['main', 'content', 'article']):
+                best_candidate = curr
+                break
+                
+            curr = curr.parent
+            
+        return str(best_candidate)
+
+    @staticmethod
     def extract_content(html):
         """
-        Extracts the main content using Readability.
-        Returns title and cleaned HTML content.
+        Extracts the main content using Readability and a custom rescue logic to preserve images.
         """
         logger.info("Extracting main content...")
-        doc = Document(html)
-        return doc.title(), doc.summary()
+        
+        preprocessed_soup = ContentProcessor._preprocess_html(html)
+        
+        # 1. Get Readability Summary
+        try:
+            doc = Document(str(preprocessed_soup))
+            title = doc.title()
+            summary_html = doc.summary()
+            
+            # 2. Rescue uncleaned content using fingerprint
+            rescued_html = ContentProcessor._rescue_content(preprocessed_soup, summary_html)
+            
+            img_count = rescued_html.count('<img')
+            logger.info(f"Extracted {img_count} images.")
+            
+            return title, rescued_html
+        except Exception as e:
+            logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
+
+        # Final Fallback: Trafilatura
+        try:
+            content_html = trafilatura.extract(str(preprocessed_soup), output_format='html', include_images=True)
+            if content_html:
+                img_count = content_html.count('<img')
+                logger.info(f"Trafilatura extracted {img_count} images.")
+                return Document(html).title(), content_html
+        except:
+             pass
+
+        return Document(html).title(), html
 
     @staticmethod
     def to_markdown(html):
@@ -400,7 +515,14 @@ class TTSHandler:
 
     @staticmethod
     def run_tts(title, content, config, speak=False, save_path=None):
-        clean_text = content.replace('#', '').replace('*', '')  # Simple cleanup for TTS
+        # Professional cleanup for TTS: remove markdown artifacts, images, and only keep link text
+        # Remove ![alt](url)
+        clean_text = re.sub(r'!\[.*?\]\(.*?\)', '', content)
+        # Remove [link text](url) -> keep 'link text'
+        clean_text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', clean_text)
+        # Remove other common MD artifacts
+        clean_text = clean_text.replace('#', '').replace('*', '').replace('`', '').replace('---', '')
+        
         # If output file not specified but speak is needed, use temp
         temp_file = "tts_temp.mp3"
         filename = save_path if save_path else temp_file
@@ -430,9 +552,19 @@ def main():
                         help="Translation mode (default: translated)")
     parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
     parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
+    parser.add_argument("-x", "--proxy-mode", choices=['default', 'none', 'custom'], 
+                        help="Proxy mode: default (env/system), none (no proxy), custom (use --proxy) | 代理模式")
+    parser.add_argument("--proxy", 
+                        help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
     
     args = parser.parse_args()
     config = Config()
+    
+    # Validate proxy arguments
+    if args.proxy and args.proxy_mode != 'custom':
+        parser.error("--proxy requires --proxy-mode custom")
+    if args.proxy_mode == 'custom' and not args.proxy:
+        parser.error("--proxy-mode custom requires --proxy")
 
     # Determine final translation mode
     trans_mode = args.trans_mode
@@ -443,7 +575,8 @@ def main():
 
     # 1. Fetch
     try:
-        html_content = Fetcher.fetch(args.url, config=config, use_browser=args.browser)
+        html_content = Fetcher.fetch(args.url, config=config, use_browser=args.browser, 
+                                     proxy_mode_override=args.proxy_mode, custom_proxy_override=args.proxy)
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
         sys.exit(1)
