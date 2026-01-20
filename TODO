@@ -16,7 +16,9 @@
 - PDF生成增加手机小屏优化选项(css分开)
 - macOS兼容性
 - 特定网站的处理
+    - 重定向与短链接
     - Twitter
+    - pocketcasts(https://pca.st/episode/)
     - 小红书（题图ocr）
 - Termux兼容性
 - 简单Android应用包装

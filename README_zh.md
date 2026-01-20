@@ -26,8 +26,7 @@
 
 2.  **设置环境**:
     ```bash
-    uv venv
-    uv pip install -r requirements.txt
+    uv sync
     uv run playwright install
     ```
 
@@ -95,17 +94,12 @@ uv run surf.py "https://example.com" -o
 ```
 
 ### 生成 PDF (-p)
-生成 PDF 文件。您可以在 `config.ini` 中选择引擎：
-*   **playwright** (默认): 非常可靠，使用已安装的浏览器引擎。
-*   **weasyprint**: 高质量，Windows 上需要安装 GTK3。
-*   **pandoc**: 需要系统中安装有 `pandoc` 和 `pdflatex`（或同类工具）。
-*   **wkhtmltopdf**: 需要系统中安装有 `wkhtmltopdf` 二进制文件并加入 PATH。
+生成 PDF 文件。使用 Playwright 作为唯一引擎：
+*   **playwright**: 非常可靠，使用已安装的浏览器引擎。
 
 ```bash
 uv run surf.py "https://example.com" -p
 ```
-
-> **Windows 用户注意**：推荐使用默认的 **playwright** 引擎，因为它不需要安装像 GTK3 这样的外部系统库。如果您更倾向于使用 **weasyprint**，则必须从 [此处](https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases) 下载并安装 **GTK3 Runtime**。
 
 ### 文本转语音 (-a / -s)
 将内容保存为 MP3 音频文件：

@@ -24,7 +24,7 @@ uv run surf.py "https://example.com" -b
 uv run surf.py "https://example.com" -o
 ```
 
-*   **Multiple PDF Engines**: Support for Playwright, WeasyPrint, Pandoc, and wkhtmltopdf.
+*   **PDF Generation**: Generate PDF files using Playwright.
 *   **Note Integration**: Automatically saves files to your designated notes folder.
 *   **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 *   **Flexible Proxy**: Configurable proxy settings (System Default, Custom, or None) via `config.ini`.
@@ -41,8 +41,7 @@ We recommend using `uv` for a clean environment.
 
 2.  **Setup Environment**:
     ```bash
-    uv venv
-    uv pip install -r requirements.txt
+    uv sync
     uv run playwright install
     ```
 
@@ -96,17 +95,13 @@ uv run surf.py "https://example.com" -n
 ```
 
 ### Generate PDF (-p)
-Generate a PDF file. You can choose the engine in `config.ini`:
-*   **playwright** (Default): Highly reliable, uses the installed browser.
-*   **weasyprint**: High quality, requires GTK3 on Windows.
-*   **pandoc**: Requires `pandoc` and `pdflatex` (or equivalent) installed on your system.
-*   **wkhtmltopdf**: Requires `wkhtmltopdf` binary installed and in PATH.
+Generate a PDF file using Playwright (the default and only engine):
+*   **playwright**: Highly reliable, uses the installed browser.
 
 ```bash
 uv run surf.py "https://example.com" -p
 ```
 
-> **Note for Windows Users**: The default **playwright** engine is recommended as it doesn't require extra system libraries like GTK3. If you prefer **weasyprint**, you must install the **GTK3 Runtime** from [here](https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases).
 
 ### Text-to-Speech (-a / -s)
 Save content as an MP3 audio file:

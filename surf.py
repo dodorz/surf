@@ -3,7 +3,6 @@ import configparser
 import os
 import sys
 import logging
-from urllib.parse import urlparse
 import requests
 from readability import Document
 import markdownify
@@ -397,17 +396,6 @@ class OutputHandler:
             logger.error(f"Failed to save note: {e}")
 
     @staticmethod
-    def _generate_with_weasyprint(full_html, filepath, css_file):
-        try:
-            from weasyprint import HTML, CSS
-            stylesheets = [CSS(css_file)] if css_file and os.path.exists(css_file) else []
-            HTML(string=full_html).write_pdf(filepath, stylesheets=stylesheets)
-            return True
-        except (ImportError, OSError) as e:
-            logger.error(f"WeasyPrint failed: {e}")
-            return False
-
-    @staticmethod
     def _generate_with_playwright(full_html, filepath, config):
         try:
             from playwright.sync_api import sync_playwright
@@ -423,29 +411,8 @@ class OutputHandler:
             return False
 
     @staticmethod
-    def _generate_with_pandoc(md_content, filepath):
-        try:
-            import pypandoc
-            pypandoc.convert_text(md_content, 'pdf', format='md', outputfile=filepath)
-            return True
-        except Exception as e:
-            logger.error(f"Pandoc failed: {e}. Note: pandoc and a PDF engine (like pdflatex) must be installed.")
-            return False
-
-    @staticmethod
-    def _generate_with_wkhtmltopdf(full_html, filepath):
-        try:
-            import pdfkit
-            pdfkit.from_string(full_html, filepath)
-            return True
-        except Exception as e:
-            logger.error(f"wkhtmltopdf failed: {e}. Note: wkhtmltopdf binary must be installed and in PATH.")
-            return False
-
-    @staticmethod
     def generate_pdf(title, md_content, config):
-        engine = config.get('PDF', 'engine', fallback='playwright').lower()
-        logger.info(f"Generating PDF with engine: {engine}...")
+        logger.info("Generating PDF...")
         
         import markdown
         html_body = markdown.markdown(md_content)
@@ -474,25 +441,13 @@ class OutputHandler:
         if not os.path.exists(pdf_dir):
             os.makedirs(pdf_dir)
         filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
-        css_file = config.get('PDF', 'css_file')
 
-        success = False
-        if engine == 'playwright':
-            success = OutputHandler._generate_with_playwright(full_html, filepath, config)
-        elif engine == 'weasyprint':
-            success = OutputHandler._generate_with_weasyprint(full_html, filepath, css_file)
-        elif engine == 'pandoc':
-            success = OutputHandler._generate_with_pandoc(md_content, filepath)
-        elif engine == 'wkhtmltopdf':
-            success = OutputHandler._generate_with_wkhtmltopdf(full_html, filepath)
-        else:
-            logger.error(f"Unsupported PDF engine: {engine}")
-            return
+        success = OutputHandler._generate_with_playwright(full_html, filepath, config)
 
         if success:
             logger.info(f"PDF saved to {filepath}")
         else:
-            logger.error("All attempts to generate PDF failed.")
+            logger.error("Failed to generate PDF.")
 
 class TTSHandler:
     @staticmethod
