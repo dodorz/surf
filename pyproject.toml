@@ -42,6 +42,7 @@ dependencies = [
     "edge-tts",
     "playsound==1.2.2",
     "trafilatura",
+    "python-dateutil",
 ]
 
 [project.optional-dependencies]

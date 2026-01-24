@@ -11,7 +11,8 @@ import warnings
 import asyncio
 import edge_tts
 from playsound import playsound
-import re
+from datetime import datetime
+from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
 import trafilatura
 
@@ -507,20 +508,32 @@ class OutputHandler:
         
         # 需要处理的标签和属性映射
         tag_attr_map = {
-            'img': ['src', 'data-src', 'data-srcset'],
-            'link': ['href'],  # stylesheet
-            'script': ['src'],
-            'video': ['src', 'poster'],
-            'audio': ['src'],
-            'source': ['src'],
+            # 媒体和图片
+            'img': ['src', 'data-src', 'data-srcset', 'srcset'],
+            'video': ['src', 'poster', 'data-src'],
+            'audio': ['src', 'data-src'],
+            'source': ['src', 'srcset'],
+            'track': ['src'],
             'embed': ['src'],
             'object': ['data'],
             'iframe': ['src'],
-            'a': ['href'],  # 链接也可能需要
+            'svg': ['data', 'href'],  # SVG引用
+            # 链接和导航
+            'a': ['href'],
             'area': ['href'],
             'base': ['href'],
+            'link': ['href'],  # stylesheet, favicon等
+            # 脚本和样式
+            'script': ['src', 'href'],
+            'style': ['href'],
+            # 表单
             'form': ['action'],
             'input': ['src'],
+            'button': ['formaction'],
+            # 其他
+            'ins': ['cite'],
+            'del': ['cite'],
+            'blockquote': ['cite'],
         }
         
         for tag, attrs in tag_attr_map.items():
@@ -547,7 +560,8 @@ class OutputHandler:
             处理后的Markdown内容
         """
         from urllib.parse import urljoin
-        
+        from bs4 import BeautifulSoup
+
         # 处理图片链接: ![alt](url)
         def replace_image_url(match):
             alt_text = match.group(1)
@@ -556,9 +570,9 @@ class OutputHandler:
                 absolute_url = urljoin(base_url, url)
                 return f'![{alt_text}]({absolute_url})'
             return match.group(0)
-        
+
         md_content = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replace_image_url, md_content)
-        
+
         # 处理链接: [text](url)
         def replace_link_url(match):
             text = match.group(1)
@@ -567,13 +581,140 @@ class OutputHandler:
                 absolute_url = urljoin(base_url, url)
                 return f'[{text}]({absolute_url})'
             return match.group(0)
-        
+
         md_content = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace_link_url, md_content)
-        
+
+        # 处理内联HTML标签中的URL（如 <video src="...">、<audio src="..."> 等）
+        def convert_html_attrs_in_md(match):
+            html_tag = match.group(0)
+            soup = BeautifulSoup(html_tag, 'html.parser')
+            tag = soup.find()
+
+            if tag:
+                tag_attr_map = {
+                    'img': ['src', 'data-src', 'data-srcset', 'srcset'],
+                    'video': ['src', 'poster', 'data-src'],
+                    'audio': ['src', 'data-src'],
+                    'source': ['src', 'srcset'],
+                    'track': ['src'],
+                    'embed': ['src'],
+                    'object': ['data'],
+                    'iframe': ['src'],
+                    'svg': ['data', 'href'],
+                    'script': ['src', 'href'],
+                    'a': ['href'],
+                    'link': ['href'],
+                }
+
+                tag_name = tag.name
+                if tag_name in tag_attr_map:
+                    for attr in tag_attr_map[tag_name]:
+                        url = tag.get(attr)
+                        if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                            tag[attr] = urljoin(base_url, url)
+
+            return str(soup)
+
+        # 匹配自闭合标签如 <img src="...">、<video src="..."> 等
+        md_content = re.sub(r'<([a-zA-Z][a-zA-Z0-9]*)\s+[^>]*>', convert_html_attrs_in_md, md_content)
+
         return md_content
 
     @staticmethod
-    def save_markdown(title, content, config, output_path=None, base_url=None):
+    def _extract_metadata(html_content):
+        """
+        从HTML中提取元数据用于YAML front matter。
+        
+        Args:
+            html_content: 原始HTML内容
+            
+        Returns:
+            dict: 包含title, created, keywords的字典
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        metadata = {
+            'title': None,
+            'created': None,
+            'updated': None,
+            'tags': []
+        }
+        
+        # 提取title元素
+        title_tag = soup.find('title')
+        if title_tag:
+            metadata['title'] = title_tag.get_text(strip=True)
+        
+        # 提取发布日期 - 尝试多种常见的meta标签
+        date_selectors = [
+            ('meta', {'property': 'article:published_time'}),
+            ('meta', {'name': 'publishdate'}),
+            ('meta', {'name': 'date'}),
+            ('meta', {'property': 'og:published_time'}),
+            ('meta', {'name': 'pubdate'}),
+        ]
+        
+        for tag_name, attrs in date_selectors:
+            date_tag = soup.find(tag_name, attrs)
+            if date_tag:
+                date_value = date_tag.get('content') or date_tag.get('value')
+                if date_value:
+                    try:
+                        # 尝试解析日期
+                        parsed_date = date_parser.parse(date_value)
+                        metadata['created'] = parsed_date.strftime('%Y-%m-%d')
+                        break
+                    except (ValueError, TypeError):
+                        pass
+        
+        # 提取keywords作为tags
+        keywords_tag = soup.find('meta', {'name': 'keywords'})
+        if keywords_tag:
+            keywords_value = keywords_tag.get('content') or keywords_tag.get('value')
+            if keywords_value:
+                # 分割关键词为列表
+                tags = [tag.strip() for tag in keywords_value.split(',') if tag.strip()]
+                metadata['tags'] = tags
+        
+        # 设置updated为当前时间
+        metadata['updated'] = datetime.now().strftime('%Y-%m-%d')
+        
+        return metadata
+    
+    @staticmethod
+    def _generate_yaml_frontmatter(metadata):
+        """
+        生成YAML front matter字符串。
+        
+        Args:
+            metadata: 元数据字典
+            
+        Returns:
+            str: YAML格式的front matter
+        """
+        lines = ['---']
+        
+        if metadata.get('title'):
+            # 转义特殊字符
+            title = metadata['title'].replace('"', '\\"')
+            lines.append(f'title: "{title}"')
+        
+        if metadata.get('created'):
+            lines.append(f'created: {metadata["created"]}')
+        
+        if metadata.get('updated'):
+            lines.append(f'updated: {metadata["updated"]}')
+        
+        if metadata.get('tags') and len(metadata['tags']) > 0:
+            lines.append('tags:')
+            for tag in metadata['tags']:
+                lines.append(f'  - "{tag}"')
+        
+        lines.append('---\n')
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None):
         """
         Save content as Markdown file.
         
@@ -583,6 +724,7 @@ class OutputHandler:
             config: Config object
             output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs
+            html_content: Original HTML content for metadata extraction
         """
         md_dir = config.get('Output', 'md_dir', fallback='./notes')
         if not os.path.exists(md_dir):
@@ -611,8 +753,15 @@ class OutputHandler:
         if base_url:
             content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
         
+        # Generate YAML front matter if html_content is provided
+        yaml_frontmatter = ''
+        if html_content:
+            metadata = OutputHandler._extract_metadata(html_content)
+            yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
+        
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(yaml_frontmatter)
                 f.write(content)
             logger.info(f"Markdown saved to {filepath}")
         except Exception as e:
@@ -1021,6 +1170,12 @@ Examples:
             md_content = translated_md
             title = translated_title
 
+    # 4.5 Convert relative URLs to absolute (after translation, before output)
+    if args.url:
+        md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, args.url)
+        # Also convert HTML URLs for HTML output
+        cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, args.url)
+
     # 5. Output
     # Determine output path
     output_path = args.output if args.output else None
@@ -1031,19 +1186,19 @@ Examples:
             OutputHandler.generate_pdf(title, md_content, config, output_path)
         else:
             OutputHandler.generate_pdf(title, md_content, config)
-    
+
     elif output_format == 'html':
         if output_path:
-            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path, base_url=args.url)
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path)
         else:
-            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, base_url=args.url)
-    
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
+
     elif output_format == 'audio':
         if output_path:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
         else:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak)
-    
+
     else:  # md (default)
         if output_path:
             if output_path == '-':
@@ -1051,13 +1206,13 @@ Examples:
                 print(f"# {title}\n")
                 print(md_content)
             else:
-                OutputHandler.save_markdown(title, md_content, config, output_path, base_url=args.url)
+                OutputHandler.save_markdown(title, md_content, config, output_path, html_content=html_content)
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
         else:
-            # Default: Print content to stdout
-            print(f"# {title}\n")
-            print(md_content)
+            # Default: Save to default md_dir
+            md_dir = config.get('Output', 'md_dir', fallback='./notes')
+            OutputHandler.save_markdown(title, md_content, config, html_content=html_content)
 
 
 if __name__ == "__main__":
