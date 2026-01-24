@@ -714,7 +714,7 @@ class OutputHandler:
         return '\n'.join(lines)
     
     @staticmethod
-    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None):
+    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True):
         """
         Save content as Markdown file.
         
@@ -725,6 +725,7 @@ class OutputHandler:
             output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs
             html_content: Original HTML content for metadata extraction
+            add_front_matter: Whether to add YAML front matter (default: True)
         """
         md_dir = config.get('Output', 'md_dir', fallback='./notes')
         if not os.path.exists(md_dir):
@@ -753,9 +754,9 @@ class OutputHandler:
         if base_url:
             content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
         
-        # Generate YAML front matter if html_content is provided
+        # Generate YAML front matter if html_content is provided and add_front_matter is True
         yaml_frontmatter = ''
-        if html_content:
+        if html_content and add_front_matter:
             metadata = OutputHandler._extract_metadata(html_content)
             yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
         
@@ -1054,6 +1055,8 @@ Examples:
                         help="Path to config file")
     parser.add_argument("--verbose", action="store_true", 
                         help="Enable verbose logging")
+    parser.add_argument("--no-front-matter", action="store_true",
+                        help="Disable YAML front matter in markdown output")
     parser.add_argument("--version", action="version", 
                         version=f"%(prog)s {__version__}")
     parser.add_argument("--help", action="help", help="Show this help message")
@@ -1206,13 +1209,13 @@ Examples:
                 print(f"# {title}\n")
                 print(md_content)
             else:
-                OutputHandler.save_markdown(title, md_content, config, output_path, html_content=html_content)
+                OutputHandler.save_markdown(title, md_content, config, output_path, html_content=html_content, add_front_matter=not args.no_front_matter)
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
         else:
             # Default: Save to default md_dir
             md_dir = config.get('Output', 'md_dir', fallback='./notes')
-            OutputHandler.save_markdown(title, md_content, config, html_content=html_content)
+            OutputHandler.save_markdown(title, md_content, config, html_content=html_content, add_front_matter=not args.no_front_matter)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 - [x] 增加是否翻译的选项
-- Markdown的YAML元数据
+- [x] Markdown的YAML元数据
 - 中间产物缓存(在本地磁盘缓存中间结果（获取的网页、转换的markdown、翻译的结果、各自的元数据（headers、status_code、fetched_at、is_dynamic、content_hash））。遵循 HTTP 缓存头逻辑（Cache-Control、Expires、ETag、Last-Modified）进行新鲜度判断与条件请求（If-None-Match、If-Modified-Since）。在服务器返回 304 时复用本地缓存并更新元数据；返回 200 时替换缓存；遇 5xx 可按配置返回过期缓存（max-stale）。)
 - 调试模式，可查中间文件
 - 解决twitter图片消失问题
