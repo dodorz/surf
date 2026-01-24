@@ -591,6 +591,12 @@ class OutputHandler:
         # Determine filepath
         if output_path:
             filepath = output_path
+            # Handle special cases: "." or "./" (current directory)
+            if filepath == "." or filepath == "./":
+                # Use current directory + default filename
+                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+                filename = f"{safe_title}.md"
+                filepath = os.path.join(".", filename)
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
             if filepath_dir and not os.path.exists(filepath_dir):
@@ -869,8 +875,8 @@ Examples:
     lang_group = parser.add_mutually_exclusive_group()
     lang_group.add_argument("-l", "--lang", choices=['trans', 'raw', 'both'], 
                         help="Language mode: trans=translate, raw=original, both=bilingual (default: trans)")
-    lang_group.add_argument("-r", help="Shorthand for --lang raw")
-    lang_group.add_argument("-b", help="Shorthand for --lang both")
+    lang_group.add_argument("-r", action="store_true", help="Shorthand for --lang raw")
+    lang_group.add_argument("-b", action="store_true", help="Shorthand for --lang both")
     
     # TTS
     parser.add_argument("-s", "--speak", action="store_true", 
@@ -883,8 +889,8 @@ Examples:
     # Network
     parser.add_argument("-x", "--proxy", choices=['win', 'custom', 'no'], 
                         help="Proxy mode: win=Windows, custom=use --set-proxy, no=no proxy (default: auto)")
-    parser.add_argument("-c", help="Shorthand for --proxy custom")
-    parser.add_argument("-n", help="Shorthand for --proxy no")
+    parser.add_argument("-c", action="store_true", help="Shorthand for --proxy custom")
+    parser.add_argument("-n", action="store_true", help="Shorthand for --proxy no")
     parser.add_argument("--set-proxy", 
                         help="Custom proxy URL (requires -x custom)")
     
@@ -1028,9 +1034,9 @@ Examples:
     
     elif output_format == 'html':
         if output_path:
-            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path)
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path, base_url=args.url)
         else:
-            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, base_url=args.url)
     
     elif output_format == 'audio':
         if output_path:
@@ -1045,7 +1051,7 @@ Examples:
                 print(f"# {title}\n")
                 print(md_content)
             else:
-                OutputHandler.save_markdown(title, md_content, config, output_path)
+                OutputHandler.save_markdown(title, md_content, config, output_path, base_url=args.url)
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
         else:
