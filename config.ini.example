@@ -1,8 +1,18 @@
 [LLM]
-; OpenAI-compatible API configuration
+; Default LLM provider name
+provider = L1
+
+[LLM.L1]
+; OpenAI-compatible API configuration for L1
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
+
+[LLM.L2]
+; Additional LLM provider example (DeepSeek)
+base_url = https://api.deepseek.com/v1
+api_key = your_deepseek_api_key
+model = deepseek-chat
 
 [Output]
 ; Directory to save Markdown notes

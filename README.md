@@ -6,12 +6,14 @@
 
 ## Features
 
-*   **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-*   **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
-*   **Translation Modes**: Choose between `original` (no translation), `translated` (default), or `both` (bilingual).
+- **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
+- **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
+- **Translation Modes**: Choose between `original` (no translation), `translated` (default), or `both` (bilingual).
 
 ### Translation Mode
+
 By default, the content is translated to the target language. Use `--trans-mode` or short flags to change this:
+
 - `-o`, `--original`: No translation.
 - `translated`: Only the translation (default).
 - `-b`, `--both`: Bilingual output.
@@ -24,16 +26,17 @@ uv run surf.py "https://example.com" -b
 uv run surf.py "https://example.com" -o
 ```
 
-*   **PDF Generation**: Generate PDF files using Playwright.
-*   **Note Integration**: Automatically saves files to your designated notes folder.
-*   **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
-*   **Flexible Proxy**: Configurable proxy settings (System Default, Custom, or None) via `config.ini`.
+- **PDF Generation**: Generate PDF files using Playwright.
+- **Note Integration**: Automatically saves files to your designated notes folder.
+- **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
+- **Flexible Proxy**: Configurable proxy settings (System Default, Custom, or None) via `config.ini`.
 
 ## Installation
 
 We recommend using `uv` for a clean environment.
 
 1.  **Install uv**:
+
     ```bash
     pip install uv
     # or follow https://github.com/astral-sh/uv
@@ -55,9 +58,20 @@ cp config.ini.example config.ini
 
 ```ini
 [LLM]
+; Default LLM provider name
+provider = L1
+
+[LLM.L1]
+; OpenAI-compatible API configuration for L1
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
+
+[LLM.L2]
+; Additional LLM provider example (DeepSeek)
+base_url = https://api.deepseek.com/v1
+api_key = your_deepseek_api_key
+model = deepseek-chat
 
 [Output]
 note_dir = ./notes
@@ -66,6 +80,8 @@ target_language = zh-cn
 pdf_dir = .
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
+; Directory to save HTML files (default: current directory)
+html_dir = .
 
 [TTS]
 engine = edge-tts
@@ -83,39 +99,49 @@ custom_proxy =
 ## Usage
 
 ### Basic
+
 Convert a URL and print Markdown to console.
+
 ```bash
 uv run surf.py "https://example.com"
 ```
 
 ### Save Note (-n)
+
 Save to the configured `note_dir`.
+
 ```bash
 uv run surf.py "https://example.com" -n
 ```
 
 ### Generate PDF (-p)
+
 Generate a PDF file using Playwright (the default and only engine):
-*   **playwright**: Highly reliable, uses the installed browser.
+
+- **playwright**: Highly reliable, uses the installed browser.
 
 ```bash
 uv run surf.py "https://example.com" -p
 ```
 
-
 ### Text-to-Speech (-a / -s)
+
 Save content as an MP3 audio file:
+
 ```bash
 uv run surf.py "https://example.com" -a
 ```
 
 Read content aloud (requires local audio output):
+
 ```bash
 uv run surf.py "https://example.com" -s
 ```
 
 ### Force Browser
+
 Force using Playwright (useful for tricky sites).
+
 ```bash
 uv run surf.py "https://example.com" --browser
 ```

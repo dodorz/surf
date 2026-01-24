@@ -29,9 +29,42 @@ class Config:
         if not os.path.exists(config_path):
             logger.warning(f"Config file {config_path} not found. Using defaults.")
         self.config.read(config_path)
+        
+        # Set default LLM provider
+        self.llm_provider = self.get('LLM', 'provider', fallback='L1')
 
     def get(self, section, key, fallback=None):
         return self.config.get(section, key, fallback=fallback)
+        
+    def get_llm_config(self, provider_override=None):
+        """Get LLM configuration for the specified provider or the default one.
+        
+        Args:
+            provider_override (str, optional): Override the default LLM provider.
+            
+        Returns:
+            dict: Dictionary containing base_url, api_key, and model for the LLM provider.
+            
+        Raises:
+            ValueError: If the specified LLM provider is not found in the config.
+        """
+        provider = provider_override or self.llm_provider
+        section = f'LLM.{provider}'
+        
+        if not self.config.has_section(section):
+            raise ValueError(f"LLM provider '{provider}' not found in config. "
+                           f"Available providers: {self._get_available_llm_providers()}")
+            
+        return {
+            'base_url': self.get(section, 'base_url'),
+            'api_key': self.get(section, 'api_key'),
+            'model': self.get(section, 'model')
+        }
+        
+    def _get_available_llm_providers(self):
+        """Get a list of available LLM provider names from the config."""
+        return [section.split('.')[1] for section in self.config.sections() 
+                if section.startswith('LLM.')]
 
 class Fetcher:
     @staticmethod
@@ -300,11 +333,20 @@ class ContentProcessor:
             
         return chunks
 
-    @staticmethod
-    def translate_if_needed(text, title=None, target_lang='zh-cn', config=None):
+    @classmethod
+    def translate_if_needed(cls, text, title=None, target_lang='zh-cn', config=None, llm_provider=None):
         """
         Detects language and translates (content + title) if necessary using chunking.
-        Returns: (translated_text, translated_title)
+        
+        Args:
+            text (str): The text to translate
+            title (str, optional): The title to translate
+            target_lang (str): Target language code (default: 'zh-cn')
+            config: Config object
+            llm_provider (str, optional): Override the default LLM provider
+            
+        Returns:
+            tuple: (translated_text, translated_title)
         """
         try:
             lang = detect(text[:1000]) # Detect based on first 1000 chars
@@ -326,9 +368,17 @@ class ContentProcessor:
         try:
             from openai import OpenAI
             
+            # Get LLM configuration
+            try:
+                llm_config = config.get_llm_config(llm_provider)
+                logger.info(f"Using LLM provider: {llm_provider or 'default'}")
+            except ValueError as e:
+                logger.error(f"LLM configuration error: {e}")
+                return text, title
+            
             client = OpenAI(
-                base_url=config.get('LLM', 'base_url'),
-                api_key=config.get('LLM', 'api_key'),
+                base_url=llm_config['base_url'],
+                api_key=llm_config['api_key']
             )
             
             # 1. Translate Title (if provided)
@@ -337,7 +387,7 @@ class ContentProcessor:
                 logger.info("Translating title...")
                 try:
                     t_completion = client.chat.completions.create(
-                        model=config.get('LLM', 'model'),
+                        model=llm_config['model'],
                         messages=[
                             {"role": "system", "content": f"Translate the following title to {target_lang}. Output ONLY the translation."},
                             {"role": "user", "content": title}
@@ -349,7 +399,7 @@ class ContentProcessor:
                     logger.error(f"Title translation failed: {e}")
 
             # 2. Translate Content (Chunked)
-            chunks = ContentProcessor._chunk_text(text)
+            chunks = cls._chunk_text(text)
             translated_chunks = []
             
             total_chunks = len(chunks)
@@ -358,7 +408,7 @@ class ContentProcessor:
             for i, chunk in enumerate(chunks):
                 logger.info(f"Translating chunk {i+1}/{total_chunks} ({len(chunk)} chars)...")
                 completion = client.chat.completions.create(
-                    model=config.get('LLM', 'model'),
+                    model=llm_config['model'],
                     messages=[
                         {"role": "system", "content": f"You are a helpful translator. Translate the following Markdown content to {target_lang}. Preserve the Markdown formatting strictly. Output ONLY the translated markdown."},
                         {"role": "user", "content": chunk}
@@ -511,6 +561,8 @@ def main():
                         help="Proxy mode: default (env/system), none (no proxy), custom (use --proxy) | 代理模式")
     parser.add_argument("--proxy", 
                         help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
+    parser.add_argument("--llm", 
+                        help="Override the default LLM provider (e.g., L1, L2) | 指定LLM提供方")
     
     args = parser.parse_args()
     config = Config()
@@ -562,7 +614,16 @@ def main():
         original_md = md_content
         original_title = title
         
-        translated_md, translated_title = ContentProcessor.translate_if_needed(md_content, title=title, target_lang=target_lang, config=config)
+        # Get LLM provider from command line if specified
+        llm_provider = args.llm if hasattr(args, 'llm') else None
+        
+        translated_md, translated_title = ContentProcessor.translate_if_needed(
+            md_content, 
+            title=title, 
+            target_lang=target_lang, 
+            config=config,
+            llm_provider=llm_provider
+        )
         
         if trans_mode == 'both':
             logger.info("Translation mode set to 'both'. Combining original and translation.")
