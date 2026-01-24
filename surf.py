@@ -860,9 +860,8 @@ def main():
 
     if not args.note and not args.pdf and not args.audio and not args.speak and not args.html and not args.html_inline:
         # Default: Print content to stdout
-        print("\n--- FINAL CONTENT PREVIEW ---\n")
         print(f"# {title}\n")
-        print(md_content[:500] + "..." if len(md_content) > 500 else md_content)
+        print(md_content)
 
 
 if __name__ == "__main__":
