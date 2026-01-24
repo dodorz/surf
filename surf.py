@@ -18,9 +18,16 @@ import trafilatura
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging (default: WARNING level, no timestamps)
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+def setup_verbose_logging():
+    """Enable verbose logging with timestamps."""
+    logging.getLogger().setLevel(logging.INFO)
+    # Update existing handlers
+    for handler in logging.getLogger().handlers:
+        handler.setFormat('%(asctime)s - %(levelname)s - %(message)s')
 
 class Config:
     def __init__(self, config_path='config.ini'):
@@ -808,8 +815,14 @@ def main():
                         help="Save as HTML file | 保存为HTML文件")
     parser.add_argument("--html-inline", action="store_true", 
                         help="Save as HTML with inline CSS/JS | 保存HTML并将外部资源内联化")
+    parser.add_argument("--verbose", action="store_true", 
+                        help="Enable verbose logging | 启用详细日志输出")
     
     args = parser.parse_args()
+    
+    # Enable verbose logging if requested
+    if args.verbose:
+        setup_verbose_logging()
     config = Config()
     
     # Validate proxy arguments
