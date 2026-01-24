@@ -123,6 +123,21 @@ uv run surf.py "https://example.com" -o
 uv run surf.py "https://example.com" -p
 ```
 
+### 保存 HTML (--html / --html-inline)
+
+保存为 HTML 文件：
+
+- `--html`: 保存原始 HTML
+- `--html-inline`: 将外部 CSS/JS 资源内联化，生成自包含的 HTML 文件
+
+```bash
+# 保存 HTML 文件
+uv run surf.py "https://example.com" --html
+
+# 保存 HTML 并内联 CSS/JS（生成自包含文件）
+uv run surf.py "https://example.com" --html-inline
+```
+
 ### 文本转语音 (-a / -s)
 
 将内容保存为 MP3 音频文件：

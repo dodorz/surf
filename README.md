@@ -124,6 +124,21 @@ Generate a PDF file using Playwright (the default and only engine):
 uv run surf.py "https://example.com" -p
 ```
 
+### Save HTML (--html / --html-inline)
+
+Save content as HTML files:
+
+- `--html`: Save raw HTML
+- `--html-inline`: Inline external CSS/JS resources for standalone HTML files
+
+```bash
+# Save HTML file
+uv run surf.py "https://example.com" --html
+
+# Save HTML with inlined CSS/JS (self-contained file)
+uv run surf.py "https://example.com" --html-inline
+```
+
 ### Text-to-Speech (-a / -s)
 
 Save content as an MP3 audio file:

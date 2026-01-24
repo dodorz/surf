@@ -23,6 +23,8 @@ target_language = zh-cn
 pdf_dir = .
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
+; Directory to save HTML files (default: current directory)
+html_dir = .
 
 [PDF]
 ; PDF engine: weasyprint, playwright, pandoc, wkhtmltopdf

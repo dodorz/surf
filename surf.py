@@ -499,6 +499,95 @@ class OutputHandler:
         else:
             logger.error("Failed to generate PDF.")
 
+    @staticmethod
+    def save_html(title, html_content, config, inline=False):
+        """
+        Save content as HTML file.
+        
+        Args:
+            title: Document title
+            html_content: HTML content to save
+            config: Config object
+            inline: If True, inline CSS and JS for standalone HTML
+        """
+        html_dir = config.get('Output', 'html_dir', fallback='.')
+        if not os.path.exists(html_dir):
+            os.makedirs(html_dir)
+        
+        # Sanitize filename
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+        safe_title = safe_title[:100]
+        
+        if inline:
+            html_content = OutputHandler._inline_resources(html_content)
+        
+        output_path = os.path.join(html_dir, f"{safe_title}.html")
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"HTML saved to {output_path} (inline={inline})")
+        return output_path
+
+    @staticmethod
+    def _inline_resources(html_content):
+        """
+        Inline CSS and JS resources in HTML content.
+        
+        Args:
+            html_content: Raw HTML content
+            
+        Returns:
+            HTML with inlined CSS and JS
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Inline CSS
+        for link in soup.find_all('link', rel='stylesheet'):
+            href = link.get('href')
+            if href:
+                try:
+                    if not href.startswith(('http://', 'https://', 'data:')):
+                        logger.warning(f"Skipping relative CSS: {href}")
+                        continue
+                    
+                    response = requests.get(href, timeout=10)
+                    if response.status_code == 200:
+                        style = soup.new_tag('style')
+                        style.string = response.text
+                        link.replace_with(style)
+                        logger.info(f"Inlined CSS: {href}")
+                except Exception as e:
+                    logger.warning(f"Failed to inline CSS {href}: {e}")
+        
+        # Inline JS
+        for script in soup.find_all('script', src=True):
+            src = script.get('src')
+            if src:
+                try:
+                    if not src.startswith(('http://', 'https://', 'data:')):
+                        logger.warning(f"Skipping relative JS: {src}")
+                        continue
+                    
+                    response = requests.get(src, timeout=10)
+                    if response.status_code == 200:
+                        new_script = soup.new_tag('script')
+                        new_script.string = response.text
+                        script.replace_with(new_script)
+                        logger.info(f"Inlined JS: {src}")
+                except Exception as e:
+                    logger.warning(f"Failed to inline JS {src}: {e}")
+        
+        # Add meta charset if missing
+        if not soup.find('meta', charset=True):
+            head = soup.find('head')
+            if head:
+                meta = soup.new_tag('meta')
+                meta['charset'] = 'utf-8'
+                head.insert(0, meta)
+        
+        return str(soup)
+
 class TTSHandler:
     @staticmethod
     async def generate_speech(text, output_file, config):
@@ -563,6 +652,10 @@ def main():
                         help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
     parser.add_argument("--llm", 
                         help="Override the default LLM provider (e.g., L1, L2) | 指定LLM提供方")
+    parser.add_argument("--html", action="store_true", 
+                        help="Save as HTML file | 保存为HTML文件")
+    parser.add_argument("--html-inline", action="store_true", 
+                        help="Save as HTML with inline CSS/JS | 保存HTML并将外部资源内联化")
     
     args = parser.parse_args()
     config = Config()
@@ -647,6 +740,12 @@ def main():
     if args.pdf:
         OutputHandler.generate_pdf(title, md_content, config)
 
+    if args.html:
+        OutputHandler.save_html(title, cleaned_html, config, inline=False)
+
+    if args.html_inline:
+        OutputHandler.save_html(title, cleaned_html, config, inline=True)
+
     if args.audio or args.speak:
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
         
@@ -659,7 +758,7 @@ def main():
             
         TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=audio_filename)
 
-    if not args.note and not args.pdf and not args.audio and not args.speak:
+    if not args.note and not args.pdf and not args.audio and not args.speak and not args.html and not args.html_inline:
         # Default: Print content to stdout
         print("\n--- FINAL CONTENT PREVIEW ---\n")
         print(f"# {title}\n")
