@@ -15,6 +15,9 @@ import re
 from bs4 import BeautifulSoup
 import trafilatura
 
+# Version: 1.0.0.0
+__version__ = "1.0.0.0"
+
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
@@ -570,24 +573,33 @@ class OutputHandler:
         return md_content
 
     @staticmethod
-    def save_note(title, content, config, base_url=None):
+    def save_markdown(title, content, config, output_path=None, base_url=None):
         """
-        Save content as Markdown file, converting relative URLs to absolute.
+        Save content as Markdown file.
         
         Args:
             title: Document title
             content: Markdown content to save
             config: Config object
+            output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs
         """
-        note_dir = config.get('Output', 'note_dir', fallback='./notes')
-        if not os.path.exists(note_dir):
-            os.makedirs(note_dir)
+        md_dir = config.get('Output', 'md_dir', fallback='./notes')
+        if not os.path.exists(md_dir):
+            os.makedirs(md_dir)
         
-        # Simple sanitization
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        filename = f"{safe_title}.md"
-        filepath = os.path.join(note_dir, filename)
+        # Determine filepath
+        if output_path:
+            filepath = output_path
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            # Simple sanitization
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            filename = f"{safe_title}.md"
+            filepath = os.path.join(md_dir, filename)
         
         # Convert relative URLs to absolute if base_url is provided
         if base_url:
@@ -596,9 +608,16 @@ class OutputHandler:
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(content)
-            logger.info(f"Note saved to {filepath}")
+            logger.info(f"Markdown saved to {filepath}")
         except Exception as e:
-            logger.error(f"Failed to save note: {e}")
+            logger.error(f"Failed to save markdown: {e}")
+        
+        return filepath
+    
+    @staticmethod
+    def save_note(title, content, config, base_url=None):
+        """Backward compatibility wrapper for save_markdown."""
+        return OutputHandler.save_markdown(title, content, config, base_url=base_url)
 
     @staticmethod
     def _generate_with_playwright(full_html, filepath, config):
@@ -616,7 +635,7 @@ class OutputHandler:
             return False
 
     @staticmethod
-    def generate_pdf(title, md_content, config):
+    def generate_pdf(title, md_content, config, output_path=None):
         logger.info("Generating PDF...")
         
         import markdown
@@ -640,22 +659,32 @@ class OutputHandler:
         </body>
         </html>
         """
-
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        pdf_dir = config.get('Output', 'pdf_dir', fallback='.')
-        if not os.path.exists(pdf_dir):
-            os.makedirs(pdf_dir)
-        filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
-
+        
+        # Determine filepath
+        if output_path:
+            filepath = output_path
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            pdf_dir = config.get('Output', 'pdf_dir', fallback='.')
+            if not os.path.exists(pdf_dir):
+                os.makedirs(pdf_dir)
+            filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
+        
         success = OutputHandler._generate_with_playwright(full_html, filepath, config)
-
+        
         if success:
             logger.info(f"PDF saved to {filepath}")
         else:
             logger.error("Failed to generate PDF.")
+        
+        return filepath
 
     @staticmethod
-    def save_html(title, html_content, config, inline=False, base_url=None):
+    def save_html(title, html_content, config, inline=False, output_path=None, base_url=None):
         """
         Save content as HTML file.
         
@@ -664,6 +693,7 @@ class OutputHandler:
             html_content: HTML content to save
             config: Config object
             inline: If True, inline CSS and JS for standalone HTML
+            output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs (used when inline=False)
         """
         html_dir = config.get('Output', 'html_dir', fallback='.')
@@ -680,13 +710,21 @@ class OutputHandler:
             # Convert relative URLs to absolute for non-inline HTML
             html_content = OutputHandler._convert_urls_to_absolute(html_content, base_url)
         
-        output_path = os.path.join(html_dir, f"{safe_title}.html")
+        # Determine filepath
+        if output_path:
+            filepath = output_path
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            filepath = os.path.join(html_dir, f"{safe_title}.html")
         
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(filepath, 'w', encoding='utf-8') as f:
             f.write(html_content)
         
-        logger.info(f"HTML saved to {output_path} (inline={inline})")
-        return output_path
+        logger.info(f"HTML saved to {filepath} (inline={inline})")
+        return filepath
 
     @staticmethod
     def _inline_resources(html_content):
@@ -794,54 +832,134 @@ class TTSHandler:
             logger.error(f"TTS operation failed: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert URL to Markdown/PDF")
-    parser.add_argument("url", help="The URL to process")
-    parser.add_argument("-p", "--pdf", action="store_true", help="Generate PDF")
-    parser.add_argument("-n", "--note", action="store_true", help="Save to note directory")
-    parser.add_argument("-a", "--audio", action="store_true", help="Save as audio file | 保存为音频文件")
-    parser.add_argument("-s", "--speak", action="store_true", help="Speak the content | 朗读内容")
-    parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
-    parser.add_argument("--trans-mode", choices=['original', 'translated', 'both'], default='translated', 
-                        help="Translation mode (default: translated)")
-    parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
-    parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
-    parser.add_argument("-x", "--proxy-mode", choices=['auto', 'no', 'win', 'custom'], 
-                        help="Proxy mode: auto (env), none (no proxy), win (Windows), custom (use --proxy) | 代理模式")
-    parser.add_argument("--proxy", 
-                        help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
-    parser.add_argument("--llm", 
-                        help="Override the default LLM provider (e.g., L1, L2) | 指定LLM提供方")
-    parser.add_argument("--html", action="store_true", 
-                        help="Save as HTML file | 保存为HTML文件")
+    parser = argparse.ArgumentParser(
+        prog='uv run surf',
+        description="Surf - Convert URL to Markdown/PDF/HTML/Audio",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+        epilog="""
+Examples:
+  surf https://example.com                      # Translate to Chinese
+  surf -p https://example.com                   # Generate PDF
+  surf -h https://example.com                   # Save as HTML
+  surf -a https://example.com                   # Save as audio
+  surf -r https://example.com                   # Keep original language
+  surf -b https://example.com                   # Bilingual output
+  surf -x win https://example.com               # Use Windows proxy
+  surf -n https://example.com                   # No proxy
+  surf -hrn https://example.com                 # Combined short flags
+        """
+    )
+    # Position argument
+    parser.add_argument("url", help="URL to process")
+    
+    # Output format
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument("-f", "--format", choices=['md', 'pdf', 'html', 'audio'], 
+                        help="Output format: md/pdf/html/audio (default: md)")
+    format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
+    format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
+    format_group.add_argument("-a", action="store_true", help="Shorthand for --format audio")
+    
+    # Output path
+    parser.add_argument("-o", "--output", 
+                        help="Output file path (use '-' for stdout, overrides config)")
+    
+    # Language mode
+    lang_group = parser.add_mutually_exclusive_group()
+    lang_group.add_argument("-l", "--lang", choices=['trans', 'raw', 'both'], 
+                        help="Language mode: trans=translate, raw=original, both=bilingual (default: trans)")
+    lang_group.add_argument("-r", help="Shorthand for --lang raw")
+    lang_group.add_argument("-b", help="Shorthand for --lang both")
+    
+    # TTS
+    parser.add_argument("-s", "--speak", action="store_true", 
+                        help="Speak the content")
+    
+    # HTML options
     parser.add_argument("--html-inline", action="store_true", 
-                        help="Save as HTML with inline CSS/JS | 保存HTML并将外部资源内联化")
+                        help="Inline CSS/JS in HTML output")
+    
+    # Network
+    parser.add_argument("-x", "--proxy", choices=['win', 'custom', 'no'], 
+                        help="Proxy mode: win=Windows, custom=use --set-proxy, no=no proxy (default: auto)")
+    parser.add_argument("-c", help="Shorthand for --proxy custom")
+    parser.add_argument("-n", help="Shorthand for --proxy no")
+    parser.add_argument("--set-proxy", 
+                        help="Custom proxy URL (requires -x custom)")
+    
+    # LLM
+    parser.add_argument("--llm", 
+                        help="Override the default LLM provider")
+    
+    # Other options
+    parser.add_argument("--browser", action="store_true", 
+                        help="Force use of browser (Playwright)")
+    parser.add_argument("--config", 
+                        help="Path to config file")
     parser.add_argument("--verbose", action="store_true", 
-                        help="Enable verbose logging | 启用详细日志输出")
+                        help="Enable verbose logging")
+    parser.add_argument("--version", action="version", 
+                        version=f"%(prog)s {__version__}")
+    parser.add_argument("--help", action="help", help="Show this help message")
     
     args = parser.parse_args()
     
     # Enable verbose logging if requested
     if args.verbose:
         setup_verbose_logging()
-    config = Config()
+    
+    # Determine config path
+    config_path = args.config if args.config else 'config.ini'
+    config = Config(config_path)
     
     # Validate proxy arguments
-    if args.proxy and args.proxy_mode != 'custom':
-        parser.error("--proxy requires --proxy-mode custom")
-    if args.proxy_mode == 'custom' and not args.proxy:
-        parser.error("--proxy-mode custom requires --proxy")
-
-    # Determine final translation mode
-    trans_mode = args.trans_mode
-    if args.original:
-        trans_mode = 'original'
-    elif args.both:
-        trans_mode = 'both'
+    if args.set_proxy and args.proxy != 'custom':
+        parser.error("--set-proxy requires -x custom")
+    if args.proxy == 'custom' and not args.set_proxy:
+        parser.error("-x custom requires --set-proxy")
+    
+    # Determine final format
+    output_format = 'md'  # default
+    if args.format:
+        output_format = args.format
+    elif args.h:
+        output_format = 'html'
+    elif args.p:
+        output_format = 'pdf'
+    elif args.a:
+        output_format = 'audio'
+    
+    # Determine final language mode
+    lang_mode = 'trans'  # default
+    if args.lang:
+        lang_mode = args.lang
+    elif args.r:
+        lang_mode = 'raw'
+    elif args.b:
+        lang_mode = 'both'
+    
+    # Determine proxy mode override
+    proxy_mode = None  # use config default (auto)
+    if args.proxy:
+        proxy_mode = args.proxy
+    elif args.c:
+        proxy_mode = 'custom'
+    elif args.n:
+        proxy_mode = 'no'
+    
+    # Determine custom proxy
+    custom_proxy = args.set_proxy
 
     # 1. Fetch
     try:
-        html_content = Fetcher.fetch(args.url, config=config, use_browser=args.browser, 
-                                     proxy_mode_override=args.proxy_mode, custom_proxy_override=args.proxy)
+        html_content = Fetcher.fetch(
+            args.url, 
+            config=config, 
+            use_browser=args.browser, 
+            proxy_mode_override=proxy_mode, 
+            custom_proxy_override=custom_proxy
+        )
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
         sys.exit(1)
@@ -866,8 +984,8 @@ def main():
     # 4. Translate
     target_lang = config.get('Output', 'target_language', fallback='zh-cn')
     
-    if trans_mode == 'original':
-        logger.info("Translation mode set to 'original'. Skipping translation.")
+    if lang_mode == 'raw':
+        logger.info("Language mode set to 'raw'. Skipping translation.")
     else:
         original_md = md_content
         original_title = title
@@ -883,10 +1001,9 @@ def main():
             llm_provider=llm_provider
         )
         
-        if trans_mode == 'both':
-            logger.info("Translation mode set to 'both'. Combining original and translation.")
-            # Only combine if translation actually happened (or skip logic in translate_if_needed was hit)
-            # If translate_if_needed returns the same object, we might not want to double it up.
+        if lang_mode == 'both':
+            logger.info("Language mode set to 'both'. Combining original and translation.")
+            # Only combine if translation actually happened
             if translated_md != original_md:
                 title = f"{translated_title} ({original_title})"
                 md_content = f"{translated_md}\n\n---\n\n### Original Content / 原文内容\n\n{original_md}"
@@ -898,35 +1015,43 @@ def main():
             md_content = translated_md
             title = translated_title
 
-    # Output Actions
-    if args.note:
-        OutputHandler.save_note(title, md_content, config, base_url=args.url)
+    # 5. Output
+    # Determine output path
+    output_path = args.output if args.output else None
     
-    if args.pdf:
-        OutputHandler.generate_pdf(title, md_content, config)
-
-    if args.html:
-        OutputHandler.save_html(title, cleaned_html, config, inline=False, base_url=args.url)
-
-    if args.html_inline:
-        OutputHandler.save_html(title, cleaned_html, config, inline=True)
-
-    if args.audio or args.speak:
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        
-        audio_filename = None
-        if args.audio:
-            audio_dir = config.get('Output', 'audio_dir', fallback='.')
-            if not os.path.exists(audio_dir):
-                os.makedirs(audio_dir)
-            audio_filename = os.path.join(audio_dir, f"{safe_title}.mp3")
-            
-        TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=audio_filename)
-
-    if not args.note and not args.pdf and not args.audio and not args.speak and not args.html and not args.html_inline:
-        # Default: Print content to stdout
-        print(f"# {title}\n")
-        print(md_content)
+    # Handle output based on format
+    if output_format == 'pdf':
+        if output_path:
+            OutputHandler.generate_pdf(title, md_content, config, output_path)
+        else:
+            OutputHandler.generate_pdf(title, md_content, config)
+    
+    elif output_format == 'html':
+        if output_path:
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path)
+        else:
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
+    
+    elif output_format == 'audio':
+        if output_path:
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
+        else:
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak)
+    
+    else:  # md (default)
+        if output_path:
+            if output_path == '-':
+                # Output to stdout
+                print(f"# {title}\n")
+                print(md_content)
+            else:
+                OutputHandler.save_markdown(title, md_content, config, output_path)
+        elif args.speak:
+            TTSHandler.run_tts(title, md_content, config, speak=True)
+        else:
+            # Default: Print content to stdout
+            print(f"# {title}\n")
+            print(md_content)
 
 
 if __name__ == "__main__":
