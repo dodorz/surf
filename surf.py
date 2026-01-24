@@ -428,7 +428,99 @@ class OutputHandler:
         return "".join([c for c in filename if c.alpha() or c.isdigit() or c in ' ._-']).rstrip()
 
     @staticmethod
-    def save_note(title, content, config):
+    def _convert_urls_to_absolute(html_content, base_url):
+        """
+        将HTML中的相对URL转换为绝对URL。
+        
+        Args:
+            html_content: HTML内容
+            base_url: 基础URL，用于解析相对URL
+            
+        Returns:
+            处理后的HTML内容
+        """
+        from urllib.parse import urljoin, urlparse
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 需要处理的标签和属性映射
+        tag_attr_map = {
+            'img': ['src', 'data-src', 'data-srcset'],
+            'link': ['href'],  # stylesheet
+            'script': ['src'],
+            'video': ['src', 'poster'],
+            'audio': ['src'],
+            'source': ['src'],
+            'embed': ['src'],
+            'object': ['data'],
+            'iframe': ['src'],
+            'a': ['href'],  # 链接也可能需要
+            'area': ['href'],
+            'base': ['href'],
+            'form': ['action'],
+            'input': ['src'],
+        }
+        
+        for tag, attrs in tag_attr_map.items():
+            for element in soup.find_all(tag):
+                for attr in attrs:
+                    url = element.get(attr)
+                    if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                        absolute_url = urljoin(base_url, url)
+                        element[attr] = absolute_url
+                        logger.debug(f"Converted relative URL: {url} -> {absolute_url}")
+        
+        return str(soup)
+
+    @staticmethod
+    def _convert_markdown_urls_to_absolute(md_content, base_url):
+        """
+        将Markdown中的相对URL转换为绝对URL。
+        
+        Args:
+            md_content: Markdown内容
+            base_url: 基础URL，用于解析相对URL
+            
+        Returns:
+            处理后的Markdown内容
+        """
+        from urllib.parse import urljoin
+        
+        # 处理图片链接: ![alt](url)
+        def replace_image_url(match):
+            alt_text = match.group(1)
+            url = match.group(2)
+            if url and not url.startswith(('http://', 'https://', 'data:')):
+                absolute_url = urljoin(base_url, url)
+                return f'![{alt_text}]({absolute_url})'
+            return match.group(0)
+        
+        md_content = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replace_image_url, md_content)
+        
+        # 处理链接: [text](url)
+        def replace_link_url(match):
+            text = match.group(1)
+            url = match.group(2)
+            if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                absolute_url = urljoin(base_url, url)
+                return f'[{text}]({absolute_url})'
+            return match.group(0)
+        
+        md_content = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace_link_url, md_content)
+        
+        return md_content
+
+    @staticmethod
+    def save_note(title, content, config, base_url=None):
+        """
+        Save content as Markdown file, converting relative URLs to absolute.
+        
+        Args:
+            title: Document title
+            content: Markdown content to save
+            config: Config object
+            base_url: Base URL for converting relative URLs
+        """
         note_dir = config.get('Output', 'note_dir', fallback='./notes')
         if not os.path.exists(note_dir):
             os.makedirs(note_dir)
@@ -437,6 +529,10 @@ class OutputHandler:
         safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
         filename = f"{safe_title}.md"
         filepath = os.path.join(note_dir, filename)
+        
+        # Convert relative URLs to absolute if base_url is provided
+        if base_url:
+            content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
         
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -500,7 +596,7 @@ class OutputHandler:
             logger.error("Failed to generate PDF.")
 
     @staticmethod
-    def save_html(title, html_content, config, inline=False):
+    def save_html(title, html_content, config, inline=False, base_url=None):
         """
         Save content as HTML file.
         
@@ -509,6 +605,7 @@ class OutputHandler:
             html_content: HTML content to save
             config: Config object
             inline: If True, inline CSS and JS for standalone HTML
+            base_url: Base URL for converting relative URLs (used when inline=False)
         """
         html_dir = config.get('Output', 'html_dir', fallback='.')
         if not os.path.exists(html_dir):
@@ -520,6 +617,9 @@ class OutputHandler:
         
         if inline:
             html_content = OutputHandler._inline_resources(html_content)
+        elif base_url:
+            # Convert relative URLs to absolute for non-inline HTML
+            html_content = OutputHandler._convert_urls_to_absolute(html_content, base_url)
         
         output_path = os.path.join(html_dir, f"{safe_title}.html")
         
@@ -735,13 +835,13 @@ def main():
 
     # Output Actions
     if args.note:
-        OutputHandler.save_note(title, md_content, config)
+        OutputHandler.save_note(title, md_content, config, base_url=args.url)
     
     if args.pdf:
         OutputHandler.generate_pdf(title, md_content, config)
 
     if args.html:
-        OutputHandler.save_html(title, cleaned_html, config, inline=False)
+        OutputHandler.save_html(title, cleaned_html, config, inline=False, base_url=args.url)
 
     if args.html_inline:
         OutputHandler.save_html(title, cleaned_html, config, inline=True)
