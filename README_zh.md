@@ -73,8 +73,8 @@ rate = +0%
 volume = +0%
 
 [Network]
-; 代理模式: default (使用系统/环境代理), none (不使用), custom (使用自定义地址)
-proxy_mode = default
+; 代理模式: auto (环境变量), none (不使用), win (Windows注册表), custom (自定义地址)
+proxy_mode = auto
 ; 自定义代理地址 (例如 http://127.0.0.1:7890)
 custom_proxy =
 ```

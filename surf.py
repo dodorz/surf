@@ -76,11 +76,11 @@ class Fetcher:
         
         Args:
             config: Config object
-            proxy_mode_override: Override proxy_mode from command line (default/none/custom)
+            proxy_mode_override: Override proxy_mode from command line (auto/none/win/custom)
             custom_proxy_override: Override custom_proxy from command line
         """
         # Use command line override if provided, otherwise use config
-        mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='default').lower()
+        mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='auto').lower()
         
         if mode == 'none':
             return None, None
@@ -95,9 +95,61 @@ class Fetcher:
                 pw_proxy = {'server': custom}
                 return req_proxies, pw_proxy
             else:
-                logger.warning("Custom proxy mode selected but no custom_proxy defined. Falling back to default.")
+                logger.warning("Custom proxy mode selected but no custom_proxy defined. Falling back to auto.")
+                mode = 'auto'
+        
+        if mode == 'win':
+            # Use WinINet API from Windows registry
+            try:
+                import winreg
+                proxy_config = None
+                try:
+                    # Try to read proxy settings from Internet Explorer/Edge
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+                    proxy_enable = winreg.QueryValueEx(key, "ProxyEnable")[0]
+                    if proxy_enable:
+                        proxy_config = winreg.QueryValueEx(key, "ProxyServer")[0]
+                    key.Close()
+                except Exception as e:
+                    logger.debug(f"Could not read Windows proxy registry: {e}")
                 
-        # mode == 'default' (Check env vars)
+                if proxy_config:
+                    # Parse proxy config (can be "http=proxy:8080;https=proxy:8080" format)
+                    proxies = {}
+                    pw_proxy_server = None
+                    for part in proxy_config.split(';'):
+                        if '=' in part:
+                            k, v = part.split('=', 1)
+                            proxies[k.strip()] = v.strip()
+                            if k.strip() == 'http':
+                                pw_proxy_server = v.strip()
+                        else:
+                            # Single proxy for all protocols
+                            proxies['http'] = part.strip()
+                            proxies['https'] = part.strip()
+                            pw_proxy_server = part.strip()
+                    
+                    # Build requests proxies dict
+                    req_proxies = {}
+                    if 'http' in proxies: req_proxies['http'] = proxies['http']
+                    if 'https' in proxies: req_proxies['https'] = proxies['https']
+                    if not req_proxies: req_proxies = None
+                    
+                    # Playwright proxy
+                    pw_proxy = None
+                    if pw_proxy_server:
+                        pw_proxy = {"server": pw_proxy_server}
+                    
+                    logger.info(f"Using Windows proxy: {proxy_config}")
+                    return req_proxies, pw_proxy
+                else:
+                    logger.info("Windows proxy not enabled. Falling back to auto.")
+                    mode = 'auto'
+            except ImportError:
+                logger.warning("winreg not available. Falling back to auto.")
+                mode = 'auto'
+        
+        # mode == 'auto' (Check env vars, fallback to no proxy if not set)
         http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
         https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
         no_proxy = os.environ.get('no_proxy') or os.environ.get('NO_PROXY')
@@ -746,8 +798,8 @@ def main():
                         help="Translation mode (default: translated)")
     parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
     parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
-    parser.add_argument("-x", "--proxy-mode", choices=['default', 'none', 'custom'], 
-                        help="Proxy mode: default (env/system), none (no proxy), custom (use --proxy) | 代理模式")
+    parser.add_argument("-x", "--proxy-mode", choices=['auto', 'none', 'win', 'custom'], 
+                        help="Proxy mode: auto (env), none (no proxy), win (Windows), custom (use --proxy) | 代理模式")
     parser.add_argument("--proxy", 
                         help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")
     parser.add_argument("--llm", 
