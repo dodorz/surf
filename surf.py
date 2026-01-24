@@ -16,8 +16,8 @@ from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
 import trafilatura
 
-# Version: 1.0.0.0
-__version__ = "1.0.0.0"
+# Version: 1.0.0.2
+__version__ = "1.0.0.2"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
