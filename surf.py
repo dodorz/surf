@@ -82,7 +82,7 @@ class Fetcher:
         # Use command line override if provided, otherwise use config
         mode = proxy_mode_override.lower() if proxy_mode_override else config.get('Network', 'proxy_mode', fallback='auto').lower()
         
-        if mode == 'none':
+        if mode == 'no':
             return None, None
             
         if mode == 'custom':
@@ -798,7 +798,7 @@ def main():
                         help="Translation mode (default: translated)")
     parser.add_argument("-o", "--original", action="store_true", help="Only original content | 仅原文")
     parser.add_argument("-b", "--both", action="store_true", help="Bilingual: original + translated | 双语 (原文+译文)")
-    parser.add_argument("-x", "--proxy-mode", choices=['auto', 'none', 'win', 'custom'], 
+    parser.add_argument("-x", "--proxy-mode", choices=['auto', 'no', 'win', 'custom'], 
                         help="Proxy mode: auto (env), none (no proxy), win (Windows), custom (use --proxy) | 代理模式")
     parser.add_argument("--proxy", 
                         help="Custom proxy URL (e.g., http://127.0.0.1:7890). Requires --proxy-mode custom | 自定义代理地址")

@@ -1,14 +1,14 @@
 [LLM]
 ; Default LLM provider name
-provider = L1
+provider = LLM1
 
-[LLM.L1]
+[LLM.LLM1]
 ; OpenAI-compatible API configuration for L1
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
 
-[LLM.L2]
+[LLM.LLM2]
 ; Additional LLM provider example (DeepSeek)
 base_url = https://api.deepseek.com/v1
 api_key = your_deepseek_api_key
@@ -43,7 +43,7 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: auto (env vars, default), none (no proxy), win (Windows registry), custom (use custom_proxy)
+; Proxy mode: auto (env vars, default), no (no proxy), win (Windows registry), custom (use custom_proxy)
 proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =

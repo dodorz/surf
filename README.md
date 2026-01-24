@@ -90,7 +90,7 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: auto (env vars), none (no proxy), win (Windows registry), custom (custom_proxy)
+; Proxy mode: auto (env vars), no (no proxy), win (Windows registry), custom (custom_proxy)
 proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
