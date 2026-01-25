@@ -32,7 +32,7 @@ def setup_verbose_logging():
     logging.getLogger().setLevel(logging.INFO)
     # Update existing handlers
     for handler in logging.getLogger().handlers:
-        handler.setFormat('%(asctime)s - %(levelname)s - %(message)s')
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
 class Config:
     def __init__(self, config_path='config.ini'):
@@ -747,18 +747,19 @@ class OutputHandler:
         return '\n'.join(lines)
     
     @staticmethod
-    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True):
+    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True, translated_title=None):
         """
         Save content as Markdown file.
         
         Args:
-            title: Document title
+            title: Document title (used for filename)
             content: Markdown content to save
             config: Config object
             output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs
             html_content: Original HTML content for metadata extraction
             add_front_matter: Whether to add YAML front matter (default: True)
+            translated_title: Translated title to use in YAML front matter (if translation was performed)
         """
         md_dir = config.get('Output', 'md_dir', fallback='./notes')
         if not os.path.exists(md_dir):
@@ -791,6 +792,9 @@ class OutputHandler:
         yaml_frontmatter = ''
         if html_content and add_front_matter:
             metadata = OutputHandler._extract_metadata(html_content)
+            # Use translated_title if provided (translation was performed)
+            if translated_title:
+                metadata['title'] = translated_title
             yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
         
         try:
@@ -1194,6 +1198,7 @@ Examples:
 
     # 4. Translate
     target_lang = config.get('Output', 'target_language', fallback='zh-cn')
+    translated_title = None  # Initialize for raw mode
     
     if lang_mode == 'raw':
         logger.info("Language mode set to 'raw'. Skipping translation.")
@@ -1256,19 +1261,32 @@ Examples:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak)
 
     else:  # md (default)
+        # Determine if translation was performed
+        translation_performed = lang_mode != 'raw'
+        
         if output_path:
             if output_path == '-':
                 # Output to stdout
                 print(f"# {title}\n")
                 print(md_content)
             else:
-                OutputHandler.save_markdown(title, md_content, config, output_path, html_content=html_content, add_front_matter=not args.no_front_matter)
+                OutputHandler.save_markdown(
+                    title, md_content, config, output_path, 
+                    html_content=html_content, 
+                    add_front_matter=not args.no_front_matter,
+                    translated_title=translated_title if translation_performed else None
+                )
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
         else:
             # Default: Save to default md_dir
             md_dir = config.get('Output', 'md_dir', fallback='./notes')
-            OutputHandler.save_markdown(title, md_content, config, html_content=html_content, add_front_matter=not args.no_front_matter)
+            OutputHandler.save_markdown(
+                title, md_content, config, 
+                html_content=html_content, 
+                add_front_matter=not args.no_front_matter,
+                translated_title=translated_title if translation_performed else None
+            )
 
 
 if __name__ == "__main__":
