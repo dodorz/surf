@@ -15,6 +15,7 @@ from datetime import datetime
 from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
 import trafilatura
+import re
 
 # Version: 1.0.0.2
 __version__ = "1.0.0.2"
@@ -281,67 +282,97 @@ class ContentProcessor:
     @staticmethod
     def _rescue_content(preprocessed_soup, summary_html):
         """
-        Uses a fingerprint from Readability's summary to find the original, 
+        Uses a fingerprint from Readability's summary to find the original,
         uncleaned container in the preprocessed soup, preserving images.
         """
         summary_soup = BeautifulSoup(summary_html, 'html.parser')
         text = summary_soup.get_text(strip=True)
         if len(text) < 50:
             return summary_html
-        
+
         # Take a fingerprint from the start of the text
         fingerprint = text[:100]
-        
+
         # Find the node in the full preprocessed soup
-        node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
+        # Exclude head, title, script, style, etc. by searching only in body and main content areas
+        node = None
+
+        # First, try searching in body content (excluding head)
+        body = preprocessed_soup.find('body')
+        if body:
+            node = body.find(string=lambda t: fingerprint in t if t else False)
+
+        # If not found in body, try in main/article/section containers
         if not node:
-            # Try a fuzzy/smaller search
+            for container in preprocessed_soup.find_all(['article', 'main', 'section', 'div']):
+                if container.get('id') and container.get('id').lower() in ['content', 'main', 'article', 'body']:
+                    continue
+                node = container.find(string=lambda t: fingerprint in t if t else False)
+                if node:
+                    break
+
+        # Last resort: try smaller fingerprint, still avoiding head elements
+        if not node:
             fingerprint = text[:30]
-            node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
-        
+            # Search only in body and article/main/section
+            for container in [body] if body else []:
+                node = container.find(string=lambda t: fingerprint in t if t else False)
+                if node:
+                    break
+            if not node:
+                for container in preprocessed_soup.find_all(['article', 'main', 'section']):
+                    node = container.find(string=lambda t: fingerprint in t if t else False)
+                    if node:
+                        break
+
         if not node:
             return summary_html
 
         # Traverse up to find a suitable article container
-        curr = node.parent
+        curr = node.parent if hasattr(node, 'parent') else node
         best_candidate = curr
-        
+
         # Heuristic: go up until we hit a very broad container or body
         while curr and curr.name not in ['body', 'html']:
             # If this parent has images, it's a better candidate
             if curr.find_all('img'):
                 best_candidate = curr
-            
+
             # Stop if we hit a semantic article boundary
             if curr.name in ['article', 'main'] or (curr.get('id') and curr.get('id').lower() in ['main', 'content', 'article']):
                 best_candidate = curr
                 break
-                
-            curr = curr.parent
-            
-        return str(best_candidate)
 
+            curr = curr.parent
+
+        return str(best_candidate)
     @staticmethod
     def extract_content(html):
         """
         Extracts the main content using Readability and a custom rescue logic to preserve images.
         """
         logger.info("Extracting main content...")
-        
+
         preprocessed_soup = ContentProcessor._preprocess_html(html)
-        
+
         # 1. Get Readability Summary
         try:
             doc = Document(str(preprocessed_soup))
             title = doc.title()
             summary_html = doc.summary()
-            
+            logger.info(f"Readability title: {title}")
+            logger.info(f"Readability summary length: {len(summary_html)}")
+
             # 2. Rescue uncleaned content using fingerprint
             rescued_html = ContentProcessor._rescue_content(preprocessed_soup, summary_html)
-            
+
             img_count = rescued_html.count('<img')
-            logger.info(f"Extracted {img_count} images.")
-            
+            logger.info(f"Extracted {img_count} images. Rescued HTML length: {len(rescued_html)}")
+
+            # Debug: log first 200 chars of rescued HTML
+            if rescued_html:
+                logger.info(f"Rescued HTML preview: {rescued_html[:200]}")
+
             return title, rescued_html
         except Exception as e:
             logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
@@ -351,11 +382,13 @@ class ContentProcessor:
             content_html = trafilatura.extract(str(preprocessed_soup), output_format='html', include_images=True)
             if content_html:
                 img_count = content_html.count('<img')
-                logger.info(f"Trafilatura extracted {img_count} images.")
+                logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
+                logger.info(f"Trafilatura content preview: {content_html[:200]}")
                 return Document(html).title(), content_html
-        except:
-             pass
+        except Exception as e:
+            logger.warning(f"Trafilatura extraction failed: {e}")
 
+        logger.warning("All extraction methods failed, returning original HTML")
         return Document(html).title(), html
 
     @staticmethod
@@ -865,9 +898,29 @@ class OutputHandler:
         elif base_url:
             # Convert relative URLs to absolute for non-inline HTML
             html_content = OutputHandler._convert_urls_to_absolute(html_content, base_url)
-        
+
+        # Wrap content in complete HTML document if needed
+        if html_content and not html_content.strip().lower().startswith('<!doctype') and not html_content.strip().lower().startswith('<html'):
+            html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+</head>
+<body>
+{html_content}
+</body>
+</html>"""
+
         # Determine filepath
-        if output_path:
+        if output_path == '-':
+            # Write to stdout
+            sys.stdout.write(html_content)
+            sys.stdout.flush()
+            logger.info(f"HTML output to stdout (inline={inline})")
+            return None
+        elif output_path:
             filepath = output_path
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
