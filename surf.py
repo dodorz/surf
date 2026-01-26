@@ -17,8 +17,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-# Version: 1.0.0.2
-__version__ = "1.0.0.3"
+__version__ = "1.0.1.8"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -111,7 +110,7 @@ class Fetcher:
         
         Args:
             config: Config object
-            proxy_mode_override: Override proxy_mode from command line (auto/none/win/custom)
+            proxy_mode_override: Override proxy_mode from command line (auto/no/win/custom)
             custom_proxy_override: Override custom_proxy from command line
         """
         # Use command line override if provided, otherwise use config
@@ -206,6 +205,7 @@ class Fetcher:
     def fetch(url, config, use_browser=False, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetches the content of a URL.
+        For Twitter/X URLs, uses the official oEmbed API.
         If use_browser is True, uses Playwright.
         Otherwise, uses requests.
         
@@ -217,6 +217,16 @@ class Fetcher:
             custom_proxy_override: Override custom_proxy from command line
         """
         logger.info(f"Fetching {url}...")
+        
+        # Check for special site handlers first (if not forcing browser)
+        if not use_browser:
+            handler, site_name = _get_handler_for_url(url)
+            if handler:
+                logger.info(f"Using special handler for {site_name}")
+                html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
+                if html_content:
+                    return html_content
+                # If handler returns None, fall through to regular fetch
         
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         
@@ -240,6 +250,53 @@ class Fetcher:
                 return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
         else:
             return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+
+    @staticmethod
+    def _fetch_twitter_oembed(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch Twitter/X tweet using the official oEmbed API.
+        Returns HTML content from the oEmbed response.
+        
+        Args:
+            url: Twitter/X URL (tweet or profile URL)
+            config: Config object
+            proxy_mode_override: Override proxy_mode from command line
+            custom_proxy_override: Override custom_proxy from command line
+            
+        Returns:
+            HTML content string from oEmbed API
+        """
+        import json
+        
+        # oEmbed API endpoint for Twitter
+        oembed_url = f"https://publish.twitter.com/oembed?url={url}"
+        
+        logger.info(f"Fetching Twitter content via oEmbed API: {oembed_url}")
+        
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        try:
+            response = requests.get(oembed_url, headers=headers, proxies=req_proxies, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            html_content = data.get('html', '')
+            
+            # Log metadata from oEmbed response
+            author_name = data.get('author_name', '')
+            author_url = data.get('author_url', '')
+            provider_name = data.get('provider_name', '')
+            
+            logger.info(f"oEmbed response: author={author_name}, provider={provider_name}")
+            
+            return html_content
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"oEmbed API failed ({e}), falling back to browser fetch")
+            return None
 
     @staticmethod
     def fetch_with_browser(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -270,6 +327,59 @@ class Fetcher:
                 raise
             finally:
                 browser.close()
+
+# =============================================================================
+# Special Site Handlers
+# =============================================================================
+# Sites that require special handling beyond regular HTML fetching.
+# Each entry specifies the handler function and URL patterns.
+#
+# Structure:
+#   'site_name': {
+#       'patterns': [list of regex patterns to match URLs],
+#       'handler': function(config, url, proxies) -> html_content or None
+#   }
+#
+# If the handler returns None, falls back to regular fetching.
+# =============================================================================
+
+SPECIAL_SITE_HANDLERS = {
+    'twitter': {
+        'patterns': [
+            r'^https?://(www\.)?twitter\.com/',
+            r'^https?://(www\.)?x\.com/',
+        ],
+        'handler': Fetcher._fetch_twitter_oembed,
+    },
+}
+
+# Cache for compiled regex patterns (performance optimization)
+_COMPILED_PATTERNS = {}
+
+def _get_handler_for_url(url):
+    """
+    Get the appropriate handler for a URL from SPECIAL_SITE_HANDLERS.
+    
+    Args:
+        url: The URL to check
+        
+    Returns:
+        tuple: (handler_function, site_name) or (None, None) if no special handler
+    """
+    for site_name, config in SPECIAL_SITE_HANDLERS.items():
+        patterns = config['patterns']
+        
+        # Compile patterns on first use and cache them
+        if site_name not in _COMPILED_PATTERNS:
+            _COMPILED_PATTERNS[site_name] = [re.compile(p) for p in patterns]
+        
+        compiled_patterns = _COMPILED_PATTERNS[site_name]
+        
+        for pattern in compiled_patterns:
+            if pattern.match(url):
+                return config['handler'], site_name
+    
+    return None, None
 
 class ContentProcessor:
     @staticmethod
