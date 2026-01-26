@@ -18,9 +18,7 @@ import trafilatura
 import re
 
 # Version: 1.0.0.2
-__version__ = "1.0.0.2"
-
-__version__ = "0.2.0"
+__version__ = "1.0.0.3"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -677,22 +675,26 @@ class OutputHandler:
         return md_content
 
     @staticmethod
-    def _extract_metadata(html_content):
+    def _extract_metadata(html_content, source_url=None, translator=None):
         """
         从HTML中提取元数据用于YAML front matter。
         
         Args:
             html_content: 原始HTML内容
+            source_url: 来源URL (可选)
+            translator: 翻译模型名称 (可选)
             
         Returns:
-            dict: 包含title, created, keywords的字典
+            dict: 包含title, created, updated, tags, source, translator的字典
         """
         soup = BeautifulSoup(html_content, 'html.parser')
         metadata = {
             'title': None,
             'created': None,
             'updated': None,
-            'tags': []
+            'tags': [],
+            'source': source_url,
+            'translator': translator
         }
         
         # 提取title元素
@@ -765,12 +767,18 @@ class OutputHandler:
             for tag in metadata['tags']:
                 lines.append(f'  - "{tag}"')
         
+        if metadata.get('source'):
+            lines.append(f'source: {metadata["source"]}')
+        
+        if metadata.get('translator'):
+            lines.append(f'translator: {metadata["translator"]}')
+        
         lines.append('---\n')
         
         return '\n'.join(lines)
     
     @staticmethod
-    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True, translated_title=None):
+    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True, translated_title=None, source_url=None, translator=None):
         """
         Save content as Markdown file.
         
@@ -783,6 +791,8 @@ class OutputHandler:
             html_content: Original HTML content for metadata extraction
             add_front_matter: Whether to add YAML front matter (default: True)
             translated_title: Translated title to use in YAML front matter (if translation was performed)
+            source_url: Source URL to include in YAML front matter (default: None)
+            translator: Translation model name to include in YAML front matter (default: None)
         """
         md_dir = config.get('Output', 'md_dir', fallback='./notes')
         if not os.path.exists(md_dir):
@@ -814,7 +824,7 @@ class OutputHandler:
         # Generate YAML front matter if html_content is provided and add_front_matter is True
         yaml_frontmatter = ''
         if html_content and add_front_matter:
-            metadata = OutputHandler._extract_metadata(html_content)
+            metadata = OutputHandler._extract_metadata(html_content, source_url=source_url, translator=translator)
             # Use translated_title if provided (translation was performed)
             if translated_title:
                 metadata['title'] = translated_title
@@ -1291,6 +1301,16 @@ Examples:
         # Determine if translation was performed
         translation_performed = lang_mode != 'raw'
         
+        # Get translator model name if translation was performed
+        translator = None
+        if translation_performed:
+            try:
+                llm_provider = args.llm if hasattr(args, 'llm') else None
+                llm_config = config.get_llm_config(llm_provider)
+                translator = llm_config['model']
+            except Exception as e:
+                logger.warning(f"Could not get LLM config for translator: {e}")
+        
         if output_path:
             if output_path == '-':
                 # Output to stdout
@@ -1301,7 +1321,9 @@ Examples:
                     title, md_content, config, output_path, 
                     html_content=html_content, 
                     add_front_matter=not args.no_front_matter,
-                    translated_title=translated_title if translation_performed else None
+                    translated_title=translated_title if translation_performed else None,
+                    source_url=args.url,
+                    translator=translator
                 )
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
@@ -1312,7 +1334,9 @@ Examples:
                 title, md_content, config, 
                 html_content=html_content, 
                 add_front_matter=not args.no_front_matter,
-                translated_title=translated_title if translation_performed else None
+                translated_title=translated_title if translation_performed else None,
+                source_url=args.url,
+                translator=translator
             )
 
 
