@@ -1,18 +1,30 @@
 [LLM]
-; OpenAI-compatible API configuration
+; Default LLM provider name
+provider = LLM1
+
+[LLM.LLM1]
+; OpenAI-compatible API configuration for L1
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
 
+[LLM.LLM2]
+; Additional LLM provider example (DeepSeek)
+base_url = https://api.deepseek.com/v1
+api_key = your_deepseek_api_key
+model = deepseek-chat
+
 [Output]
-; Directory to save Markdown notes
-note_dir = ./notes
 ; Target language for translation (e.g., zh-cn, en, etc.)
 target_language = zh-cn
+; Directory to save Markdown notes
+note_dir = ./notes
 ; Directory to save PDF files (default: current directory)
 pdf_dir = .
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
+; Directory to save HTML files (default: current directory)
+html_dir = .
 
 [TTS]
 ; Support: edge-tts
@@ -25,7 +37,7 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: auto (env vars), win (system), no (none), set (custom)
+; Proxy mode: auto (env vars, default), no (no proxy), win (Windows registry), custom (use custom_proxy)
 proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =

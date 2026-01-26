@@ -11,18 +11,30 @@ import warnings
 import asyncio
 import edge_tts
 from playsound import playsound
-import re
+from datetime import datetime
+from dateutil import parser as date_parser
 from bs4 import BeautifulSoup
 import trafilatura
+import re
+
+# Version: 1.0.0.2
+__version__ = "1.0.0.2"
 
 __version__ = "0.2.0"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging (default: WARNING level, no timestamps)
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+def setup_verbose_logging():
+    """Enable verbose logging with timestamps."""
+    logging.getLogger().setLevel(logging.INFO)
+    # Update existing handlers
+    for handler in logging.getLogger().handlers:
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
 class Config:
     def __init__(self, config_path='config.ini'):
@@ -31,9 +43,42 @@ class Config:
         if not os.path.exists(config_path):
             logger.warning(f"Config file {config_path} not found. Using defaults.")
         self.config.read(config_path)
+        
+        # Set default LLM provider
+        self.llm_provider = self.get('LLM', 'provider', fallback='L1')
 
     def get(self, section, key, fallback=None):
         return self.config.get(section, key, fallback=fallback)
+        
+    def get_llm_config(self, provider_override=None):
+        """Get LLM configuration for the specified provider or the default one.
+        
+        Args:
+            provider_override (str, optional): Override the default LLM provider.
+            
+        Returns:
+            dict: Dictionary containing base_url, api_key, and model for the LLM provider.
+            
+        Raises:
+            ValueError: If the specified LLM provider is not found in the config.
+        """
+        provider = provider_override or self.llm_provider
+        section = f'LLM.{provider}'
+        
+        if not self.config.has_section(section):
+            raise ValueError(f"LLM provider '{provider}' not found in config. "
+                           f"Available providers: {self._get_available_llm_providers()}")
+            
+        return {
+            'base_url': self.get(section, 'base_url'),
+            'api_key': self.get(section, 'api_key'),
+            'model': self.get(section, 'model')
+        }
+        
+    def _get_available_llm_providers(self):
+        """Get a list of available LLM provider names from the config."""
+        return [section.split('.')[1] for section in self.config.sections() 
+                if section.startswith('LLM.')]
 
 class Fetcher:
     @staticmethod
@@ -68,7 +113,7 @@ class Fetcher:
         
         Args:
             config: Config object
-            proxy_mode_override: Override proxy_mode from command line (auto/win/no/set)
+            proxy_mode_override: Override proxy_mode from command line (auto/none/win/custom)
             custom_proxy_override: Override custom_proxy from command line
         """
         # Use command line override if provided, otherwise use config
@@ -89,15 +134,57 @@ class Fetcher:
                 mode = 'auto'
         
         if mode == 'win':
-            # Windows system proxy
-            win_proxy = Fetcher._get_system_proxy_win()
-            if win_proxy:
-                return win_proxy, {'server': win_proxy.get('http')}
-            else:
-                logger.warning("No Windows proxy configured. Falling back to auto.")
+            # Use WinINet API from Windows registry
+            try:
+                import winreg
+                proxy_config = None
+                try:
+                    # Try to read proxy settings from Internet Explorer/Edge
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+                    proxy_enable = winreg.QueryValueEx(key, "ProxyEnable")[0]
+                    if proxy_enable:
+                        proxy_config = winreg.QueryValueEx(key, "ProxyServer")[0]
+                    key.Close()
+                except Exception as e:
+                    logger.debug(f"Could not read Windows proxy registry: {e}")
+                
+                if proxy_config:
+                    # Parse proxy config (can be "http=proxy:8080;https=proxy:8080" format)
+                    proxies = {}
+                    pw_proxy_server = None
+                    for part in proxy_config.split(';'):
+                        if '=' in part:
+                            k, v = part.split('=', 1)
+                            proxies[k.strip()] = v.strip()
+                            if k.strip() == 'http':
+                                pw_proxy_server = v.strip()
+                        else:
+                            # Single proxy for all protocols
+                            proxies['http'] = part.strip()
+                            proxies['https'] = part.strip()
+                            pw_proxy_server = part.strip()
+                    
+                    # Build requests proxies dict
+                    req_proxies = {}
+                    if 'http' in proxies: req_proxies['http'] = proxies['http']
+                    if 'https' in proxies: req_proxies['https'] = proxies['https']
+                    if not req_proxies: req_proxies = None
+                    
+                    # Playwright proxy
+                    pw_proxy = None
+                    if pw_proxy_server:
+                        pw_proxy = {"server": pw_proxy_server}
+                    
+                    logger.info(f"Using Windows proxy: {proxy_config}")
+                    return req_proxies, pw_proxy
+                else:
+                    logger.info("Windows proxy not enabled. Falling back to auto.")
+                    mode = 'auto'
+            except ImportError:
+                logger.warning("winreg not available. Falling back to auto.")
                 mode = 'auto'
         
-        # mode == 'auto' (Check env vars)
+        # mode == 'auto' (Check env vars, fallback to no proxy if not set)
         http_proxy = os.environ.get('http_proxy') or os.environ.get('HTTP_PROXY')
         https_proxy = os.environ.get('https_proxy') or os.environ.get('HTTPS_PROXY')
         no_proxy = os.environ.get('no_proxy') or os.environ.get('NO_PROXY')
@@ -218,67 +305,97 @@ class ContentProcessor:
     @staticmethod
     def _rescue_content(preprocessed_soup, summary_html):
         """
-        Uses a fingerprint from Readability's summary to find the original, 
+        Uses a fingerprint from Readability's summary to find the original,
         uncleaned container in the preprocessed soup, preserving images.
         """
         summary_soup = BeautifulSoup(summary_html, 'html.parser')
         text = summary_soup.get_text(strip=True)
         if len(text) < 50:
             return summary_html
-        
+
         # Take a fingerprint from the start of the text
         fingerprint = text[:100]
-        
+
         # Find the node in the full preprocessed soup
-        node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
+        # Exclude head, title, script, style, etc. by searching only in body and main content areas
+        node = None
+
+        # First, try searching in body content (excluding head)
+        body = preprocessed_soup.find('body')
+        if body:
+            node = body.find(string=lambda t: fingerprint in t if t else False)
+
+        # If not found in body, try in main/article/section containers
         if not node:
-            # Try a fuzzy/smaller search
+            for container in preprocessed_soup.find_all(['article', 'main', 'section', 'div']):
+                if container.get('id') and container.get('id').lower() in ['content', 'main', 'article', 'body']:
+                    continue
+                node = container.find(string=lambda t: fingerprint in t if t else False)
+                if node:
+                    break
+
+        # Last resort: try smaller fingerprint, still avoiding head elements
+        if not node:
             fingerprint = text[:30]
-            node = preprocessed_soup.find(string=lambda t: fingerprint in t if t else False)
-        
+            # Search only in body and article/main/section
+            for container in [body] if body else []:
+                node = container.find(string=lambda t: fingerprint in t if t else False)
+                if node:
+                    break
+            if not node:
+                for container in preprocessed_soup.find_all(['article', 'main', 'section']):
+                    node = container.find(string=lambda t: fingerprint in t if t else False)
+                    if node:
+                        break
+
         if not node:
             return summary_html
 
         # Traverse up to find a suitable article container
-        curr = node.parent
+        curr = node.parent if hasattr(node, 'parent') else node
         best_candidate = curr
-        
+
         # Heuristic: go up until we hit a very broad container or body
         while curr and curr.name not in ['body', 'html']:
             # If this parent has images, it's a better candidate
             if curr.find_all('img'):
                 best_candidate = curr
-            
+
             # Stop if we hit a semantic article boundary
             if curr.name in ['article', 'main'] or (curr.get('id') and curr.get('id').lower() in ['main', 'content', 'article']):
                 best_candidate = curr
                 break
-                
-            curr = curr.parent
-            
-        return str(best_candidate)
 
+            curr = curr.parent
+
+        return str(best_candidate)
     @staticmethod
     def extract_content(html):
         """
         Extracts the main content using Readability and a custom rescue logic to preserve images.
         """
         logger.info("Extracting main content...")
-        
+
         preprocessed_soup = ContentProcessor._preprocess_html(html)
-        
+
         # 1. Get Readability Summary
         try:
             doc = Document(str(preprocessed_soup))
             title = doc.title()
             summary_html = doc.summary()
-            
+            logger.info(f"Readability title: {title}")
+            logger.info(f"Readability summary length: {len(summary_html)}")
+
             # 2. Rescue uncleaned content using fingerprint
             rescued_html = ContentProcessor._rescue_content(preprocessed_soup, summary_html)
-            
+
             img_count = rescued_html.count('<img')
-            logger.info(f"Extracted {img_count} images.")
-            
+            logger.info(f"Extracted {img_count} images. Rescued HTML length: {len(rescued_html)}")
+
+            # Debug: log first 200 chars of rescued HTML
+            if rescued_html:
+                logger.info(f"Rescued HTML preview: {rescued_html[:200]}")
+
             return title, rescued_html
         except Exception as e:
             logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
@@ -288,11 +405,13 @@ class ContentProcessor:
             content_html = trafilatura.extract(str(preprocessed_soup), output_format='html', include_images=True)
             if content_html:
                 img_count = content_html.count('<img')
-                logger.info(f"Trafilatura extracted {img_count} images.")
+                logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
+                logger.info(f"Trafilatura content preview: {content_html[:200]}")
                 return Document(html).title(), content_html
-        except:
-             pass
+        except Exception as e:
+            logger.warning(f"Trafilatura extraction failed: {e}")
 
+        logger.warning("All extraction methods failed, returning original HTML")
         return Document(html).title(), html
 
     @staticmethod
@@ -333,11 +452,20 @@ class ContentProcessor:
             
         return chunks
 
-    @staticmethod
-    def translate_if_needed(text, title=None, target_lang='zh-cn', config=None):
+    @classmethod
+    def translate_if_needed(cls, text, title=None, target_lang='zh-cn', config=None, llm_provider=None):
         """
         Detects language and translates (content + title) if necessary using chunking.
-        Returns: (translated_text, translated_title)
+        
+        Args:
+            text (str): The text to translate
+            title (str, optional): The title to translate
+            target_lang (str): Target language code (default: 'zh-cn')
+            config: Config object
+            llm_provider (str, optional): Override the default LLM provider
+            
+        Returns:
+            tuple: (translated_text, translated_title)
         """
         try:
             lang = detect(text[:1000]) # Detect based on first 1000 chars
@@ -359,9 +487,17 @@ class ContentProcessor:
         try:
             from openai import OpenAI
             
+            # Get LLM configuration
+            try:
+                llm_config = config.get_llm_config(llm_provider)
+                logger.info(f"Using LLM provider: {llm_provider or 'default'}")
+            except ValueError as e:
+                logger.error(f"LLM configuration error: {e}")
+                return text, title
+            
             client = OpenAI(
-                base_url=config.get('LLM', 'base_url'),
-                api_key=config.get('LLM', 'api_key'),
+                base_url=llm_config['base_url'],
+                api_key=llm_config['api_key']
             )
             
             # 1. Translate Title (if provided)
@@ -370,7 +506,7 @@ class ContentProcessor:
                 logger.info("Translating title...")
                 try:
                     t_completion = client.chat.completions.create(
-                        model=config.get('LLM', 'model'),
+                        model=llm_config['model'],
                         messages=[
                             {"role": "system", "content": f"Translate the following title to {target_lang}. Output ONLY the translation."},
                             {"role": "user", "content": title}
@@ -382,7 +518,7 @@ class ContentProcessor:
                     logger.error(f"Title translation failed: {e}")
 
             # 2. Translate Content (Chunked)
-            chunks = ContentProcessor._chunk_text(text)
+            chunks = cls._chunk_text(text)
             translated_chunks = []
             
             total_chunks = len(chunks)
@@ -391,7 +527,7 @@ class ContentProcessor:
             for i, chunk in enumerate(chunks):
                 logger.info(f"Translating chunk {i+1}/{total_chunks} ({len(chunk)} chars)...")
                 completion = client.chat.completions.create(
-                    model=config.get('LLM', 'model'),
+                    model=llm_config['model'],
                     messages=[
                         {"role": "system", "content": f"You are a helpful translator. Translate the following Markdown content to {target_lang}. Preserve the Markdown formatting strictly. Output ONLY the translated markdown."},
                         {"role": "user", "content": chunk}
@@ -411,22 +547,293 @@ class OutputHandler:
         return "".join([c for c in filename if c.alpha() or c.isdigit() or c in ' ._-']).rstrip()
 
     @staticmethod
-    def save_note(title, content, config):
-        note_dir = config.get('Output', 'note_dir', fallback='./notes')
-        if not os.path.exists(note_dir):
-            os.makedirs(note_dir)
+    def _convert_urls_to_absolute(html_content, base_url):
+        """
+        将HTML中的相对URL转换为绝对URL。
         
-        # Simple sanitization
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        filename = f"{safe_title}.md"
-        filepath = os.path.join(note_dir, filename)
+        Args:
+            html_content: HTML内容
+            base_url: 基础URL，用于解析相对URL
+            
+        Returns:
+            处理后的HTML内容
+        """
+        from urllib.parse import urljoin, urlparse
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 需要处理的标签和属性映射
+        tag_attr_map = {
+            # 媒体和图片
+            'img': ['src', 'data-src', 'data-srcset', 'srcset'],
+            'video': ['src', 'poster', 'data-src'],
+            'audio': ['src', 'data-src'],
+            'source': ['src', 'srcset'],
+            'track': ['src'],
+            'embed': ['src'],
+            'object': ['data'],
+            'iframe': ['src'],
+            'svg': ['data', 'href'],  # SVG引用
+            # 链接和导航
+            'a': ['href'],
+            'area': ['href'],
+            'base': ['href'],
+            'link': ['href'],  # stylesheet, favicon等
+            # 脚本和样式
+            'script': ['src', 'href'],
+            'style': ['href'],
+            # 表单
+            'form': ['action'],
+            'input': ['src'],
+            'button': ['formaction'],
+            # 其他
+            'ins': ['cite'],
+            'del': ['cite'],
+            'blockquote': ['cite'],
+        }
+        
+        for tag, attrs in tag_attr_map.items():
+            for element in soup.find_all(tag):
+                for attr in attrs:
+                    url = element.get(attr)
+                    if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                        absolute_url = urljoin(base_url, url)
+                        element[attr] = absolute_url
+                        logger.debug(f"Converted relative URL: {url} -> {absolute_url}")
+        
+        return str(soup)
+
+    @staticmethod
+    def _convert_markdown_urls_to_absolute(md_content, base_url):
+        """
+        将Markdown中的相对URL转换为绝对URL。
+        
+        Args:
+            md_content: Markdown内容
+            base_url: 基础URL，用于解析相对URL
+            
+        Returns:
+            处理后的Markdown内容
+        """
+        from urllib.parse import urljoin
+        from bs4 import BeautifulSoup
+
+        # 处理图片链接: ![alt](url)
+        def replace_image_url(match):
+            alt_text = match.group(1)
+            url = match.group(2)
+            if url and not url.startswith(('http://', 'https://', 'data:')):
+                absolute_url = urljoin(base_url, url)
+                return f'![{alt_text}]({absolute_url})'
+            return match.group(0)
+
+        md_content = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replace_image_url, md_content)
+
+        # 处理链接: [text](url)
+        def replace_link_url(match):
+            text = match.group(1)
+            url = match.group(2)
+            if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                absolute_url = urljoin(base_url, url)
+                return f'[{text}]({absolute_url})'
+            return match.group(0)
+
+        md_content = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', replace_link_url, md_content)
+
+        # 处理内联HTML标签中的URL（如 <video src="...">、<audio src="..."> 等）
+        def convert_html_attrs_in_md(match):
+            html_tag = match.group(0)
+            soup = BeautifulSoup(html_tag, 'html.parser')
+            tag = soup.find()
+
+            if tag:
+                tag_attr_map = {
+                    'img': ['src', 'data-src', 'data-srcset', 'srcset'],
+                    'video': ['src', 'poster', 'data-src'],
+                    'audio': ['src', 'data-src'],
+                    'source': ['src', 'srcset'],
+                    'track': ['src'],
+                    'embed': ['src'],
+                    'object': ['data'],
+                    'iframe': ['src'],
+                    'svg': ['data', 'href'],
+                    'script': ['src', 'href'],
+                    'a': ['href'],
+                    'link': ['href'],
+                }
+
+                tag_name = tag.name
+                if tag_name in tag_attr_map:
+                    for attr in tag_attr_map[tag_name]:
+                        url = tag.get(attr)
+                        if url and not url.startswith(('http://', 'https://', 'data:', '#', 'mailto:', 'tel:', 'javascript:')):
+                            tag[attr] = urljoin(base_url, url)
+
+            return str(soup)
+
+        # 匹配自闭合标签如 <img src="...">、<video src="..."> 等
+        md_content = re.sub(r'<([a-zA-Z][a-zA-Z0-9]*)\s+[^>]*>', convert_html_attrs_in_md, md_content)
+
+        return md_content
+
+    @staticmethod
+    def _extract_metadata(html_content):
+        """
+        从HTML中提取元数据用于YAML front matter。
+        
+        Args:
+            html_content: 原始HTML内容
+            
+        Returns:
+            dict: 包含title, created, keywords的字典
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        metadata = {
+            'title': None,
+            'created': None,
+            'updated': None,
+            'tags': []
+        }
+        
+        # 提取title元素
+        title_tag = soup.find('title')
+        if title_tag:
+            metadata['title'] = title_tag.get_text(strip=True)
+        
+        # 提取发布日期 - 尝试多种常见的meta标签
+        date_selectors = [
+            ('meta', {'property': 'article:published_time'}),
+            ('meta', {'name': 'publishdate'}),
+            ('meta', {'name': 'date'}),
+            ('meta', {'property': 'og:published_time'}),
+            ('meta', {'name': 'pubdate'}),
+        ]
+        
+        for tag_name, attrs in date_selectors:
+            date_tag = soup.find(tag_name, attrs)
+            if date_tag:
+                date_value = date_tag.get('content') or date_tag.get('value')
+                if date_value:
+                    try:
+                        # 尝试解析日期
+                        parsed_date = date_parser.parse(date_value)
+                        metadata['created'] = parsed_date.strftime('%Y-%m-%d')
+                        break
+                    except (ValueError, TypeError):
+                        pass
+        
+        # 提取keywords作为tags
+        keywords_tag = soup.find('meta', {'name': 'keywords'})
+        if keywords_tag:
+            keywords_value = keywords_tag.get('content') or keywords_tag.get('value')
+            if keywords_value:
+                # 分割关键词为列表
+                tags = [tag.strip() for tag in keywords_value.split(',') if tag.strip()]
+                metadata['tags'] = tags
+        
+        # 设置updated为当前时间
+        metadata['updated'] = datetime.now().strftime('%Y-%m-%d')
+        
+        return metadata
+    
+    @staticmethod
+    def _generate_yaml_frontmatter(metadata):
+        """
+        生成YAML front matter字符串。
+        
+        Args:
+            metadata: 元数据字典
+            
+        Returns:
+            str: YAML格式的front matter
+        """
+        lines = ['---']
+        
+        if metadata.get('title'):
+            # 转义特殊字符
+            title = metadata['title'].replace('"', '\\"')
+            lines.append(f'title: "{title}"')
+        
+        if metadata.get('created'):
+            lines.append(f'created: {metadata["created"]}')
+        
+        if metadata.get('updated'):
+            lines.append(f'updated: {metadata["updated"]}')
+        
+        if metadata.get('tags') and len(metadata['tags']) > 0:
+            lines.append('tags:')
+            for tag in metadata['tags']:
+                lines.append(f'  - "{tag}"')
+        
+        lines.append('---\n')
+        
+        return '\n'.join(lines)
+    
+    @staticmethod
+    def save_markdown(title, content, config, output_path=None, base_url=None, html_content=None, add_front_matter=True, translated_title=None):
+        """
+        Save content as Markdown file.
+        
+        Args:
+            title: Document title (used for filename)
+            content: Markdown content to save
+            config: Config object
+            output_path: Specific output file path (optional)
+            base_url: Base URL for converting relative URLs
+            html_content: Original HTML content for metadata extraction
+            add_front_matter: Whether to add YAML front matter (default: True)
+            translated_title: Translated title to use in YAML front matter (if translation was performed)
+        """
+        md_dir = config.get('Output', 'md_dir', fallback='./notes')
+        if not os.path.exists(md_dir):
+            os.makedirs(md_dir)
+        
+        # Determine filepath
+        if output_path:
+            filepath = output_path
+            # Handle special cases: "." or "./" (current directory)
+            if filepath == "." or filepath == "./":
+                # Use current directory + default filename
+                safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+                filename = f"{safe_title}.md"
+                filepath = os.path.join(".", filename)
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            # Simple sanitization
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            filename = f"{safe_title}.md"
+            filepath = os.path.join(md_dir, filename)
+        
+        # Convert relative URLs to absolute if base_url is provided
+        if base_url:
+            content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
+        
+        # Generate YAML front matter if html_content is provided and add_front_matter is True
+        yaml_frontmatter = ''
+        if html_content and add_front_matter:
+            metadata = OutputHandler._extract_metadata(html_content)
+            # Use translated_title if provided (translation was performed)
+            if translated_title:
+                metadata['title'] = translated_title
+            yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
         
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(yaml_frontmatter)
                 f.write(content)
-            logger.info(f"Note saved to {filepath}")
+            logger.info(f"Markdown saved to {filepath}")
         except Exception as e:
-            logger.error(f"Failed to save note: {e}")
+            logger.error(f"Failed to save markdown: {e}")
+        
+        return filepath
+    
+    @staticmethod
+    def save_note(title, content, config, base_url=None):
+        """Backward compatibility wrapper for save_markdown."""
+        return OutputHandler.save_markdown(title, content, config, base_url=base_url)
 
     @staticmethod
     def _generate_with_playwright(full_html, filepath, config):
@@ -444,7 +851,7 @@ class OutputHandler:
             return False
 
     @staticmethod
-    def generate_pdf(title, md_content, config):
+    def generate_pdf(title, md_content, config, output_path=None):
         logger.info("Generating PDF...")
         
         import markdown
@@ -468,19 +875,151 @@ class OutputHandler:
         </body>
         </html>
         """
-
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
-        pdf_dir = config.get('Output', 'pdf_dir', fallback='.')
-        if not os.path.exists(pdf_dir):
-            os.makedirs(pdf_dir)
-        filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
-
+        
+        # Determine filepath
+        if output_path:
+            filepath = output_path
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+            pdf_dir = config.get('Output', 'pdf_dir', fallback='.')
+            if not os.path.exists(pdf_dir):
+                os.makedirs(pdf_dir)
+            filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
+        
         success = OutputHandler._generate_with_playwright(full_html, filepath, config)
-
+        
         if success:
             logger.info(f"PDF saved to {filepath}")
         else:
             logger.error("Failed to generate PDF.")
+        
+        return filepath
+
+    @staticmethod
+    def save_html(title, html_content, config, inline=False, output_path=None, base_url=None):
+        """
+        Save content as HTML file.
+        
+        Args:
+            title: Document title
+            html_content: HTML content to save
+            config: Config object
+            inline: If True, inline CSS and JS for standalone HTML
+            output_path: Specific output file path (optional)
+            base_url: Base URL for converting relative URLs (used when inline=False)
+        """
+        html_dir = config.get('Output', 'html_dir', fallback='.')
+        if not os.path.exists(html_dir):
+            os.makedirs(html_dir)
+        
+        # Sanitize filename
+        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+        safe_title = safe_title[:100]
+        
+        if inline:
+            html_content = OutputHandler._inline_resources(html_content)
+        elif base_url:
+            # Convert relative URLs to absolute for non-inline HTML
+            html_content = OutputHandler._convert_urls_to_absolute(html_content, base_url)
+
+        # Wrap content in complete HTML document if needed
+        if html_content and not html_content.strip().lower().startswith('<!doctype') and not html_content.strip().lower().startswith('<html'):
+            html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+</head>
+<body>
+{html_content}
+</body>
+</html>"""
+
+        # Determine filepath
+        if output_path == '-':
+            # Write to stdout
+            sys.stdout.write(html_content)
+            sys.stdout.flush()
+            logger.info(f"HTML output to stdout (inline={inline})")
+            return None
+        elif output_path:
+            filepath = output_path
+            # Ensure directory exists
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            filepath = os.path.join(html_dir, f"{safe_title}.html")
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        logger.info(f"HTML saved to {filepath} (inline={inline})")
+        return filepath
+
+    @staticmethod
+    def _inline_resources(html_content):
+        """
+        Inline CSS and JS resources in HTML content.
+        
+        Args:
+            html_content: Raw HTML content
+            
+        Returns:
+            HTML with inlined CSS and JS
+        """
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Inline CSS
+        for link in soup.find_all('link', rel='stylesheet'):
+            href = link.get('href')
+            if href:
+                try:
+                    if not href.startswith(('http://', 'https://', 'data:')):
+                        logger.warning(f"Skipping relative CSS: {href}")
+                        continue
+                    
+                    response = requests.get(href, timeout=10)
+                    if response.status_code == 200:
+                        style = soup.new_tag('style')
+                        style.string = response.text
+                        link.replace_with(style)
+                        logger.info(f"Inlined CSS: {href}")
+                except Exception as e:
+                    logger.warning(f"Failed to inline CSS {href}: {e}")
+        
+        # Inline JS
+        for script in soup.find_all('script', src=True):
+            src = script.get('src')
+            if src:
+                try:
+                    if not src.startswith(('http://', 'https://', 'data:')):
+                        logger.warning(f"Skipping relative JS: {src}")
+                        continue
+                    
+                    response = requests.get(src, timeout=10)
+                    if response.status_code == 200:
+                        new_script = soup.new_tag('script')
+                        new_script.string = response.text
+                        script.replace_with(new_script)
+                        logger.info(f"Inlined JS: {src}")
+                except Exception as e:
+                    logger.warning(f"Failed to inline JS {src}: {e}")
+        
+        # Add meta charset if missing
+        if not soup.find('meta', charset=True):
+            head = soup.find('head')
+            if head:
+                meta = soup.new_tag('meta')
+                meta['charset'] = 'utf-8'
+                head.insert(0, meta)
+        
+        return str(soup)
 
 class TTSHandler:
     @staticmethod
@@ -529,35 +1068,126 @@ class TTSHandler:
             logger.error(f"TTS operation failed: {e}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert URL to Markdown/PDF")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("url", help="The URL to process")
-    parser.add_argument("-p", "--pdf", action="store_true", help="Generate PDF")
-    parser.add_argument("-n", "--note", action="store_true", help="Save to note directory")
-    parser.add_argument("-a", "--audio", action="store_true", help="Save as audio file")
-    parser.add_argument("-s", "--speak", action="store_true", help="Speak the content")
-    parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
-    parser.add_argument("--trans-mode", choices=['original', 'translated', 'both'], default='translated', 
-                        help="Translation mode (default: translated)")
-    parser.add_argument("-o", action="store_true", help="Same as --trans-mode original")
-    parser.add_argument("-b", action="store_true", help="Same as --trans-mode both")
-    parser.add_argument("-x", "--proxy", choices=['auto', 'win', 'no', 'set'], default='auto',
-                        help="Proxy mode: auto (env), win (system), no (none), set (custom)")
-    parser.add_argument("--set-proxy", help="Custom proxy URL (requires -x set)")
+    parser = argparse.ArgumentParser(
+        prog='uv run surf',
+        description="Surf - Convert URL to Markdown/PDF/HTML/Audio",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=False,
+        epilog="""
+Examples:
+  surf https://example.com                      # Translate to Chinese
+  surf -p https://example.com                   # Generate PDF
+  surf -h https://example.com                   # Save as HTML
+  surf -a https://example.com                   # Save as audio
+  surf -r https://example.com                   # Keep original language
+  surf -b https://example.com                   # Bilingual output
+  surf -x win https://example.com               # Use Windows proxy
+  surf -n https://example.com                   # No proxy
+  surf -hrn https://example.com                 # Combined short flags
+        """
+    )
+    # Position argument
+    parser.add_argument("url", help="URL to process")
+    
+    # Output format
+    format_group = parser.add_mutually_exclusive_group()
+    format_group.add_argument("-f", "--format", choices=['md', 'pdf', 'html', 'audio'], 
+                        help="Output format: md/pdf/html/audio (default: md)")
+    format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
+    format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
+    format_group.add_argument("-a", action="store_true", help="Shorthand for --format audio")
+    
+    # Output path
+    parser.add_argument("-o", "--output", 
+                        help="Output file path (use '-' for stdout, overrides config)")
+    
+    # Language mode
+    lang_group = parser.add_mutually_exclusive_group()
+    lang_group.add_argument("-l", "--lang", choices=['trans', 'raw', 'both'], 
+                        help="Language mode: trans=translate, raw=original, both=bilingual (default: trans)")
+    lang_group.add_argument("-r", action="store_true", help="Shorthand for --lang raw")
+    lang_group.add_argument("-b", action="store_true", help="Shorthand for --lang both")
+    
+    # TTS
+    parser.add_argument("-s", "--speak", action="store_true", 
+                        help="Speak the content")
+    
+    # HTML options
+    parser.add_argument("--html-inline", action="store_true", 
+                        help="Inline CSS/JS in HTML output")
+    
+    # Network
+    parser.add_argument("-x", "--proxy", choices=['win', 'custom', 'no'], 
+                        help="Proxy mode: win=Windows, custom=use --set-proxy, no=no proxy (default: auto)")
+    parser.add_argument("-c", action="store_true", help="Shorthand for --proxy custom")
+    parser.add_argument("-n", action="store_true", help="Shorthand for --proxy no")
+    parser.add_argument("--set-proxy", 
+                        help="Custom proxy URL (requires -x custom)")
+    
+    # LLM
+    parser.add_argument("--llm", 
+                        help="Override the default LLM provider")
+    
+    # Other options
+    parser.add_argument("--browser", action="store_true", 
+                        help="Force use of browser (Playwright)")
+    parser.add_argument("--config", 
+                        help="Path to config file")
+    parser.add_argument("--verbose", action="store_true", 
+                        help="Enable verbose logging")
+    parser.add_argument("--no-front-matter", action="store_true",
+                        help="Disable YAML front matter in markdown output")
+    parser.add_argument("--version", action="version", 
+                        version=f"%(prog)s {__version__}")
+    parser.add_argument("--help", action="help", help="Show this help message")
     
     args = parser.parse_args()
-    config = Config()
-
-    # Validate proxy argument
-    if args.proxy == 'set' and not args.set_proxy and not config.get('Network', 'custom_proxy'):
-        parser.error("--proxy set requires --set-proxy or custom_proxy in config.ini")
-
-    # Determine final translation mode
-    trans_mode = args.trans_mode
-    if args.o:
-        trans_mode = 'original'
+    
+    # Enable verbose logging if requested
+    if args.verbose:
+        setup_verbose_logging()
+    
+    # Determine config path
+    config_path = args.config if args.config else 'config.ini'
+    config = Config(config_path)
+    
+    # Validate proxy arguments
+    if args.set_proxy and args.proxy != 'custom':
+        parser.error("--set-proxy requires -x custom")
+    if args.proxy == 'custom' and not args.set_proxy:
+        parser.error("-x custom requires --set-proxy")
+    
+    # Determine final format
+    output_format = 'md'  # default
+    if args.format:
+        output_format = args.format
+    elif args.h:
+        output_format = 'html'
+    elif args.p:
+        output_format = 'pdf'
+    elif args.a:
+        output_format = 'audio'
+    
+    # Determine final language mode
+    lang_mode = 'trans'  # default
+    if args.lang:
+        lang_mode = args.lang
+    elif args.r:
+        lang_mode = 'raw'
     elif args.b:
-        trans_mode = 'both'
+        lang_mode = 'both'
+    
+    # Determine proxy mode override
+    proxy_mode = None  # use config default (auto)
+    if args.proxy:
+        proxy_mode = args.proxy
+    elif args.c:
+        proxy_mode = 'custom'
+    elif args.n:
+        proxy_mode = 'no'
+    
+    # Determine custom proxy
+    custom_proxy = args.set_proxy
 
     # Determine proxy mode
     proxy_mode = args.proxy
@@ -565,8 +1195,13 @@ def main():
 
     # 1. Fetch
     try:
-        html_content = Fetcher.fetch(args.url, config=config, use_browser=args.browser, 
-                                     proxy_mode_override=proxy_mode, custom_proxy_override=custom_proxy)
+        html_content = Fetcher.fetch(
+            args.url, 
+            config=config, 
+            use_browser=args.browser, 
+            proxy_mode_override=proxy_mode, 
+            custom_proxy_override=custom_proxy
+        )
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
         sys.exit(1)
@@ -590,19 +1225,28 @@ def main():
 
     # 4. Translate
     target_lang = config.get('Output', 'target_language', fallback='zh-cn')
+    translated_title = None  # Initialize for raw mode
     
-    if trans_mode == 'original':
-        logger.info("Translation mode set to 'original'. Skipping translation.")
+    if lang_mode == 'raw':
+        logger.info("Language mode set to 'raw'. Skipping translation.")
     else:
         original_md = md_content
         original_title = title
         
-        translated_md, translated_title = ContentProcessor.translate_if_needed(md_content, title=title, target_lang=target_lang, config=config)
+        # Get LLM provider from command line if specified
+        llm_provider = args.llm if hasattr(args, 'llm') else None
         
-        if trans_mode == 'both':
-            logger.info("Translation mode set to 'both'. Combining original and translation.")
-            # Only combine if translation actually happened (or skip logic in translate_if_needed was hit)
-            # If translate_if_needed returns the same object, we might not want to double it up.
+        translated_md, translated_title = ContentProcessor.translate_if_needed(
+            md_content, 
+            title=title, 
+            target_lang=target_lang, 
+            config=config,
+            llm_provider=llm_provider
+        )
+        
+        if lang_mode == 'both':
+            logger.info("Language mode set to 'both'. Combining original and translation.")
+            # Only combine if translation actually happened
             if translated_md != original_md:
                 title = f"{translated_title} ({original_title})"
                 md_content = f"{translated_md}\n\n---\n\n### Original Content / 原文内容\n\n{original_md}"
@@ -614,30 +1258,62 @@ def main():
             md_content = translated_md
             title = translated_title
 
-    # Output Actions
-    if args.note:
-        OutputHandler.save_note(title, md_content, config)
+    # 4.5 Convert relative URLs to absolute (after translation, before output)
+    if args.url:
+        md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, args.url)
+        # Also convert HTML URLs for HTML output
+        cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, args.url)
+
+    # 5. Output
+    # Determine output path
+    output_path = args.output if args.output else None
     
-    if args.pdf:
-        OutputHandler.generate_pdf(title, md_content, config)
+    # Handle output based on format
+    if output_format == 'pdf':
+        if output_path:
+            OutputHandler.generate_pdf(title, md_content, config, output_path)
+        else:
+            OutputHandler.generate_pdf(title, md_content, config)
 
-    if args.audio or args.speak:
-        safe_title = "".join(c for c in title if c.isalnum() or c in (' ', '.', '_', '-')).strip()
+    elif output_format == 'html':
+        if output_path:
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline, output_path=output_path)
+        else:
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
+
+    elif output_format == 'audio':
+        if output_path:
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
+        else:
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak)
+
+    else:  # md (default)
+        # Determine if translation was performed
+        translation_performed = lang_mode != 'raw'
         
-        audio_filename = None
-        if args.audio:
-            audio_dir = config.get('Output', 'audio_dir', fallback='.')
-            if not os.path.exists(audio_dir):
-                os.makedirs(audio_dir)
-            audio_filename = os.path.join(audio_dir, f"{safe_title}.mp3")
-            
-        TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=audio_filename)
-
-    if not args.note and not args.pdf and not args.audio and not args.speak:
-        # Default: Print content to stdout
-        print("\n--- FINAL CONTENT PREVIEW ---\n")
-        print(f"# {title}\n")
-        print(md_content[:500] + "..." if len(md_content) > 500 else md_content)
+        if output_path:
+            if output_path == '-':
+                # Output to stdout
+                print(f"# {title}\n")
+                print(md_content)
+            else:
+                OutputHandler.save_markdown(
+                    title, md_content, config, output_path, 
+                    html_content=html_content, 
+                    add_front_matter=not args.no_front_matter,
+                    translated_title=translated_title if translation_performed else None
+                )
+        elif args.speak:
+            TTSHandler.run_tts(title, md_content, config, speak=True)
+        else:
+            # Default: Save to default md_dir
+            md_dir = config.get('Output', 'md_dir', fallback='./notes')
+            OutputHandler.save_markdown(
+                title, md_content, config, 
+                html_content=html_content, 
+                add_front_matter=not args.no_front_matter,
+                translated_title=translated_title if translation_performed else None
+            )
 
 
 if __name__ == "__main__":
