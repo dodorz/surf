@@ -20,11 +20,11 @@ target_language = zh-cn
 ; Directory to save Markdown notes
 note_dir = ./notes
 ; Directory to save PDF files (default: current directory)
-pdf_dir = .
+pdf_dir = ./pdf
 ; Directory to save Audio files (default: current directory)
-audio_dir = .
+audio_dir = ./auido
 ; Directory to save HTML files (default: current directory)
-html_dir = .
+html_dir = ./web
 
 [TTS]
 ; Support: edge-tts
@@ -41,3 +41,16 @@ volume = +0%
 proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
+
+[publish]
+; Default publish target
+target = pastebin
+
+[publish.pastebin]
+; Pastebin API key - get from https://pastebin.com/api/api-doc.html
+; Register at https://pastebin.com/signup to get your API key
+api_dev_key = your_pastebin_api_key_here
+; Optional: Paste expiration (N, 10M, 1H, 1D, 1W, 1M, 1Y)
+; api_paste_expire_date = N
+; Optional: Paste privacy (0=public, 1=unlisted, 2=private)
+; api_paste_private = 0
