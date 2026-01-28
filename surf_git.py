@@ -1141,87 +1141,6 @@ class OutputHandler:
         
         return str(soup)
 
-class PublishHandler:
-    """Handler for publishing content to various platforms."""
-
-    @staticmethod
-    def publish_to_pastebin(title, content, config, proxy_mode_override=None, custom_proxy_override=None):
-        """
-        Publish content to pastebin.com.
-        
-        Args:
-            title: Paste title
-            content: Content to paste (Markdown without YAML front matter)
-            config: Config object
-            proxy_mode_override: Override proxy_mode from command line
-            custom_proxy_override: Override custom_proxy from command line
-            
-        Returns:
-            str: URL of the created paste, or None if failed
-        """
-        api_dev_key = config.get('publish.pastebin', 'api_dev_key')
-        if not api_dev_key:
-            logger.error("Pastebin API key not found in config [publish.pastebin] section.")
-            return None
-        
-        logger.info(f"Publishing to pastebin.com as '{title}'...")
-        
-        # Get proxies for the request
-        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        
-        # Prepare POST data (equivalent to curl command)
-        data = {
-            'api_dev_key': api_dev_key,
-            'api_option': 'paste',
-            'api_paste_code': content,
-            'api_paste_name': title,
-        }
-        
-        # Optional: get additional parameters from config
-        paste_expire = config.get('publish.pastebin', 'api_paste_expire', fallback=None)
-        paste_private = config.get('publish.pastebin', 'api_paste_private', fallback='0')
-        
-        if paste_expire:
-            data['api_paste_expire_date'] = paste_expire
-        if paste_private:
-            data['api_paste_private'] = paste_private
-        
-        # Verbose logging of POST data
-        logger.debug(f"Pastebin POST URL: https://pastebin.com/api/api_post.php")
-        logger.debug(f"Pastebin POST data:")
-        for key, value in data.items():
-            if key == 'api_paste_code':
-                logger.debug(f"  {key}: <{len(value)} chars>")
-                logger.debug(f"  Content preview: {value[:200]}...")
-            elif key == 'api_paste_name':
-                logger.debug(f"  {key}: {value}")
-            elif key == 'api_dev_key':
-                logger.debug(f"  {key}: <hidden>")
-            else:
-                logger.debug(f"  {key}: {value}")
-        
-        try:
-            response = requests.post(
-                'https://pastebin.com/api/api_post.php',
-                data=data,
-                proxies=req_proxies,
-                timeout=30
-            )
-            
-            # Check for errors in response
-            if response.text.startswith('Bad API request'):
-                logger.error(f"Pastebin API error: {response.text}")
-                return None
-            
-            # Success: response is the paste URL
-            paste_url = response.text.strip()
-            logger.info(f"Successfully published to: {paste_url}")
-            return paste_url
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to publish to pastebin: {e}")
-            return None
-
 class TTSHandler:
     @staticmethod
     async def generate_speech(text, output_file, config):
@@ -1292,12 +1211,11 @@ Examples:
     
     # Output format
     format_group = parser.add_mutually_exclusive_group()
-    format_group.add_argument("-f", "--format", choices=['md', 'pdf', 'html', 'audio', 'publish'], 
-                        help="Output format: md/pdf/html/audio/publish (default: md)")
+    format_group.add_argument("-f", "--format", choices=['md', 'pdf', 'html', 'audio'], 
+                        help="Output format: md/pdf/html/audio (default: md)")
     format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
     format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
     format_group.add_argument("-a", action="store_true", help="Shorthand for --format audio")
-    format_group.add_argument("-P", action="store_true", help="Shorthand for --format publish")
     
     # Output path
     parser.add_argument("-o", "--output", 
@@ -1369,8 +1287,6 @@ Examples:
         output_format = 'pdf'
     elif args.a:
         output_format = 'audio'
-    elif args.P:
-        output_format = 'publish'
     
     # Determine final language mode
     lang_mode = 'trans'  # default
@@ -1490,19 +1406,6 @@ Examples:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
         else:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak)
-
-    elif output_format == 'publish':
-        # Publish to pastebin (md content without YAML front matter)
-        paste_url = PublishHandler.publish_to_pastebin(
-            title, md_content, config, 
-            proxy_mode_override=proxy_mode, 
-            custom_proxy_override=custom_proxy
-        )
-        if paste_url:
-            print(f"\nPublished to: {paste_url}")
-        else:
-            logger.error("Failed to publish content.")
-            sys.exit(1)
 
     else:  # md (default)
         # Determine if translation was performed

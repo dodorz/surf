@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "0.1.0"
+version = "1.0.3.10"
 description = "A powerful Python CLI tool that converts web pages into clean Markdown or PDF files"
 readme = "README.md"
 license = {text = "MIT"}
@@ -43,6 +43,7 @@ dependencies = [
     "playsound==1.2.2",
     "trafilatura",
     "python-dateutil",
+    "flask",
 ]
 
 [project.optional-dependencies]
