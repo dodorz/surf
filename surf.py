@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.0.3.11"
+__version__ = "1.0.3.12"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -218,15 +218,12 @@ class Fetcher:
         """
         logger.info(f"Fetching {url}...")
         
-        # Check for special site handlers first (if not forcing browser)
-        if not use_browser:
-            handler, site_name = _get_handler_for_url(url)
-            if handler:
-                logger.info(f"Using special handler for {site_name}")
-                html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
-                if html_content:
-                    return html_content
-                # If handler returns None, fall through to regular fetch
+        handler, site_name = _get_handler_for_url(url)
+        if handler:
+            logger.info(f"Using special handler for {site_name}")
+            html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
+            if html_content:
+                return html_content
         
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         
@@ -299,6 +296,50 @@ class Fetcher:
             return None
 
     @staticmethod
+    def _fetch_wechat_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        from playwright.sync_api import sync_playwright
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, proxy=pw_proxy) if pw_proxy else p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile MicroMessenger/8.0.30")
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                try:
+                    page.wait_for_selector("#js_content", timeout=15000)
+                except Exception:
+                    pass
+                title = page.evaluate("() => (document.querySelector('#activity-name')?.innerText || document.title || '').trim()")
+                content = page.evaluate("""() => {
+                    const el = document.querySelector('#js_content') || document.querySelector('.rich_media_content');
+                    if (el && el.innerHTML && el.innerHTML.trim().length > 20) return el.innerHTML;
+                    const scripts = Array.from(document.scripts).map(s => s.textContent || '');
+                    let match = null;
+                    for (const sc of scripts) {
+                        let m = sc.match(/desc\\s*:\\s*JsDecode\\((\"[\\s\\S]*?\")\\)/);
+                        if (m) { match = m[1]; break; }
+                        m = sc.match(/desc\\s*:\\s*\"([\\s\\S]*?)\"/);
+                        if (m) { match = '"' + m[1] + '"'; break; }
+                    }
+                    if (match) {
+                        try {
+                            const raw = JSON.parse(match);
+                            return raw;
+                        } catch(e) {}
+                    }
+                    return '';
+                }""")
+                html_content = None
+                if content and content.strip():
+                    html_content = f"<html><head><meta charset='utf-8'><title>{title or 'Untitled'}</title></head><body><article>{content}</article></body></html>"
+                return html_content
+            except Exception as e:
+                logger.warning(f"WeChat handler failed: {e}")
+                return None
+            finally:
+                browser.close()
+
+    @staticmethod
     def fetch_with_browser(url, config, proxy_mode_override=None, custom_proxy_override=None):
         logger.info("Launching browser...")
         from playwright.sync_api import sync_playwright
@@ -351,6 +392,13 @@ SPECIAL_SITE_HANDLERS = {
         ],
         'handler': Fetcher._fetch_twitter_oembed,
     },
+    'wechat': {
+        'patterns': [
+            r'^https?://mp\.weixin\.qq\.com/s/',
+            r'^https?://mp\.weixin\.qq\.com/.*__biz=',
+        ],
+        'handler': Fetcher._fetch_wechat_article,
+    },
 }
 
 # Cache for compiled regex patterns (performance optimization)
@@ -391,13 +439,18 @@ class ContentProcessor:
         soup = BeautifulSoup(html, 'html.parser')
         for img in soup.find_all('img'):
             # Normalize src
-            if not img.get('src'):
+            src = img.get('src')
+            should_replace_src = not src or (isinstance(src, str) and src.startswith('data:image'))
+            if should_replace_src:
                 for attr in ['data-src', 'data-original', 'data-url', 'data-srcset', 'srcset']:
-                    if img.get(attr):
-                        # For srcset, take the first URL
-                        val = img[attr].split(',')[0].split(' ')[0]
-                        img['src'] = val
-                        break
+                    val = img.get(attr)
+                    if not val:
+                        continue
+                    val = val.split(',')[0].split(' ')[0]
+                    if val.startswith('//'):
+                        val = f"https:{val}"
+                    img['src'] = val
+                    break
             
             # Flatten picture/source
             parent = img.parent
