@@ -90,13 +90,14 @@ custom_proxy =
 surf "https://example.com"
 ```
 
-### 输出路径 (-o)
+### 输出路径 (-o / -O)
 
-使用 `-o` 或 `--output` 指定输出文件路径：
+使用 `-o` 或 `--output` 指定输出文件路径，或使用 `-O` 直接输出到控制台：
 
 ```bash
 surf "https://example.com" -o output.md     # 保存为 output.md
 surf "https://example.com" -o -              # 输出到 stdout
+surf "https://example.com" -O               # 输出到 stdout (简写)
 surf -p "https://example.com" -o out.pdf     # PDF 保存为 out.pdf
 ```
 

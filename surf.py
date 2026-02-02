@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.0.3.10"
+__version__ = "1.0.3.11"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -1302,6 +1302,7 @@ Examples:
     # Output path
     parser.add_argument("-o", "--output", 
                         help="Output file path (use '-' for stdout, overrides config)")
+    parser.add_argument("-O", action="store_true", help="Shorthand for --output - (output to stdout)")
     
     # Language mode
     lang_group = parser.add_mutually_exclusive_group()
@@ -1471,6 +1472,8 @@ Examples:
     # 5. Output
     # Determine output path
     output_path = args.output if args.output else None
+    if args.O:
+        output_path = '-'
     
     # Handle output based on format
     if output_format == 'pdf':
