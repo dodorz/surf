@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run
 """
 Surf Web Interface - A web interface for the Surf URL to Markdown/PDF converter.
 
