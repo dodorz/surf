@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.0.4.15"
+__version__ = "1.1.0.18"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -259,7 +259,7 @@ class Fetcher:
         """
         logger.info(f"Fetching {url}...")
 
-        handler, site_name = _get_handler_for_url(url)
+        handler, site_name, site_config = _get_handler_for_url(url)
         if handler:
             logger.info(f"Using special handler for {site_name}")
             html_content = handler(
@@ -555,6 +555,47 @@ class Fetcher:
         return str(soup)
 
     @staticmethod
+    def _clean_xiaohongshu_content(html_content):
+        """
+        Clean Xiaohongshu content by adding proper styling.
+        Keeps: note title, content, images
+        Adds styling for avatar images (60x60 size)
+        Adds meta tag to fix 403 image errors
+
+        Args:
+            html_content: Raw HTML from Xiaohongshu
+
+        Returns:
+            Cleaned HTML content with proper styling
+        """
+        if not html_content:
+            return html_content
+
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        # Add styling for avatar images (60x60 size)
+        # Avatar images are from sns-avatar-qc.xhscdn.com
+        for img in soup.find_all("img", src=re.compile(r"sns-avatar-qc\.xhscdn\.com", re.IGNORECASE)):
+            img["style"] = "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
+            logger.debug(f"Applied 60x60 styling to avatar: {img.get('src', '')}")
+
+        # Fix images with 403 errors by adding proper referrer meta tag
+        # Some xhscdn images require a referrer
+        meta_referrer = soup.new_tag("meta")
+        meta_referrer["name"] = "referrer"
+        meta_referrer["content"] = "no-referrer-when-downgrade"
+
+        head = soup.find("head")
+        if head:
+            head.insert(0, meta_referrer)
+        else:
+            head = soup.new_tag("head")
+            head.insert(0, meta_referrer)
+            soup.insert(0, head)
+
+        return str(soup)
+
+    @staticmethod
     def _fetch_twitter_oembed(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
@@ -822,6 +863,147 @@ class Fetcher:
                 context.close()
                 browser.close()
 
+    @staticmethod
+    def _fetch_xiaohongshu(
+        url, config, proxy_mode_override=None, custom_proxy_override=None
+    ):
+        """
+        Fetch Xiaohongshu (小红书) content with authentication support.
+        Requires prior login using --login xiaohongshu
+        """
+        from playwright.sync_api import sync_playwright
+
+        req_proxies, pw_proxy = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+
+        # Check if auth state exists before launching browser
+        state = AuthHandler.load_state("xiaohongshu")
+        if not state:
+            logger.warning("No saved auth state found for xiaohongshu. Starting interactive login...")
+            login_success = AuthHandler.interactive_login(
+                "xiaohongshu", "https://www.xiaohongshu.com",
+                config, proxy_mode_override, custom_proxy_override
+            )
+            if not login_success:
+                logger.error("Interactive login failed")
+                return None
+            logger.info("Login successful. Proceeding to fetch content...")
+
+        with sync_playwright() as p:
+            browser = (
+                p.chromium.launch(headless=True, proxy=pw_proxy)
+                if pw_proxy
+                else p.chromium.launch(headless=True)
+            )
+
+            # Try to use saved auth state
+            context = AuthHandler.create_context_with_auth(
+                browser,
+                "xiaohongshu",
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(3000)
+
+                # Check if we're still on login page (auth failed or not logged in)
+                current_url = page.url
+                if "/login" in current_url or "/signin" in current_url:
+                    logger.warning("Saved auth state expired. Starting interactive login...")
+                    browser.close()
+                    # Automatically trigger interactive login
+                    login_success = AuthHandler.interactive_login(
+                        "xiaohongshu", "https://www.xiaohongshu.com", 
+                        config, proxy_mode_override, custom_proxy_override
+                    )
+                    if login_success:
+                        # Retry fetching with new auth state
+                        return Fetcher._fetch_xiaohongshu(
+                            url, config, proxy_mode_override, custom_proxy_override
+                        )
+                    return None
+
+                # Extract note content
+                # Xiaohongshu note pages have URLs like: https://www.xiaohongshu.com/explore/NOTE_ID
+                title = page.evaluate("""() => {
+                    const titleEl = document.querySelector('h1.title') || 
+                                     document.querySelector('.note-title') ||
+                                     document.querySelector('h1');
+                    return titleEl?.innerText?.trim() || document.title;
+                }
+                """)
+
+                content = page.evaluate("""() => {
+                    // Try multiple selectors for note content
+                    const selectors = [
+                        '.note-content',
+                        '.content',
+                        '.desc',
+                        '.note-desc',
+                        '[class*="content"]',
+                        '[class*="desc"]'
+                    ];
+                    
+                    for (const selector of selectors) {
+                        const el = document.querySelector(selector);
+                        if (el && el.innerText && el.innerText.trim().length > 10) {
+                            return el.innerHTML;
+                        }
+                    }
+                    
+                    // Fallback: get main content area
+                    const main = document.querySelector('main') || document.querySelector('article');
+                    if (main) return main.innerHTML;
+                    
+                    return document.body.innerHTML;
+                }
+                """)
+
+                # Extract images
+                images = page.evaluate("""() => {
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    return imgs
+                        .map(img => img.src)
+                        .filter(src => src && src.includes('xhscdn.com'));
+                }
+                """)
+
+                # Build HTML with full page structure (for cleaning)
+                html_parts = [
+                    "<html><head><meta charset='utf-8'>",
+                    f"<title>{title}</title>",
+                    "</head><body><article>",
+                    f"<h1>{title}</h1>",
+                    content,
+                ]
+
+                # Add images if found (excluding avatars which are already in content)
+                if images:
+                    html_parts.append("<div class='images'>")
+                    for img_url in images:
+                        # Skip avatar images (they're already styled separately)
+                        if 'sns-avatar-qc.xhscdn.com' not in img_url:
+                            html_parts.append(f'<img src="{img_url}" />')
+                    html_parts.append("</div>")
+
+                html_parts.append("</article></body></html>")
+                html_content = ''.join(html_parts)
+
+                # Clean the content to remove unrelated UI elements
+                html_content = Fetcher._clean_xiaohongshu_content(html_content)
+
+                return html_content
+
+            except Exception as e:
+                logger.warning(f"Xiaohongshu handler failed: {e}")
+                return None
+            finally:
+                browser.close()
+
 
 # =============================================================================
 # Special Site Handlers
@@ -852,6 +1034,17 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://mp\.weixin\.qq\.com/.*__biz=",
         ],
         "handler": Fetcher._fetch_wechat_article,
+        "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
+        "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
+    },
+    "xiaohongshu": {
+        "patterns": [
+            r"^https?://(www\.)?xiaohongshu\.com/explore/",
+            r"^https?://(www\.)?xiaohongshu\.com/user/profile/",
+        ],
+        "handler": Fetcher._fetch_xiaohongshu,
+        "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
+        "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
     },
 }
 
@@ -867,7 +1060,7 @@ def _get_handler_for_url(url):
         url: The URL to check
 
     Returns:
-        tuple: (handler_function, site_name) or (None, None) if no special handler
+        tuple: (handler_function, site_name, site_config) or (None, None, None) if no special handler
     """
     for site_name, config in SPECIAL_SITE_HANDLERS.items():
         patterns = config["patterns"]
@@ -880,9 +1073,9 @@ def _get_handler_for_url(url):
 
         for pattern in compiled_patterns:
             if pattern.match(url):
-                return config["handler"], site_name
+                return config["handler"], site_name, config
 
-    return None, None
+    return None, None, None
 
 
 class ContentProcessor:
@@ -1847,6 +2040,164 @@ class PublishHandler:
             return None
 
 
+class AuthHandler:
+    """
+    Handler for browser authentication state management.
+    Supports persistent login state for sites requiring authentication.
+    """
+
+    # Directory to store authentication states
+    AUTH_STATE_DIR = os.path.join(os.path.expanduser("~"), ".surf", "auth")
+
+    @staticmethod
+    def _get_state_file(site_name):
+        """Get the path to the state file for a specific site."""
+        if not os.path.exists(AuthHandler.AUTH_STATE_DIR):
+            os.makedirs(AuthHandler.AUTH_STATE_DIR)
+        return os.path.join(AuthHandler.AUTH_STATE_DIR, f"{site_name}_state.json")
+
+    @staticmethod
+    def load_state(site_name):
+        """
+        Load saved browser state for a site.
+
+        Args:
+            site_name: Identifier for the site (e.g., 'xiaohongshu', 'twitter')
+
+        Returns:
+            dict: Browser state dictionary, or None if not found
+        """
+        state_file = AuthHandler._get_state_file(site_name)
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r", encoding="utf-8") as f:
+                    import json
+                    state = json.load(f)
+                    logger.info(f"Loaded auth state for {site_name}")
+                    return state
+            except Exception as e:
+                logger.warning(f"Failed to load auth state for {site_name}: {e}")
+        return None
+
+    @staticmethod
+    def save_state(site_name, state):
+        """
+        Save browser state for a site.
+
+        Args:
+            site_name: Identifier for the site
+            state: Browser state dictionary from browser_context.storage_state()
+        """
+        state_file = AuthHandler._get_state_file(site_name)
+        try:
+            with open(state_file, "w", encoding="utf-8") as f:
+                import json
+                json.dump(state, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved auth state for {site_name} to {state_file}")
+        except Exception as e:
+            logger.error(f"Failed to save auth state for {site_name}: {e}")
+
+    @staticmethod
+    def clear_state(site_name=None):
+        """
+        Clear saved authentication state.
+
+        Args:
+            site_name: Site identifier, or None to clear all states
+        """
+        if site_name:
+            state_file = AuthHandler._get_state_file(site_name)
+            if os.path.exists(state_file):
+                os.remove(state_file)
+                logger.info(f"Cleared auth state for {site_name}")
+        else:
+            if os.path.exists(AuthHandler.AUTH_STATE_DIR):
+                import shutil
+                shutil.rmtree(AuthHandler.AUTH_STATE_DIR)
+                logger.info("Cleared all auth states")
+
+    @staticmethod
+    def interactive_login(site_name, login_url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Perform interactive login for a site.
+        Opens a visible browser window for user to manually log in.
+
+        Args:
+            site_name: Site identifier
+            login_url: URL to open for login
+            config: Config object
+            proxy_mode_override: Optional proxy mode override
+            custom_proxy_override: Optional custom proxy override
+
+        Returns:
+            bool: True if login was successful, False otherwise
+        """
+        from playwright.sync_api import sync_playwright
+
+        req_proxies, pw_proxy = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+
+        print(f"\n{'='*60}")
+        print(f"Interactive Login for {site_name}")
+        print(f"{'='*60}")
+        print(f"A browser window will open. Please:")
+        print(f"1. Log in to {site_name} manually")
+        print(f"2. Complete any CAPTCHA or verification if needed")
+        print(f"3. Once logged in, press Enter in this terminal to save the session")
+        print(f"{'='*60}\n")
+
+        with sync_playwright() as p:
+            browser = (
+                p.chromium.launch(headless=False, proxy=pw_proxy)
+                if pw_proxy
+                else p.chromium.launch(headless=False)
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+                print(f"Browser opened. Please log in to {site_name}...")
+                input("Press Enter after you have logged in...")
+
+                # Save the state
+                state = context.storage_state()
+                AuthHandler.save_state(site_name, state)
+                print(f"Login state saved for {site_name}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Interactive login failed: {e}")
+                return False
+            finally:
+                browser.close()
+
+    @staticmethod
+    def create_context_with_auth(browser, site_name, **context_options):
+        """
+        Create a browser context with authentication state if available.
+
+        Args:
+            browser: Playwright browser instance
+            site_name: Site identifier
+            **context_options: Additional options for new_context()
+
+        Returns:
+            BrowserContext: Context with auth state if available
+        """
+        state = AuthHandler.load_state(site_name)
+        if state:
+            logger.info(f"Using saved auth state for {site_name}")
+            return browser.new_context(storage_state=state, **context_options)
+        else:
+            logger.info(f"No saved auth state for {site_name}")
+            return browser.new_context(**context_options)
+
+
 class TTSHandler:
     @staticmethod
     async def generate_speech(text, output_file, config):
@@ -1918,10 +2269,19 @@ Examples:
   surf -x win https://example.com               # Use Windows proxy
   surf -n https://example.com                   # No proxy
   surf -hrn https://example.com                 # Combined short flags
+
+Special Sites:
+  WeChat & Xiaohongshu: Default to no proxy and no translation.
+                        Override with -x/--proxy and -l/--lang if needed.
+  Twitter/X:           Always uses proxy settings.
+
+Authentication:
+  surf --login xiaohongshu                   # Login to Xiaohongshu
+  surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
         """,
     )
     # Position argument
-    parser.add_argument("url", help="URL to process")
+    parser.add_argument("url", nargs="?", help="URL to process (not required for --login or --clear-auth)")
 
     # Output format
     format_group = parser.add_mutually_exclusive_group()
@@ -1965,6 +2325,18 @@ Examples:
 
     # TTS
     parser.add_argument("-s", "--speak", action="store_true", help="Speak the content")
+
+    # Authentication
+    parser.add_argument(
+        "--login",
+        metavar="SITE",
+        help="Interactive login for a site (e.g., xiaohongshu). Opens browser for manual login.",
+    )
+    parser.add_argument(
+        "--clear-auth",
+        metavar="SITE",
+        help="Clear saved authentication for a site (use 'all' to clear all)",
+    )
 
     # HTML options
     parser.add_argument(
@@ -2011,11 +2383,38 @@ Examples:
     config_path = args.config if args.config else "config.ini"
     config = Config(config_path)
 
+    # Handle --clear-auth
+    if args.clear_auth:
+        if args.clear_auth.lower() == "all":
+            AuthHandler.clear_state()
+        else:
+            AuthHandler.clear_state(args.clear_auth)
+        return
+
+    # Handle --login
+    if args.login:
+        site_name = args.login.lower()
+        # Define login URLs for supported sites
+        login_urls = {
+            "xiaohongshu": "https://www.xiaohongshu.com",
+        }
+        if site_name not in login_urls:
+            parser.error(f"Unsupported site: {site_name}. Supported: {', '.join(login_urls.keys())}")
+        login_url = login_urls[site_name]
+        success = AuthHandler.interactive_login(
+            site_name, login_url, config, args.proxy, args.set_proxy
+        )
+        sys.exit(0 if success else 1)
+
     # Validate proxy arguments
     if args.set_proxy and args.proxy != "custom":
         parser.error("--set-proxy requires -x custom")
     if args.proxy == "custom" and not args.set_proxy:
         parser.error("-x custom requires --set-proxy")
+
+    # Check if url is required but not provided
+    if not args.url:
+        parser.error("URL is required (unless using --login or --clear-auth)")
 
     # Determine final format
     output_format = "md"  # default
@@ -2051,9 +2450,18 @@ Examples:
     # Determine custom proxy
     custom_proxy = args.set_proxy
 
-    # Determine proxy mode
-    proxy_mode = args.proxy
-    custom_proxy = args.set_proxy
+    # Check if URL matches special site handlers for default policies
+    handler, site_name, site_config = _get_handler_for_url(args.url)
+    if site_config:
+        # Apply special site defaults (can be overridden by command line)
+        # Priority: Command line > Special site default > Config file
+        if site_config.get("default_no_proxy") and proxy_mode is None:
+            logger.info(f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)")
+            proxy_mode = "no"
+
+        if site_config.get("default_no_translate") and lang_mode == "trans":
+            logger.info(f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)")
+            lang_mode = "raw"
 
     # 1. Fetch
     try:

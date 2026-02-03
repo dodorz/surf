@@ -118,3 +118,6 @@ venv.bak/
 *.swo
 *~
 .DS_Store
+
+# Linting
+.flake8

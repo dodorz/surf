@@ -7,11 +7,20 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
+- **特殊网站处理**：针对 Twitter/X、微信公众号、小红书等网站优化处理，支持自动认证。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
+- **认证管理**：支持需要登录的网站（如小红书）的交互式登录功能。
+
+### 特殊网站策略
+
+部分网站有默认策略，可通过命令行参数覆盖：
+
+- **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
+- **Twitter/X**：使用强制代理设置
 
 ## 安装
 
@@ -147,6 +156,25 @@ surf "https://example.com" --config myconfig.ini  # 指定配置文件
 surf "https://example.com" --verbose   # 详细日志输出
 surf --version                         # 查看版本
 ```
+
+### 认证功能 (--login / --clear-auth)
+
+对于需要登录的网站（如小红书），使用交互式登录功能：
+
+```bash
+# 首次登录小红书
+surf --login xiaohongshu
+
+# 登录后正常获取内容
+surf "https://www.xiaohongshu.com/explore/..."
+
+# 清除保存的认证
+surf --clear-auth xiaohongshu
+# 或清除所有网站的认证
+surf --clear-auth all
+```
+
+**注意**：认证状态保存在 `~/.surf/auth/` 目录中，供后续使用。
 
 ## 单字符参数连写
 

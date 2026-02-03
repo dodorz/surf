@@ -15,20 +15,39 @@ import threading
 import webbrowser
 from pathlib import Path
 
-__version__ = "1.0.4.15"
+__version__ = "1.1.0.18"
 
 # Flask web framework
 try:
-    from flask import Flask, render_template_string, request, jsonify, send_file, Response
+    from flask import (
+        Flask,
+        render_template_string,
+        request,
+        jsonify,
+        send_file,
+        Response,
+    )
 except ImportError:
     print("Flask not installed. Installing...")
     os.system("pip install flask")
-    from flask import Flask, render_template_string, request, jsonify, send_file, Response
+    from flask import (
+        Flask,
+        render_template_string,
+        request,
+        jsonify,
+        send_file,
+        Response,
+    )
 
 # Import surf modules
 from surf import (
-    Config, Fetcher, ContentProcessor, OutputHandler, TTSHandler,
-    __version__, logger
+    Config,
+    Fetcher,
+    ContentProcessor,
+    OutputHandler,
+    TTSHandler,
+    __version__,
+    logger,
 )
 
 app = Flask(__name__)
@@ -536,189 +555,187 @@ HTML_TEMPLATE = """
 
 def get_config():
     """Get config object."""
-    config_path = 'config.ini'
+    config_path = "config.ini"
     if os.path.exists(config_path):
         return Config(config_path)
     return Config()
 
 
-@app.route('/')
+@app.route("/")
 def index():
     """Serve the main page."""
     return render_template_string(HTML_TEMPLATE, version=__version__)
 
 
-@app.route('/api/process', methods=['POST'])
+@app.route("/api/process", methods=["POST"])
 def process_url():
     """Process a URL and return the result."""
     import traceback
-    
+
     data = request.json
-    url = data.get('url')
-    
+    url = data.get("url")
+
     if not url:
-        return jsonify({'success': False, 'error': 'URL is required'})
-    
+        return jsonify({"success": False, "error": "URL is required"})
+
     config = get_config()
-    
+
     try:
         # Fetch content
-        proxy_mode = data.get('proxy', 'auto')
-        custom_proxy = data.get('custom_proxy')
-        
+        proxy_mode = data.get("proxy", "auto")
+        custom_proxy = data.get("custom_proxy")
+
         html_content = Fetcher.fetch(
             url,
             config=config,
-            use_browser=data.get('browser', False),
-            proxy_mode_override=proxy_mode if proxy_mode != 'auto' else None,
-            custom_proxy_override=custom_proxy
+            use_browser=data.get("browser", False),
+            proxy_mode_override=proxy_mode if proxy_mode != "auto" else None,
+            custom_proxy_override=custom_proxy,
         )
-        
+
         # Extract content
         title, cleaned_html = ContentProcessor.extract_content(html_content)
         if not title:
             title = "Untitled"
-        
+
         # Convert to markdown
         md_content = ContentProcessor.to_markdown(cleaned_html)
-        
+
         # Handle language mode
-        lang_mode = data.get('lang', 'trans')
-        target_lang = config.get('Output', 'target_language', fallback='zh-cn')
-        
+        lang_mode = data.get("lang", "trans")
+        target_lang = config.get("Output", "target_language", fallback="zh-cn")
+
         original_md = md_content
         original_title = title
         translated_title = None
-        
-        if lang_mode != 'raw':
+
+        if lang_mode != "raw":
             md_content, translated_title = ContentProcessor.translate_if_needed(
-                md_content,
-                title=title,
-                target_lang=target_lang,
-                config=config
+                md_content, title=title, target_lang=target_lang, config=config
             )
-            
-            if lang_mode == 'both' and translated_title != original_title:
+
+            if lang_mode == "both" and translated_title != original_title:
                 title = f"{translated_title} ({original_title})"
                 md_content = f"{md_content}\n\n---\n\n### Original Content / 原文内容\n\n{original_md}"
             else:
                 title = translated_title
-        
+
         # Convert relative URLs to absolute
         md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, url)
         cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, url)
-        
+
         # Determine if translation was performed for YAML front matter
-        translation_performed = lang_mode != 'raw'
+        translation_performed = lang_mode != "raw"
         translator = None
         if translation_performed:
             try:
                 llm_config = config.get_llm_config()
-                translator = llm_config['model']
+                translator = llm_config["model"]
             except Exception:
                 pass
-        
+
         # Save outputs
         files = {}
-        
+
         # Save markdown
         md_path = OutputHandler.save_markdown(
-            title, md_content, config,
+            title,
+            md_content,
+            config,
             html_content=html_content,
-            add_front_matter=not data.get('no_front_matter', False),
+            add_front_matter=not data.get("no_front_matter", False),
             translated_title=translated_title if translation_performed else None,
             source_url=url,
-            translator=translator
+            translator=translator,
         )
-        files['md'] = os.path.basename(md_path) if md_path else None
-        
+        files["md"] = os.path.basename(md_path) if md_path else None
+
         # Save HTML
         html_path = OutputHandler.save_html(
-            title, cleaned_html, config,
-            inline=data.get('html_inline', False)
+            title, cleaned_html, config, inline=data.get("html_inline", False)
         )
-        files['html'] = os.path.basename(html_path) if html_path else None
-        
+        files["html"] = os.path.basename(html_path) if html_path else None
+
         # Generate PDF if requested
-        if data.get('format') == 'pdf':
+        if data.get("format") == "pdf":
             pdf_path = OutputHandler.generate_pdf(title, md_content, config)
-            files['pdf'] = os.path.basename(pdf_path) if pdf_path else None
-        
+            files["pdf"] = os.path.basename(pdf_path) if pdf_path else None
+
         # Generate audio if requested
-        if data.get('format') == 'audio':
+        if data.get("format") == "audio":
             audio_path = None
             TTSHandler.run_tts(title, md_content, config, speak=False)
             # Find the generated audio file
-            audio_dir = config.get('Output', 'audio_dir', fallback='.')
+            audio_dir = config.get("Output", "audio_dir", fallback=".")
             for f in os.listdir(audio_dir):
-                if f.endswith('.mp3') and title[:20].replace(' ', '_') in f:
+                if f.endswith(".mp3") and title[:20].replace(" ", "_") in f:
                     audio_path = os.path.join(audio_dir, f)
                     break
             if audio_path:
-                files['audio'] = os.path.basename(audio_path)
-        
-        return jsonify({
-            'success': True,
-            'title': title,
-            'markdown': md_content,
-            'html': cleaned_html,
-            'raw': original_md,
-            'files': files
-        })
-        
+                files["audio"] = os.path.basename(audio_path)
+
+        return jsonify(
+            {
+                "success": True,
+                "title": title,
+                "markdown": md_content,
+                "html": cleaned_html,
+                "raw": original_md,
+                "files": files,
+            }
+        )
+
     except Exception as e:
         logger.error(f"Processing failed: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        })
+        return jsonify({"success": False, "error": str(e)})
 
 
-@app.route('/download/<filename>')
+@app.route("/download/<filename>")
 def download_file(filename):
     """Download a generated file."""
     # Search in common output directories
-    search_dirs = ['.', 'notes', 'pdf', 'audio', 'web', 'html']
-    
+    search_dirs = [".", "notes", "pdf", "audio", "web", "html"]
+
     for directory in search_dirs:
         filepath = os.path.join(directory, filename)
         if os.path.exists(filepath):
             return send_file(filepath, as_attachment=True)
-    
-    return jsonify({'error': 'File not found'}), 404
+
+    return jsonify({"error": "File not found"}), 404
 
 
-def run_server(host='127.0.0.1', port=8080, debug=False):
+def run_server(host="127.0.0.1", port=18473, debug=False):
     """Run the web server."""
     # Open browser
     url = f"http://{host}:{port}"
     threading.Timer(1, lambda: webbrowser.open(url)).start()
-    
+
     print(f"\n🌊 Surf Web Interface v{__version__}")
     print(f"=====================================")
     print(f"Server running at: {url}")
     print(f"Press Ctrl+C to stop\n")
-    
+
     app.run(host=host, port=port, debug=debug)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog='python surf_web.py',
-        description='Surf Web Interface - A web interface for URL to Markdown/PDF/HTML/Audio converter',
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        prog="python surf_web.py",
+        description="Surf Web Interface - A web interface for URL to Markdown/PDF/HTML/Audio converter",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
-    parser.add_argument('--host', default='127.0.0.1',
-                        help='Host to bind (default: 127.0.0.1)')
-    parser.add_argument('--port', type=int, default=8080,
-                        help='Port to bind (default: 8080)')
-    parser.add_argument('--debug', action='store_true',
-                        help='Enable debug mode')
-    parser.add_argument('--bind', help='Bind address (deprecated, use --host)')
-    
+
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=18473, help="Port to bind (default: 18473)"
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+    parser.add_argument("--bind", help="Bind address (deprecated, use --host)")
+
     args = parser.parse_args()
-    
+
     host = args.bind if args.bind else args.host
     run_server(host=host, port=args.port, debug=args.debug)
 

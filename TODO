@@ -20,11 +20,12 @@
 - [ ] PDF生成增加竖屏选项
 - [ ] macOS兼容性
 - [x] Web接口
-- [ ] 特定网站的处理
+- [x] 特定网站的处理
     - [ ] 重定向与短链接
-    - [ ] Twitter
+    - [x] Twitter
     - [ ] pocketcasts(https://pca.st/episode/)
-    - [ ] 小红书（题图ocr）
+    - [x] 小红书
+        - [ ] 题图ocr
 - [ ] Termux兼容性
 - [ ] 简单Android应用包装
 - [ ] usage中参数的顺序

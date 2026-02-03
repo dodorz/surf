@@ -7,29 +7,38 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
+- **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, and Xiaohongshu (RED) with automatic authentication support.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
-- **Translation Modes**: Choose between `original` (no translation), `translated` (default), or `both` (bilingual).
+- **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 
 ### Translation Mode
 
-By default, the content is translated to the target language. Use `--trans-mode` or shortcuts to change this:
+By default, the content is translated to the target language. Use `--lang` or shortcuts to change this:
 
-- `--trans-mode original` or `-o`: No translation.
-- `--trans-mode translated`: Only the translation (default).
-- `--trans-mode both` or `-b`: Bilingual output.
+- `--lang trans`: Translation (default).
+- `--lang raw` or `-r`: No translation.
+- `--lang both` or `-b`: Bilingual output.
 
 ```bash
 # Bilingual output
-uv run surf.py "https://example.com" -b
+surf "https://example.com" -b
 
 # Original only (no translation)
-uv run surf.py "https://example.com" -o
+surf "https://example.com" -r
 ```
 
 - **PDF Generation**: Generate PDF files using Playwright.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
+- **Authentication Management**: Interactive login support for sites requiring authentication (e.g., Xiaohongshu).
+
+### Special Site Policies
+
+Some sites have default policies that can be overridden with command-line arguments:
+
+- **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
+- **Twitter/X**: Uses forced proxy settings
 
 ## Installation
 
@@ -160,6 +169,25 @@ Force using Playwright (useful for tricky sites).
 ```bash
 uv run surf.py "https://example.com" --browser
 ```
+
+### Authentication (--login / --clear-auth)
+
+For sites requiring authentication (e.g., Xiaohongshu), use interactive login:
+
+```bash
+# First-time login for Xiaohongshu
+surf --login xiaohongshu
+
+# After login, fetch content normally
+surf "https://www.xiaohongshu.com/explore/..."
+
+# Clear saved authentication
+surf --clear-auth xiaohongshu
+# Or clear all sites
+surf --clear-auth all
+```
+
+**Note**: Authentication state is saved in `~/.surf/auth/` for future use.
 
 ## Help
 
