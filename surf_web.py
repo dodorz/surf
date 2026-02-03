@@ -15,7 +15,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-__version__ = "1.0.3.10"
+__version__ = "1.0.4.15"
 
 # Flask web framework
 try:
