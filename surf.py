@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.1.0.18"
+__version__ = "1.1.0.19"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
