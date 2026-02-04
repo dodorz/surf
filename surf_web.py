@@ -15,7 +15,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-__version__ = "1.1.0.20"
+__version__ = "1.1.1.21"
 
 # Flask web framework
 try:
@@ -204,24 +204,38 @@ HTML_TEMPLATE = """
             color: #333;
         }
         
-        .download-links {
+        .save-links {
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
         }
-        
-        .download-btn {
+
+        .save-btn {
             padding: 8px 16px;
+            border: none;
             border-radius: 6px;
             text-decoration: none;
             font-size: 14px;
             font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
         }
-        
-        .download-md { background: #28a745; color: white; }
-        .download-html { background: #e34c26; color: white; }
-        .download-pdf { background: #f40f02; color: white; }
-        .download-audio { background: #6f42c1; color: white; }
+
+        .save-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        }
+
+        .save-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .save-md { background: #28a745; color: white; }
+        .save-html { background: #e34c26; color: white; }
+        .save-pdf { background: #f40f02; color: white; }
+        .save-audio { background: #6f42c1; color: white; }
         
         .content-preview {
             background: #f8f9fa;
@@ -391,12 +405,12 @@ HTML_TEMPLATE = """
                         <label for="speak">播放语音 (TTS)</label>
                     </div>
                     
-                    <div class="form-group checkbox-group">
+                    <div class="form-group checkbox-group" id="htmlInlineGroup" style="display: none;">
                         <input type="checkbox" id="htmlInline" name="html_inline">
                         <label for="htmlInline">内联 CSS/JS (HTML)</label>
                     </div>
-                    
-                    <div class="form-group checkbox-group">
+
+                    <div class="form-group checkbox-group" id="noFrontMatterGroup">
                         <input type="checkbox" id="noFrontMatter" name="no_front_matter">
                         <label for="noFrontMatter">禁用 YAML Front Matter</label>
                     </div>
@@ -413,8 +427,8 @@ HTML_TEMPLATE = """
         <div class="card result-card" id="resultCard">
             <div class="result-header">
                 <h2 class="result-title" id="resultTitle">转换结果</h2>
-                <div class="download-links" id="downloadLinks">
-                    <!-- Download buttons will be added here -->
+                <div class="save-links" id="saveLinks">
+                    <!-- Save buttons will be added here -->
                 </div>
             </div>
             
@@ -446,7 +460,27 @@ HTML_TEMPLATE = """
             const customGroup = document.getElementById('customProxyGroup');
             customGroup.style.display = this.value === 'custom' ? 'block' : 'none';
         });
-        
+
+        // Show/hide format-specific options
+        document.getElementById('format').addEventListener('change', function() {
+            const format = this.value;
+
+            // YAML Front Matter option - only for markdown
+            const noFrontMatterGroup = document.getElementById('noFrontMatterGroup');
+            if (noFrontMatterGroup) {
+                noFrontMatterGroup.style.display = format === 'md' ? 'flex' : 'none';
+            }
+
+            // HTML inline option - only for html
+            const htmlInlineGroup = document.getElementById('htmlInlineGroup');
+            if (htmlInlineGroup) {
+                htmlInlineGroup.style.display = format === 'html' ? 'flex' : 'none';
+            }
+        });
+
+        // Initialize format-specific options visibility on page load
+        document.getElementById('format').dispatchEvent(new Event('change'));
+
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', function() {
@@ -492,29 +526,48 @@ HTML_TEMPLATE = """
                 
                 if (result.success) {
                     showStatus('success', '转换完成！');
-                    
+
                     // Update result card
                     document.getElementById('resultTitle').textContent = result.title;
                     document.getElementById('markdownContent').textContent = result.markdown;
                     document.getElementById('htmlContent').textContent = result.html;
                     document.getElementById('rawContent').textContent = result.raw;
+
+                    // Store result data for saving
+                    currentResult = result;
+                    window.defaultDirs = result.defaultDirs || {};
                     
-                    // Update download links
-                    const downloadLinks = document.getElementById('downloadLinks');
-                    downloadLinks.innerHTML = '';
-                    
-                    if (result.files.md) {
-                        downloadLinks.innerHTML += `<a href="/download/${result.files.md}" class="download-btn download-md" target="_blank">📄 Markdown</a>`;
-                    }
-                    if (result.files.html) {
-                        downloadLinks.innerHTML += `<a href="/download/${result.files.html}" class="download-btn download-html" target="_blank">🌐 HTML</a>`;
-                    }
-                    if (result.files.pdf) {
-                        downloadLinks.innerHTML += `<a href="/download/${result.files.pdf}" class="download-btn download-pdf" target="_blank">📕 PDF</a>`;
-                    }
-                    if (result.files.audio) {
-                        downloadLinks.innerHTML += `<a href="/download/${result.files.audio}" class="download-btn download-audio" target="_blank">🔊 Audio</a>`;
-                    }
+                    // Update save buttons - always show all buttons
+                    const saveLinks = document.getElementById('saveLinks');
+                    saveLinks.innerHTML = '';
+
+                    // Markdown button
+                    const mdBtn = document.createElement('button');
+                    mdBtn.className = 'save-btn save-md';
+                    mdBtn.innerHTML = '📄 保存 Markdown';
+                    mdBtn.onclick = () => saveFile('md');
+                    saveLinks.appendChild(mdBtn);
+
+                    // HTML button
+                    const htmlBtn = document.createElement('button');
+                    htmlBtn.className = 'save-btn save-html';
+                    htmlBtn.innerHTML = '🌐 保存 HTML';
+                    htmlBtn.onclick = () => saveFile('html');
+                    saveLinks.appendChild(htmlBtn);
+
+                    // PDF button
+                    const pdfBtn = document.createElement('button');
+                    pdfBtn.className = 'save-btn save-pdf';
+                    pdfBtn.innerHTML = '📕 保存 PDF';
+                    pdfBtn.onclick = () => saveFile('pdf');
+                    saveLinks.appendChild(pdfBtn);
+
+                    // Audio button
+                    const audioBtn = document.createElement('button');
+                    audioBtn.className = 'save-btn save-audio';
+                    audioBtn.innerHTML = '🔊 保存 Audio';
+                    audioBtn.onclick = () => saveFile('audio');
+                    saveLinks.appendChild(audioBtn);
                     
                     document.getElementById('resultCard').classList.add('show');
                 } else {
@@ -542,10 +595,57 @@ HTML_TEMPLATE = """
             if (!statusDiv) {
                 statusDiv = createStatusDiv();
             }
-            
+
             statusDiv.className = 'card status status-' + type + ' show';
             statusDiv.innerHTML = message;
             statusDiv.style.display = 'block';
+        }
+
+        // Store result data for saving
+        let currentResult = null;
+
+        async function saveFile(fileType) {
+            if (!currentResult) {
+                showStatus('error', '没有可保存的内容');
+                return;
+            }
+
+            // Get default directory from config
+            const defaultDir = window.defaultDirs[fileType] || '';
+
+            const saveDir = prompt(
+                `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
+                ''
+            );
+
+            // If user cancelled
+            if (saveDir === null) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        fileType,
+                        saveDir: saveDir.trim(),
+                        data: currentResult
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showStatus('success', `${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
+                } else {
+                    showStatus('error', '保存失败: ' + result.error);
+                }
+            } catch (error) {
+                showStatus('error', '请求失败: ' + error.message);
+            }
         }
     </script>
 </body>
@@ -634,45 +734,13 @@ def process_url():
             except Exception:
                 pass
 
-        # Save outputs
-        files = {}
-
-        # Save markdown
-        md_path = OutputHandler.save_markdown(
-            title,
-            md_content,
-            config,
-            html_content=html_content,
-            add_front_matter=not data.get("no_front_matter", False),
-            translated_title=translated_title if translation_performed else None,
-            source_url=url,
-            translator=translator,
-        )
-        files["md"] = os.path.basename(md_path) if md_path else None
-
-        # Save HTML
-        html_path = OutputHandler.save_html(
-            title, cleaned_html, config, inline=data.get("html_inline", False)
-        )
-        files["html"] = os.path.basename(html_path) if html_path else None
-
-        # Generate PDF if requested
-        if data.get("format") == "pdf":
-            pdf_path = OutputHandler.generate_pdf(title, md_content, config)
-            files["pdf"] = os.path.basename(pdf_path) if pdf_path else None
-
-        # Generate audio if requested
-        if data.get("format") == "audio":
-            audio_path = None
-            TTSHandler.run_tts(title, md_content, config, speak=False)
-            # Find the generated audio file
-            audio_dir = config.get("Output", "audio_dir", fallback=".")
-            for f in os.listdir(audio_dir):
-                if f.endswith(".mp3") and title[:20].replace(" ", "_") in f:
-                    audio_path = os.path.join(audio_dir, f)
-                    break
-            if audio_path:
-                files["audio"] = os.path.basename(audio_path)
+        # Get default directories for frontend
+        defaultDirs = {
+            "md": config.get("Output", "md_dir", fallback="notes"),
+            "html": config.get("Output", "html_dir", fallback="web"),
+            "pdf": config.get("Output", "pdf_dir", fallback="pdf"),
+            "audio": config.get("Output", "audio_dir", fallback="audio"),
+        }
 
         return jsonify(
             {
@@ -681,7 +749,17 @@ def process_url():
                 "markdown": md_content,
                 "html": cleaned_html,
                 "raw": original_md,
-                "files": files,
+                "defaultDirs": defaultDirs,
+                # Store metadata for saving later
+                "metadata": {
+                    "title": title,
+                    "html_content": html_content,
+                    "add_front_matter": not data.get("no_front_matter", False),
+                    "translated_title": translated_title if translation_performed else None,
+                    "source_url": url,
+                    "translator": translator,
+                    "html_inline": data.get("html_inline", False),
+                },
             }
         )
 
@@ -702,6 +780,98 @@ def download_file(filename):
             return send_file(filepath, as_attachment=True)
 
     return jsonify({"error": "File not found"}), 404
+
+
+@app.route("/api/save", methods=["POST"])
+def save_file():
+    """Generate and save a file to specified directory."""
+    data = request.json
+    fileType = data.get("fileType")
+    saveDir = data.get("saveDir", "").strip()
+    resultData = data.get("data", {})
+
+    if not fileType:
+        return jsonify({"success": False, "error": "File type is required"})
+
+    config = get_config()
+
+    # Determine default directories based on config
+    defaultDirs = {
+        "md": config.get("Output", "md_dir", fallback="notes"),
+        "html": config.get("Output", "html_dir", fallback="web"),
+        "pdf": config.get("Output", "pdf_dir", fallback="pdf"),
+        "audio": config.get("Output", "audio_dir", fallback="audio"),
+    }
+
+    # Use user-specified directory or default
+    if saveDir:
+        targetDir = saveDir
+    else:
+        targetDir = defaultDirs.get(fileType, ".")
+
+    # Create target directory if it doesn't exist
+    os.makedirs(targetDir, exist_ok=True)
+
+    try:
+        title = resultData.get("title", "Untitled")
+        html_content = resultData.get("html_content", "")
+        metadata = resultData.get("metadata", {})
+
+        # Sanitize title for filename
+        safe_title = "".join(
+            c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
+        ).strip()
+        safe_title = safe_title[:100]
+
+        if fileType == "md":
+            md_content = resultData.get("markdown", "")
+            output_path = os.path.join(targetDir, f"{safe_title}.md")
+            md_path = OutputHandler.save_markdown(
+                title,
+                md_content,
+                config,
+                output_path=output_path,
+                html_content=html_content,
+                add_front_matter=metadata.get("add_front_matter", True),
+                translated_title=metadata.get("translated_title"),
+                source_url=metadata.get("source_url"),
+                translator=metadata.get("translator"),
+            )
+            return jsonify({"success": True, "savePath": md_path})
+
+        elif fileType == "html":
+            cleaned_html = resultData.get("html", "")
+            output_path = os.path.join(targetDir, f"{safe_title}.html")
+            html_path = OutputHandler.save_html(
+                title,
+                cleaned_html,
+                config,
+                inline=metadata.get("html_inline", False),
+                output_path=output_path,
+            )
+            return jsonify({"success": True, "savePath": html_path})
+
+        elif fileType == "pdf":
+            md_content = resultData.get("markdown", "")
+            output_path = os.path.join(targetDir, f"{safe_title}.pdf")
+            pdf_path = OutputHandler.generate_pdf(
+                title, md_content, config, output_path=output_path
+            )
+            return jsonify({"success": True, "savePath": pdf_path})
+
+        elif fileType == "audio":
+            md_content = resultData.get("markdown", "")
+            output_path = os.path.join(targetDir, f"{safe_title[:20].replace(' ', '_')}.mp3")
+            TTSHandler.run_tts(title, md_content, config, speak=False, save_path=output_path)
+
+            return jsonify({"success": True, "savePath": output_path})
+
+        else:
+            return jsonify({"success": False, "error": "Unsupported file type"})
+
+    except Exception as e:
+        logger.error(f"Failed to save file: {e}")
+        return jsonify({"success": False, "error": str(e)})
 
 
 def run_server(host="127.0.0.1", port=18473, debug=False):
