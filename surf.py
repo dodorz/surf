@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.1.1.21"
+__version__ = "1.1.1.22"
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -576,8 +576,12 @@ class Fetcher:
 
         # Add styling for avatar images (60x60 size)
         # Avatar images are from sns-avatar-qc.xhscdn.com
-        for img in soup.find_all("img", src=re.compile(r"sns-avatar-qc\.xhscdn\.com", re.IGNORECASE)):
-            img["style"] = "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
+        for img in soup.find_all(
+            "img", src=re.compile(r"sns-avatar-qc\.xhscdn\.com", re.IGNORECASE)
+        ):
+            img["style"] = (
+                "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
+            )
             logger.debug(f"Applied 60x60 styling to avatar: {img.get('src', '')}")
 
         # Fix images with 403 errors by adding proper referrer meta tag
@@ -881,10 +885,15 @@ class Fetcher:
         # Check if auth state exists before launching browser
         state = AuthHandler.load_state("xiaohongshu")
         if not state:
-            logger.warning("No saved auth state found for xiaohongshu. Starting interactive login...")
+            logger.warning(
+                "No saved auth state found for xiaohongshu. Starting interactive login..."
+            )
             login_success = AuthHandler.interactive_login(
-                "xiaohongshu", "https://www.xiaohongshu.com",
-                config, proxy_mode_override, custom_proxy_override
+                "xiaohongshu",
+                "https://www.xiaohongshu.com",
+                config,
+                proxy_mode_override,
+                custom_proxy_override,
             )
             if not login_success:
                 logger.error("Interactive login failed")
@@ -903,7 +912,7 @@ class Fetcher:
                 browser,
                 "xiaohongshu",
                 viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             page = context.new_page()
 
@@ -914,12 +923,17 @@ class Fetcher:
                 # Check if we're still on login page (auth failed or not logged in)
                 current_url = page.url
                 if "/login" in current_url or "/signin" in current_url:
-                    logger.warning("Saved auth state expired. Starting interactive login...")
+                    logger.warning(
+                        "Saved auth state expired. Starting interactive login..."
+                    )
                     browser.close()
                     # Automatically trigger interactive login
                     login_success = AuthHandler.interactive_login(
-                        "xiaohongshu", "https://www.xiaohongshu.com", 
-                        config, proxy_mode_override, custom_proxy_override
+                        "xiaohongshu",
+                        "https://www.xiaohongshu.com",
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
                     )
                     if login_success:
                         # Retry fetching with new auth state
@@ -987,12 +1001,12 @@ class Fetcher:
                     html_parts.append("<div class='images'>")
                     for img_url in images:
                         # Skip avatar images (they're already styled separately)
-                        if 'sns-avatar-qc.xhscdn.com' not in img_url:
+                        if "sns-avatar-qc.xhscdn.com" not in img_url:
                             html_parts.append(f'<img src="{img_url}" />')
                     html_parts.append("</div>")
 
                 html_parts.append("</article></body></html>")
-                html_content = ''.join(html_parts)
+                html_content = "".join(html_parts)
 
                 # Clean the content to remove unrelated UI elements
                 html_content = Fetcher._clean_xiaohongshu_content(html_content)
@@ -1697,7 +1711,8 @@ class OutputHandler:
 
         # Determine filepath
         if output_path:
-            filepath = output_path
+            # Expand user home directory (~) if present
+            filepath = os.path.expanduser(output_path)
             # Handle special cases: "." or "./" (current directory)
             if filepath == "." or filepath == "./":
                 # Use current directory + default filename
@@ -1795,7 +1810,8 @@ class OutputHandler:
 
         # Determine filepath
         if output_path:
-            filepath = output_path
+            # Expand user home directory (~) if present
+            filepath = os.path.expanduser(output_path)
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
             if filepath_dir and not os.path.exists(filepath_dir):
@@ -1877,7 +1893,8 @@ class OutputHandler:
             logger.info(f"HTML output to stdout (inline={inline})")
             return None
         elif output_path:
-            filepath = output_path
+            # Expand user home directory (~) if present
+            filepath = os.path.expanduser(output_path)
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
             if filepath_dir and not os.path.exists(filepath_dir):
@@ -2073,6 +2090,7 @@ class AuthHandler:
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
                     import json
+
                     state = json.load(f)
                     logger.info(f"Loaded auth state for {site_name}")
                     return state
@@ -2093,6 +2111,7 @@ class AuthHandler:
         try:
             with open(state_file, "w", encoding="utf-8") as f:
                 import json
+
                 json.dump(state, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved auth state for {site_name} to {state_file}")
         except Exception as e:
@@ -2114,11 +2133,18 @@ class AuthHandler:
         else:
             if os.path.exists(AuthHandler.AUTH_STATE_DIR):
                 import shutil
+
                 shutil.rmtree(AuthHandler.AUTH_STATE_DIR)
                 logger.info("Cleared all auth states")
 
     @staticmethod
-    def interactive_login(site_name, login_url, config, proxy_mode_override=None, custom_proxy_override=None):
+    def interactive_login(
+        site_name,
+        login_url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+    ):
         """
         Perform interactive login for a site.
         Opens a visible browser window for user to manually log in.
@@ -2139,14 +2165,14 @@ class AuthHandler:
             config, proxy_mode_override, custom_proxy_override
         )
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Interactive Login for {site_name}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"A browser window will open. Please:")
         print(f"1. Log in to {site_name} manually")
         print(f"2. Complete any CAPTCHA or verification if needed")
         print(f"3. Once logged in, press Enter in this terminal to save the session")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         with sync_playwright() as p:
             browser = (
@@ -2156,7 +2182,7 @@ class AuthHandler:
             )
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             )
             page = context.new_page()
 
@@ -2282,7 +2308,11 @@ Authentication:
         """,
     )
     # Position argument
-    parser.add_argument("url", nargs="?", help="URL to process (not required for --login or --clear-auth)")
+    parser.add_argument(
+        "url",
+        nargs="?",
+        help="URL to process (not required for --login or --clear-auth)",
+    )
 
     # Output format
     format_group = parser.add_mutually_exclusive_group()
@@ -2400,7 +2430,9 @@ Authentication:
             "xiaohongshu": "https://www.xiaohongshu.com",
         }
         if site_name not in login_urls:
-            parser.error(f"Unsupported site: {site_name}. Supported: {', '.join(login_urls.keys())}")
+            parser.error(
+                f"Unsupported site: {site_name}. Supported: {', '.join(login_urls.keys())}"
+            )
         login_url = login_urls[site_name]
         success = AuthHandler.interactive_login(
             site_name, login_url, config, args.proxy, args.set_proxy
@@ -2457,11 +2489,15 @@ Authentication:
         # Apply special site defaults (can be overridden by command line)
         # Priority: Command line > Special site default > Config file
         if site_config.get("default_no_proxy") and proxy_mode is None:
-            logger.info(f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)")
+            logger.info(
+                f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)"
+            )
             proxy_mode = "no"
 
         if site_config.get("default_no_translate") and lang_mode == "trans":
-            logger.info(f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)")
+            logger.info(
+                f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)"
+            )
             lang_mode = "raw"
 
     # 1. Fetch

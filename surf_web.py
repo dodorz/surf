@@ -16,7 +16,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-__version__ = "1.1.1.21"
+__version__ = "1.1.1.22"
 
 # Flask web framework
 try:
@@ -756,7 +756,9 @@ def process_url():
                     "title": title,
                     "html_content": html_content,
                     "add_front_matter": not data.get("no_front_matter", False),
-                    "translated_title": translated_title if translation_performed else None,
+                    "translated_title": translated_title
+                    if translation_performed
+                    else None,
                     "source_url": url,
                     "translator": translator,
                     "html_inline": data.get("html_inline", False),
@@ -806,7 +808,7 @@ def save_file():
 
     # Use user-specified directory or default
     if saveDir:
-        targetDir = saveDir
+        targetDir = os.path.expanduser(saveDir)
     else:
         targetDir = defaultDirs.get(fileType, ".")
 
@@ -862,8 +864,12 @@ def save_file():
 
         elif fileType == "audio":
             md_content = resultData.get("markdown", "")
-            output_path = os.path.join(targetDir, f"{safe_title[:20].replace(' ', '_')}.mp3")
-            TTSHandler.run_tts(title, md_content, config, speak=False, save_path=output_path)
+            output_path = os.path.join(
+                targetDir, f"{safe_title[:20].replace(' ', '_')}.mp3"
+            )
+            TTSHandler.run_tts(
+                title, md_content, config, speak=False, save_path=output_path
+            )
 
             return jsonify({"success": True, "savePath": output_path})
 
