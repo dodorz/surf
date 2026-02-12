@@ -2,11 +2,19 @@
 
 ## 版本管理
 
+- 唯一版本源：仅在 `pyproject.toml` 的 `[project]` 小节中维护 `version` 字段
+- 动态读取：`surf.py` 中的 `__version__` 通过 `_get_version()` 函数动态读取 `pyproject.toml [project]` 小节的版本号
+- 统一导入：`surf_web.py` 等其他模块直接从 `surf` 导入 `__version__`，不重复定义
 - 遵循语义化版本规范 (Semantic Versioning): `MAJOR.MINOR.PATCH`
 - 每次功能修复提交递增 PATCH 版本号
 - 新功能提交递增 MINOR 版本号
 - 不兼容的改动递增 MAJOR 版本号
 - Git 提交信息使用英文
+
+**更新流程**：
+1. 修改版本号时，仅需修改 `pyproject.toml` 的 `[project]` 小节
+2. 所有导入 `__version__` 的模块将自动获取最新版本号
+3. 无需手动同步其他文件中的版本号
 
 ## 依赖管理
 

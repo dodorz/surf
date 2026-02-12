@@ -11,12 +11,8 @@ Example:
 
 import argparse
 import os
-import sys
 import threading
 import webbrowser
-from pathlib import Path
-
-__version__ = "1.1.1.22"
 
 # Flask web framework
 try:
@@ -26,7 +22,6 @@ try:
         request,
         jsonify,
         send_file,
-        Response,
     )
 except ImportError:
     print("Flask not installed. Installing...")
@@ -37,7 +32,6 @@ except ImportError:
         request,
         jsonify,
         send_file,
-        Response,
     )
 
 # Import surf modules
@@ -671,7 +665,6 @@ def index():
 @app.route("/api/process", methods=["POST"])
 def process_url():
     """Process a URL and return the result."""
-    import traceback
 
     data = request.json
     url = data.get("url")
@@ -684,13 +677,29 @@ def process_url():
     try:
         # Fetch content
         proxy_mode = data.get("proxy", "auto")
+        if proxy_mode == "auto":
+            proxy_mode = None
         custom_proxy = data.get("custom_proxy")
+        
+        # Language mode
+        lang_mode = data.get("lang", "trans")
+        
+        # Check special site defaults
+        from surf import _get_handler_for_url
+        _, site_name, site_config = _get_handler_for_url(url)
+        if site_config:
+            if site_config.get("default_no_proxy") and proxy_mode is None:
+                logger.info(f"Web: {site_name} using default 'no proxy'")
+                proxy_mode = "no"
+            if site_config.get("default_no_translate") and lang_mode == "trans":
+                logger.info(f"Web: {site_name} using default 'no translate'")
+                lang_mode = "raw"
 
         html_content = Fetcher.fetch(
             url,
             config=config,
             use_browser=data.get("browser", False),
-            proxy_mode_override=proxy_mode if proxy_mode != "auto" else None,
+            proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
         )
 
@@ -703,7 +712,6 @@ def process_url():
         md_content = ContentProcessor.to_markdown(cleaned_html)
 
         # Handle language mode
-        lang_mode = data.get("lang", "trans")
         target_lang = config.get("Output", "target_language", fallback="zh-cn")
 
         original_md = md_content
@@ -887,10 +895,10 @@ def run_server(host="127.0.0.1", port=18473, debug=False):
     url = f"http://{host}:{port}"
     threading.Timer(1, lambda: webbrowser.open(url)).start()
 
-    print(f"\n🌊 Surf Web Interface v{__version__}")
-    print(f"=====================================")
+    print(f"\nSurf Web Interface v{__version__}")
+    print("=====================================")
     print(f"Server running at: {url}")
-    print(f"Press Ctrl+C to stop\n")
+    print("Press Ctrl+C to stop\n")
 
     app.run(host=host, port=port, debug=debug)
 

@@ -4,7 +4,7 @@ import configparser
 import os
 import sys
 import logging
-import requests
+import requests  # type: ignore
 from readability import Document
 import markdownify
 from langdetect import detect
@@ -13,12 +13,29 @@ import asyncio
 import edge_tts
 from playsound import playsound
 from datetime import datetime
-from dateutil import parser as date_parser
+from dateutil import parser as date_parser  # type: ignore
 from bs4 import BeautifulSoup
 import trafilatura
 import re
 
-__version__ = "1.1.1.22"
+
+def _get_version():
+    """从 pyproject.toml [project] 小节读取版本号"""
+    try:
+        with open("pyproject.toml", "r", encoding="utf-8") as f:
+            content = f.read()
+            # 匹配 [project] 小节后的 version = "..."
+            match = re.search(
+                r'\[project\].*?version\s*=\s*["\']([^"\']+)["\']',
+                content,
+                re.DOTALL
+            )
+            return match.group(1) if match else "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
+__version__ = _get_version()
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -108,9 +125,7 @@ class Fetcher:
                 proxy = winreg.QueryValueEx(key, "ProxyServer")[0]
                 if proxy:
                     # Check for override (per-protocol)
-                    override = (
-                        winreg.QueryValueEx(key, "ProxyOverride")[0] if False else None
-                    )
+                    winreg.QueryValueEx(key, "ProxyOverride")[0] if False else None
                     return {"http": proxy, "https": proxy}
             return None
         except Exception as e:
@@ -261,11 +276,19 @@ class Fetcher:
         logger.info(f"Fetching {url}...")
 
         handler, site_name, site_config = _get_handler_for_url(url)
+
+        # Apply site defaults for proxy if not overridden
+        if (
+            site_config
+            and site_config.get("default_no_proxy")
+            and proxy_mode_override is None
+        ):
+            logger.info(f"{site_name}: Using site default 'no proxy'")
+            proxy_mode_override = "no"
+
         if handler:
             logger.info(f"Using special handler for {site_name}")
-            html_content = handler(
-                url, config, proxy_mode_override, custom_proxy_override
-            )
+            html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
             if html_content:
                 return html_content
 
@@ -619,8 +642,6 @@ class Fetcher:
         Returns:
             HTML content string from oEmbed API, or None if oEmbed failed/article detected
         """
-        import json
-
         # oEmbed API endpoint for Twitter
         oembed_url = f"https://publish.twitter.com/oembed?url={url}"
 
@@ -646,7 +667,6 @@ class Fetcher:
 
             # Log metadata from oEmbed response
             author_name = data.get("author_name", "")
-            author_url = data.get("author_url", "")
             provider_name = data.get("provider_name", "")
 
             logger.info(
@@ -743,14 +763,6 @@ class Fetcher:
         Create a browser context with anti-detection measures.
         Uses stealth settings to avoid being detected as automation.
         """
-        # Base stealth args for all sites
-        args = [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-web-security",
-            "--disable-features=BlockInsecurePrivateNetworkRequests",
-        ]
-
         # Twitter/X specific settings
         if url and Fetcher._is_twitter_url(url):
             logger.info("Using Twitter-specific stealth settings")
@@ -1019,6 +1031,99 @@ class Fetcher:
             finally:
                 browser.close()
 
+    @staticmethod
+    def _fetch_ncpssd_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch NCPSSD (国家哲学社会科学文献中心) literature pages.
+        Mandates: force browser, no translation, h1 title, full content capture.
+        """
+        from playwright.sync_api import sync_playwright
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        with sync_playwright() as p:
+            launch_args = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+
+            browser = p.chromium.launch(**launch_args)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="networkidle", timeout=60000)
+                page.wait_for_timeout(3000)
+
+                # Extract data using JS
+                data = page.evaluate("""() => {
+                    const getVal = (id) => document.getElementById(id)?.innerText?.trim() || "";
+
+                    // User mandated: Use h1 as title
+                    const title = document.querySelector('h1')?.innerText?.trim() || document.title;
+                    const title_e = getVal('h3_title_e');
+                    const creator = getVal('p_creator');
+                    const institutions = getVal('p_institutions');
+                    const media = getVal('p_media');
+                    const year = getVal('p_year');
+                    const abstract_z = getVal('p_remark');
+                    const abstract_e = getVal('p_remarke');
+                    const page_range = getVal('p_page');
+                    const page_count = getVal('p_pagination');
+                    const keywords = getVal('p_keyword');
+                    const classification = getVal('p_class');
+
+                    return {
+                        title, title_e, creator, institutions, media, year,
+                        abstract_z, abstract_e, page_range, page_count, keywords, classification
+                    };
+                }""")
+
+                # Construct HTML
+                html_parts = [
+                    "<html><head><meta charset='utf-8'>",
+                    f"<title>{data['title']}</title>",
+                    "</head><body><article>",
+                    f"<h1>{data['title']}</h1>",
+                ]
+
+                if data["title_e"]:
+                    html_parts.append(f"<h2>{data['title_e']}</h2>")
+                if data["creator"]:
+                    html_parts.append(f"<p>{data['creator']}</p>")
+                if data["institutions"]:
+                    html_parts.append(f"<p>{data['institutions']}</p>")
+                if data["media"]:
+                    html_parts.append(f"<p>{data['media']}</p>")
+                if data["year"]:
+                    html_parts.append(f"<p>{data['year']}</p>")
+                if data["abstract_z"]:
+                    html_parts.append(f"<div><h3>中文摘要</h3><p>{data['abstract_z']}</p></div>")
+                if data["abstract_e"]:
+                    html_parts.append(f"<div><h3>英文摘要</h3><p>{data['abstract_e']}</p></div>")
+                if data["keywords"]:
+                    html_parts.append(f"<p>{data['keywords']}</p>")
+                if data["page_range"]:
+                    html_parts.append(f"<p>{data['page_range']}</p>")
+                if data["page_count"]:
+                    html_parts.append(f"<p>{data['page_count']}</p>")
+                if data["classification"]:
+                    html_parts.append(f"<p>{data['classification']}</p>")
+
+                html_parts.append("</article></body></html>")
+                return "".join(html_parts)
+
+            except Exception as e:
+                logger.warning(f"NCPSSD handler failed: {e}")
+                return None
+            finally:
+                browser.close()
+
 
 # =============================================================================
 # Special Site Handlers
@@ -1060,6 +1165,15 @@ SPECIAL_SITE_HANDLERS = {
         "handler": Fetcher._fetch_xiaohongshu,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
         "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
+    },
+    "ncpssd": {
+        "patterns": [
+            r"^https?://ncpssd\.cn/Literature/",
+            r"^https?://ncpssd\.org/Literature/",
+        ],
+        "handler": Fetcher._fetch_ncpssd_article,
+        "default_no_proxy": True,
+        "default_no_translate": True,
     },
 }
 
@@ -1399,7 +1513,10 @@ class ContentProcessor:
                     messages=[
                         {
                             "role": "system",
-                            "content": f"You are a helpful translator. Translate the following Markdown content to {target_lang}. Preserve the Markdown formatting strictly. Output ONLY the translated markdown.",
+                            "content": (
+                                f"You are a helpful translator. Translate the following Markdown content to {target_lang}. "
+                                "Preserve the Markdown formatting strictly. Output ONLY the translated markdown."
+                            ),
                         },
                         {"role": "user", "content": chunk},
                     ],
@@ -1432,7 +1549,7 @@ class OutputHandler:
         Returns:
             处理后的HTML内容
         """
-        from urllib.parse import urljoin, urlparse
+        from urllib.parse import urljoin
 
         soup = BeautifulSoup(html_content, "html.parser")
 
@@ -1785,7 +1902,7 @@ class OutputHandler:
     def generate_pdf(title, md_content, config, output_path=None):
         logger.info("Generating PDF...")
 
-        import markdown
+        import markdown  # type: ignore
 
         html_body = markdown.markdown(md_content)
         full_html = f"""
@@ -2022,8 +2139,8 @@ class PublishHandler:
             data["api_paste_private"] = paste_private
 
         # Verbose logging of POST data
-        logger.debug(f"Pastebin POST URL: https://pastebin.com/api/api_post.php")
-        logger.debug(f"Pastebin POST data:")
+        logger.debug("Pastebin POST URL: https://pastebin.com/api/api_post.php")
+        logger.debug("Pastebin POST data:")
         for key, value in data.items():
             if key == "api_paste_code":
                 logger.debug(f"  {key}: <{len(value)} chars>")
@@ -2168,10 +2285,10 @@ class AuthHandler:
         print(f"\n{'=' * 60}")
         print(f"Interactive Login for {site_name}")
         print(f"{'=' * 60}")
-        print(f"A browser window will open. Please:")
+        print("A browser window will open. Please:")
         print(f"1. Log in to {site_name} manually")
-        print(f"2. Complete any CAPTCHA or verification if needed")
-        print(f"3. Once logged in, press Enter in this terminal to save the session")
+        print("2. Complete any CAPTCHA or verification if needed")
+        print("3. Once logged in, press Enter in this terminal to save the session")
         print(f"{'=' * 60}\n")
 
         with sync_playwright() as p:
@@ -2487,13 +2604,8 @@ Authentication:
     handler, site_name, site_config = _get_handler_for_url(args.url)
     if site_config:
         # Apply special site defaults (can be overridden by command line)
-        # Priority: Command line > Special site default > Config file
-        if site_config.get("default_no_proxy") and proxy_mode is None:
-            logger.info(
-                f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)"
-            )
-            proxy_mode = "no"
-
+        # default_no_proxy is now handled inside Fetcher.fetch for consistency
+        
         if site_config.get("default_no_translate") and lang_mode == "trans":
             logger.info(
                 f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)"
@@ -2662,7 +2774,6 @@ Authentication:
             TTSHandler.run_tts(title, md_content, config, speak=True)
         else:
             # Default: Save to default md_dir
-            md_dir = config.get("Output", "md_dir", fallback="./notes")
             OutputHandler.save_markdown(
                 title,
                 md_content,
