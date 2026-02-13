@@ -2800,6 +2800,55 @@ class PublishHandler:
             return None
 
 
+def get_data_dir():
+    """
+    Get the base directory for storing application data.
+    Priority:
+    1. Windows: %LOCALLAPPDATA%\\surf
+    2. Linux/Mac: ~/.local/cache/surf
+    """
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return os.path.join(local_app_data, "surf")
+
+    # Fallback to ~/.local/cache/surf for Linux/Mac
+    return os.path.join(os.path.expanduser("~"), ".local", "cache", "surf")
+
+
+def migrate_data():
+    """
+    Migrate data from ~/.surf to the new data directory if necessary.
+    """
+    old_dir = os.path.join(os.path.expanduser("~"), ".surf")
+    new_dir = get_data_dir()
+
+    if old_dir == new_dir:
+        return
+
+    if os.path.exists(old_dir) and not os.path.exists(new_dir):
+        try:
+            import shutil
+
+            # Create parent directory for new_dir if it doesn't exist
+            parent_dir = os.path.dirname(new_dir)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+
+            shutil.move(old_dir, new_dir)
+            logger.info(f"Successfully migrated data from {old_dir} to {new_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to migrate data from {old_dir} to {new_dir}: {e}")
+    elif os.path.exists(old_dir) and os.path.exists(new_dir):
+        logger.info(
+            f"Both {old_dir} and {new_dir} exist. Please manually merge if needed."
+        )
+
+
+# Perform migration on import/startup
+migrate_data()
+
+
 class AuthHandler:
     """
     Handler for browser authentication state management.
@@ -2807,7 +2856,7 @@ class AuthHandler:
     """
 
     # Directory to store authentication states
-    AUTH_STATE_DIR = os.path.join(os.path.expanduser("~"), ".surf", "auth")
+    AUTH_STATE_DIR = os.path.join(get_data_dir(), "auth")
 
     @staticmethod
     def _get_state_file(site_name):

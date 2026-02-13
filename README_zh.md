@@ -174,7 +174,7 @@ surf --clear-auth xiaohongshu
 surf --clear-auth all
 ```
 
-**注意**：认证状态保存在 `~/.surf/auth/` 目录中，供后续使用。
+**注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
 
 ## 单字符参数连写
 

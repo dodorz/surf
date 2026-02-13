@@ -187,7 +187,7 @@ surf --clear-auth xiaohongshu
 surf --clear-auth all
 ```
 
-**Note**: Authentication state is saved in `~/.surf/auth/` for future use.
+**Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
 
 ## Help
 
