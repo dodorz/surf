@@ -22,7 +22,7 @@
 - [x] Web接口
 - [x] 特定网站的处理
     - [ ] 重定向与短链接
-    - [ ] 认证状态的保存
+    - [ ] 认证状态的保存位置
     - [x] Twitter
     - [ ] pocketcasts(https://pca.st/episode/)
     - [x] 小红书
@@ -30,12 +30,12 @@
         - [ ] 加入source时删除URL中不必要参数
         - [ ] llm指定模型名称时忽略大小写
         - [ ] 题图ocr
-    - [ ] GitHub
-    - [ ] 国家哲学社会科学文献中心
-        - [ ] https://ncpssd.org/Literature
-        - [ ] --browser
-        - [ ] --raw
-        - [ ] 保留摘要
+    - [x] GitHub
+    - [x] 国家哲学社会科学文献中心
+        - [x] https://ncpssd.org/Literature
+        - [x] --browser
+        - [x] --raw
+        - [x] 保留摘要
 - [ ] Termux兼容性
 - [ ] 简单Android应用包装
 - [ ] usage中参数的顺序

@@ -1124,6 +1124,467 @@ class Fetcher:
             finally:
                 browser.close()
 
+    @staticmethod
+    def _fetch_github_readme(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch GitHub repository README content.
+        Extracts README from <article class="markdown-body"> element.
+        Prefers language-specific READMEs (e.g., README_zh.md) if available.
+        Removes permalink anchors (aria-label^="Permalink:") to clean up output.
+        """
+        import re
+        from urllib.parse import urlparse
+        from playwright.sync_api import sync_playwright
+
+        logger.info(f"Fetching GitHub README: {url}")
+
+        # Parse URL to get owner and repo
+        parsed = urlparse(url)
+        path_match = re.match(r"^/([^/]+)/([^/]+)", parsed.path)
+        if not path_match:
+            logger.warning(f"Invalid GitHub URL format: {url}")
+            return None
+
+        owner, repo = path_match.groups()
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        with sync_playwright() as p:
+            launch_args = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+
+            browser = p.chromium.launch(**launch_args)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(3000)
+
+                # Check for language-specific README links
+                readme_data = page.evaluate("""() => {
+                    // Look for language-specific README links in the file list
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const readmeLinks = links.filter(a => {
+                        const href = a.getAttribute('href') || '';
+                        return /\\/README_[a-z]{2}(\\.md)?$/i.test(href);
+                    });
+
+                    // Get the repo title
+                    const titleEl = document.querySelector('h1 strong[itemprop="name"]') ||
+                                     document.querySelector('h1 [itemprop="name"]') ||
+                                     document.querySelector('h1');
+                    const title = titleEl?.innerText?.trim() || '';
+
+                    // Get description
+                    const descEl = document.querySelector('[data-testid="about-description"] p') ||
+                                   document.querySelector('[data-testid="repository-description"]') ||
+                                   document.querySelector('.repository-content .BorderGrid-cell p');
+                    const description = descEl?.innerText?.trim() || '';
+
+                    return { readmeLinks: readmeLinks.map(a => a.href), title, description };
+                }
+                """)
+
+                target_url = url
+                # Check if we should navigate to a language-specific README
+                target_lang = config.get("Output", "target_language", fallback="zh-cn")
+                lang_code = target_lang.split("-")[0]  # e.g., "zh" from "zh-cn"
+
+                if readme_data.get("readmeLinks"):
+                    for link in readme_data["readmeLinks"]:
+                        if f"README_{lang_code}" in link or f"readme_{lang_code}" in link.lower():
+                            target_url = link if link.startswith("http") else f"https://github.com{link}"
+                            logger.info(f"Found language-specific README: {target_url}")
+                            break
+
+                # Navigate to the target README URL if different
+                if target_url != url:
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(2000)
+
+                # Extract README content
+                html_content = page.evaluate("""() => {
+                    const article = document.querySelector('article.markdown-body');
+                    if (!article) return null;
+
+                    // Remove permalink anchors
+                    const permalinks = article.querySelectorAll('a[aria-label^="Permalink:"]');
+                    permalinks.forEach(a => a.remove());
+
+                    // Also remove anchor links with symbol
+                    const anchorLinks = article.querySelectorAll('a.anchor');
+                    anchorLinks.forEach(a => a.remove());
+
+                    return article.outerHTML;
+                }
+                """)
+
+                if not html_content:
+                    logger.warning("No README content found in article.markdown-body")
+                    return None
+
+                # Construct full HTML document
+                title = readme_data.get("title", repo)
+                description = readme_data.get("description", "")
+
+                html_parts = [
+                    "<!DOCTYPE html>",
+                    "<html lang=\"en\"><head>",
+                    "<meta charset=\"utf-8\">",
+                    f"<title>{title}</title>",
+                    "</head><body>",
+                    f"<h1>{title}</h1>",
+                ]
+
+                if description:
+                    html_parts.append(f"<p><strong>Description:</strong> {description}</p>")
+
+                html_parts.append(f"<p><strong>Repository:</strong> <a href=\"{url}\">{url}</a></p>")
+                html_parts.append(html_content)
+                html_parts.append("</body></html>")
+
+                return "".join(html_parts)
+
+            except Exception as e:
+                logger.warning(f"GitHub handler failed: {e}")
+                return None
+            finally:
+                browser.close()
+
+    @staticmethod
+    def _fetch_wikipedia(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch Wikipedia article with content optimization.
+        Removes citation marks, fixes table captions, and cleans up navigation elements.
+        """
+        from playwright.sync_api import sync_playwright
+
+        logger.info(f"Fetching Wikipedia article: {url}")
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        with sync_playwright() as p:
+            launch_args = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+
+            browser = p.chromium.launch(**launch_args)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)
+
+                html_content = page.evaluate("""() => {
+                    const content = document.querySelector('#mw-content-text .mw-parser-output');
+                    if (!content) return null;
+
+                    // Clone to avoid modifying the actual DOM
+                    const clone = content.cloneNode(true);
+
+                    // Remove citation reference links (superscript numbers in brackets)
+                    const citations = clone.querySelectorAll('sup.reference, sup a[href^="#cite_note"]');
+                    citations.forEach(el => el.remove());
+
+                    // Remove edit section links
+                    const editLinks = clone.querySelectorAll('.mw-editsection, .mw-editsection-bracket');
+                    editLinks.forEach(el => el.remove());
+
+                    // Remove table of contents
+                    const toc = clone.querySelector('#toc, .toc, .toccolours');
+                    if (toc) toc.remove();
+
+                    // Fix table captions - move them before the table
+                    const tables = clone.querySelectorAll('table');
+                    tables.forEach(table => {
+                        const caption = table.querySelector('caption');
+                        if (caption && caption.parentElement === table) {
+                            // Caption is already in correct position for most browsers
+                            // Just ensure it's visible
+                            caption.style.display = 'table-caption';
+                        }
+                    });
+
+                    // Remove ambox (article message boxes)
+                    const amboxes = clone.querySelectorAll('.ambox, .mbox, .tmbox');
+                    amboxes.forEach(el => el.remove());
+
+                    // Remove navbox (navigation templates at bottom)
+                    const navboxes = clone.querySelectorAll('.navbox, .navbox-inner, .navbox-subgroup');
+                    navboxes.forEach(el => el.remove());
+
+                    // Remove infobox if it's too large (optional, keep for now but style it)
+                    const infobox = clone.querySelector('.infobox');
+                    if (infobox) {
+                        infobox.style.maxWidth = '300px';
+                        infobox.style.float = 'right';
+                        infobox.style.margin = '0 0 1em 1em';
+                    }
+
+                    // Remove hatnotes (disambiguation notices)
+                    const hatnotes = clone.querySelectorAll('.hatnote, .dablink, .rellink');
+                    hatnotes.forEach(el => el.remove());
+
+                    // Remove "See also", "References", "External links" section headers if empty
+                    const headings = clone.querySelectorAll('h2, h3');
+                    headings.forEach(h => {
+                        const nextEl = h.nextElementSibling;
+                        if (nextEl && (nextEl.tagName === 'H2' || nextEl.tagName === 'H3')) {
+                            h.remove();
+                        }
+                    });
+
+                    // Remove empty paragraphs
+                    const paragraphs = clone.querySelectorAll('p');
+                    paragraphs.forEach(p => {
+                        if (!p.textContent.trim()) {
+                            p.remove();
+                        }
+                    });
+
+                    return clone.innerHTML;
+                }
+                """)
+
+                if not html_content:
+                    logger.warning("No Wikipedia content found")
+                    return None
+
+                # Get title
+                title = page.evaluate("""() => {
+                    return document.querySelector('#firstHeading')?.innerText?.trim() ||
+                           document.querySelector('h1')?.innerText?.trim() ||
+                           document.title;
+                }
+                """)
+
+                html_parts = [
+                    "<!DOCTYPE html>",
+                    "<html lang=\"en\"><head>",
+                    "<meta charset=\"utf-8\">",
+                    f"<title>{title}</title>",
+                    "<style>",
+                    "table { border-collapse: collapse; margin: 1em 0; }",
+                    "table, th, td { border: 1px solid #ccc; padding: 0.5em; }",
+                    "caption { font-weight: bold; margin-bottom: 0.5em; }",
+                    ".infobox { background: #f9f9f9; }",
+                    "</style>",
+                    "</head><body>",
+                    f"<h1>{title}</h1>",
+                    html_content,
+                    "</body></html>",
+                ]
+
+                return "".join(html_parts)
+
+            except Exception as e:
+                logger.warning(f"Wikipedia handler failed: {e}")
+                return None
+            finally:
+                browser.close()
+
+    @staticmethod
+    def _fetch_bluesky(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch Bluesky post using the official public API.
+        Uses app.bsky.feed.getPostThread to get the post and its replies.
+        """
+        import re
+        import requests
+        from urllib.parse import urlparse
+
+        logger.info(f"Fetching Bluesky post via API: {url}")
+
+        # Parse URL to extract handle and post ID
+        # URL format: https://bsky.app/profile/handle.bsky.social/post/postid
+        parsed = urlparse(url)
+        path_match = re.match(r"^/profile/([^/]+)/post/([^/]+)", parsed.path)
+
+        if not path_match:
+            logger.warning(f"Invalid Bluesky URL format: {url}")
+            return None
+
+        handle, post_id = path_match.groups()
+
+        # Construct the at:// URI required by the API
+        # We need to resolve the handle to a DID first
+        try:
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+            headers = {
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+
+            # Resolve handle to DID
+            resolve_url = f"https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={handle}"
+            resolve_resp = requests.get(resolve_url, headers=headers, proxies=req_proxies, timeout=30)
+
+            if resolve_resp.status_code != 200:
+                logger.warning(f"Failed to resolve Bluesky handle: {resolve_resp.text}")
+                return None
+
+            did = resolve_resp.json().get("did")
+            if not did:
+                logger.warning("No DID found for handle")
+                return None
+
+            # Construct at:// URI
+            at_uri = f"at://{did}/app.bsky.feed.post/{post_id}"
+
+            # Fetch post thread
+            api_url = f"https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri={at_uri}"
+            resp = requests.get(api_url, headers=headers, proxies=req_proxies, timeout=30)
+
+            if resp.status_code != 200:
+                logger.warning(f"Bluesky API request failed: {resp.status_code} - {resp.text}")
+                return None
+
+            data = resp.json()
+            thread = data.get("thread", {})
+            post = thread.get("post", {})
+            record = post.get("record", {})
+
+            if not record:
+                logger.warning("No post record found in Bluesky API response")
+                return None
+
+            # Extract post data
+            author = post.get("author", {})
+            author_name = author.get("displayName") or author.get("handle", "Unknown")
+            author_handle = author.get("handle", "")
+
+            text = record.get("text", "")
+            created_at = record.get("createdAt", "")
+
+            # Format created date
+            formatted_date = created_at
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                pass
+
+            # Get engagement stats
+            stats = []
+            like_count = post.get("likeCount", 0)
+            repost_count = post.get("repostCount", 0)
+            reply_count = post.get("replyCount", 0)
+
+            if like_count:
+                stats.append(f"{like_count} likes")
+            if repost_count:
+                stats.append(f"{repost_count} reposts")
+            if reply_count:
+                stats.append(f"{reply_count} replies")
+
+            # Get embedded media
+            embed = record.get("embed", {})
+            embed_images = []
+            embed_external = None
+
+            if embed.get("$type") == "app.bsky.embed.images":
+                images = embed.get("images", [])
+                for img in images:
+                    img_ref = img.get("image", {}).get("ref", {}).get("$link", "")
+                    if img_ref:
+                        img_url = f"https://cdn.bsky.app/img/feed_thumbnail/plain/{did}/{img_ref}@jpeg"
+                        embed_images.append(img_url)
+
+            elif embed.get("$type") == "app.bsky.embed.external":
+                external = embed.get("external", {})
+                embed_external = {
+                    "title": external.get("title", ""),
+                    "description": external.get("description", ""),
+                    "uri": external.get("uri", "")
+                }
+
+            # Build HTML
+            html_parts = [
+                "<!DOCTYPE html>",
+                "<html lang=\"en\"><head>",
+                "<meta charset=\"utf-8\">",
+                f"<title>Bluesky Post by {author_name}</title>",
+                "</head><body>",
+                "<article>",
+                f"<h1>Bluesky Post</h1>",
+                f"<p><strong>Author:</strong> {author_name} (@{author_handle})</p>",
+                f"<p><strong>Posted:</strong> {formatted_date}</p>",
+            ]
+
+            if stats:
+                html_parts.append(f"<p>{' | '.join(stats)}</p>")
+
+            html_parts.append("<hr>")
+
+            # Post text
+            if text:
+                # Convert newlines to <br>
+                formatted_text = text.replace("\\n", "<br>")
+                html_parts.append(f"<div style='font-size: 1.1em; margin: 1em 0;'>{formatted_text}</div>")
+
+            # Embedded images
+            if embed_images:
+                html_parts.append("<div>")
+                for img_url in embed_images:
+                    html_parts.append(f'<img src="{img_url}" style="max-width: 100%; margin: 0.5em 0;"><br>')
+                html_parts.append("</div>")
+
+            # External link card
+            if embed_external:
+                html_parts.append("<div style='border: 1px solid #ccc; padding: 1em; margin: 1em 0;'>")
+                html_parts.append(f"<p><strong>Link:</strong> <a href=\"{embed_external['uri']}\">{embed_external['title'] or embed_external['uri']}</a></p>")
+                if embed_external['description']:
+                    html_parts.append(f"<p>{embed_external['description']}</p>")
+                html_parts.append("</div>")
+
+            html_parts.append(f'<p><a href="{url}">View on Bluesky</a></p>')
+            html_parts.append("</article>")
+
+            # Process replies
+            replies = thread.get("replies", [])
+            if replies:
+                html_parts.append("<h2>Replies</h2>")
+
+                for reply in replies[:20]:  # Limit to 20 replies
+                    reply_post = reply.get("post", {})
+                    reply_record = reply_post.get("record", {})
+                    reply_author = reply_post.get("author", {})
+
+                    reply_author_name = reply_author.get("displayName") or reply_author.get("handle", "Unknown")
+                    reply_text = reply_record.get("text", "")
+                    reply_date = reply_record.get("createdAt", "")
+
+                    html_parts.append("<div style='border-left: 3px solid #ccc; padding-left: 1em; margin: 1em 0;'>")
+                    html_parts.append(f"<p><strong>{reply_author_name}</strong> <small>{reply_date}</small></p>")
+                    if reply_text:
+                        html_parts.append(f"<p>{reply_text.replace(chr(10), '<br>')}</p>")
+                    html_parts.append("</div>")
+
+            html_parts.append("</body></html>")
+
+            return "".join(html_parts)
+
+        except Exception as e:
+            logger.warning(f"Bluesky handler failed: {e}")
+            return None
+
 
 # =============================================================================
 # Special Site Handlers
@@ -1174,6 +1635,26 @@ SPECIAL_SITE_HANDLERS = {
         "handler": Fetcher._fetch_ncpssd_article,
         "default_no_proxy": True,
         "default_no_translate": True,
+    },
+    "github": {
+        "patterns": [
+            r"^https?://(www\.)?github\.com/[^/]+/[^/]+/?$",
+        ],
+        "handler": Fetcher._fetch_github_readme,
+        "default_no_translate": True,  # Default: don't translate GitHub repo names (can be overridden by command line)
+    },
+    "wikipedia": {
+        "patterns": [
+            r"^https?://(www\.)?wikipedia\.org/wiki/",
+            r"^https?://[a-z]{2}\.wikipedia\.org/wiki/",
+        ],
+        "handler": Fetcher._fetch_wikipedia,
+    },
+    "bluesky": {
+        "patterns": [
+            r"^https?://bsky\.app/profile/[^/]+/post/",
+        ],
+        "handler": Fetcher._fetch_bluesky,
     },
 }
 
