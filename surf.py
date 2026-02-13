@@ -1177,17 +1177,41 @@ class Fetcher:
                         return /\\/README_[a-z]{2}(\\.md)?$/i.test(href);
                     });
 
-                    // Get the repo title
-                    const titleEl = document.querySelector('h1 strong[itemprop="name"]') ||
-                                     document.querySelector('h1 [itemprop="name"]') ||
-                                     document.querySelector('h1');
-                    const title = titleEl?.innerText?.trim() || '';
+                    // Get the repo title - try multiple selectors for robustness
+                    let title = '';
+                    const titleSelectors = [
+                        'h1 strong[itemprop="name"]',
+                        'h1 [itemprop="name"]',
+                        '.repository-content h1',
+                        '[data-testid="repo-title"]',
+                        'h1[class*="title"]',
+                        'h1',
+                    ];
+                    for (const selector of titleSelectors) {
+                        const el = document.querySelector(selector);
+                        if (el && el.innerText) {
+                            title = el.innerText.trim();
+                            break;
+                        }
+                    }
 
-                    // Get description
-                    const descEl = document.querySelector('[data-testid="about-description"] p') ||
-                                   document.querySelector('[data-testid="repository-description"]') ||
-                                   document.querySelector('.repository-content .BorderGrid-cell p');
-                    const description = descEl?.innerText?.trim() || '';
+                    // Get description - try multiple selectors
+                    let description = '';
+                    const descSelectors = [
+                        '[data-testid="about-description"] p',
+                        '[data-testid="repository-description"]',
+                        '[data-testid="about-description"]',
+                        '.repository-content .BorderGrid-cell p',
+                        '.repository-content p',
+                        '[class*="description"]',
+                    ];
+                    for (const selector of descSelectors) {
+                        const el = document.querySelector(selector);
+                        if (el && el.innerText) {
+                            description = el.innerText.trim();
+                            break;
+                        }
+                    }
 
                     return { readmeLinks: readmeLinks.map(a => a.href), title, description };
                 }
@@ -1641,7 +1665,7 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?github\.com/[^/]+/[^/]+/?$",
         ],
         "handler": Fetcher._fetch_github_readme,
-        "default_no_translate": True,  # Default: don't translate GitHub repo names (can be overridden by command line)
+        "skip_title_translation": True,  # Don't translate GitHub repo names, but content can be translated
     },
     "wikipedia": {
         "patterns": [
@@ -3127,6 +3151,10 @@ Authentication:
     target_lang = config.get("Output", "target_language", fallback="zh-cn")
     translated_title = None  # Initialize for raw mode
 
+    # Check if this is a site that should skip title translation
+    _, site_name, site_config = _get_handler_for_url(args.url) if args.url else (None, None, None)
+    skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
+
     if lang_mode == "raw":
         logger.info("Language mode set to 'raw'. Skipping translation.")
     else:
@@ -3136,13 +3164,20 @@ Authentication:
         # Get LLM provider from command line if specified
         llm_provider = args.llm if hasattr(args, "llm") else None
 
+        # For sites like GitHub, don't translate the title (keep repo name as-is)
+        title_to_translate = None if skip_title_translation else title
+
         translated_md, translated_title = ContentProcessor.translate_if_needed(
             md_content,
-            title=title,
+            title=title_to_translate,
             target_lang=target_lang,
             config=config,
             llm_provider=llm_provider,
         )
+
+        # Use original title if title translation was skipped
+        if skip_title_translation:
+            translated_title = original_title
 
         if lang_mode == "both":
             logger.info(
