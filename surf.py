@@ -881,11 +881,97 @@ class Fetcher:
                 browser.close()
 
     @staticmethod
+    def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
+        """
+        Resolve xhslink.com short URL to full xiaohongshu.com URL.
+        Only keeps xsec_token parameter in the final URL.
+
+        Args:
+            url: The short URL (e.g., http://xhslink.com/o/xxxxx)
+            proxies: Proxy configuration for requests
+            timeout: Request timeout in seconds
+
+        Returns:
+            tuple: (resolved_url, cleaned_url) or (None, None) if resolution fails
+        """
+        import requests
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+        if "xhslink.com" not in url:
+            # Not a short link, return as-is
+            return url, url
+
+        try:
+            logger.info(f"Resolving xhslink short URL: {url}")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
+            }
+
+            # First, make a HEAD request to check the redirect chain
+            session = requests.Session()
+            # Don't use allow_redirects=True initially to see the redirect chain
+            response = session.get(
+                url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
+            )
+            final_url = response.url
+
+            logger.info(f"Resolved to: {final_url}")
+
+            # Check if we got a valid xiaohongshu URL
+            if "xiaohongshu.com" not in final_url:
+                logger.warning(f"Resolved URL does not contain xiaohongshu.com: {final_url}")
+                # The URL might still be a redirect page, let's check the response content
+                response_text_lower = response.text.lower()
+                if "xiaohongshu" in response_text_lower or "redirect" in response_text_lower:
+                    logger.warning("Response appears to contain xiaohongshu or redirect, trying to extract URL from content")
+                    # Try to find redirect URL in the HTML - look for various patterns
+                    patterns = [
+                        r'https://[^"\s<>]+xiaohongshu\.com/explore/[^"\s<>]*',
+                        r'https://[^"\s<>]+xiaohongshu\.com/discovery/item/[^"\s<>]*',
+                        r'https://[^"\s<>]+xiaohongshu\.com[^"\s<>]*',
+                    ]
+                    for pattern in patterns:
+                        redirect_match = re.search(pattern, response.text)
+                        if redirect_match:
+                            final_url = redirect_match.group(0)
+                            logger.info(f"Extracted URL from redirect page: {final_url}")
+                            break
+
+            # Parse the URL and clean it
+            parsed = urlparse(final_url)
+            query_params = parse_qs(parsed.query)
+
+            # Only keep xsec_token parameter
+            cleaned_params = {}
+            if "xsec_token" in query_params:
+                cleaned_params["xsec_token"] = query_params["xsec_token"]
+
+            # Rebuild the URL with only xsec_token
+            cleaned_query = urlencode(cleaned_params, doseq=True)
+            cleaned_url = urlunparse(
+                parsed._replace(query=cleaned_query)
+            )
+
+            logger.info(f"Cleaned URL: {cleaned_url}")
+            return final_url, cleaned_url
+
+        except Exception as e:
+            logger.warning(f"Failed to resolve xhslink URL {url}: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None, None
+
+    @staticmethod
     def _fetch_xiaohongshu(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
         """
         Fetch Xiaohongshu (小红书) content with authentication support.
+        Supports both direct URLs and xhslink.com short URLs.
         Requires prior login using --login xiaohongshu
         """
         from playwright.sync_api import sync_playwright
@@ -893,6 +979,16 @@ class Fetcher:
         req_proxies, pw_proxy = Fetcher._get_proxies(
             config, proxy_mode_override, custom_proxy_override
         )
+
+        # Check if this is a short link and resolve it
+        original_short_url = None
+        if "xhslink.com" in url:
+            original_short_url = url
+            _, url = Fetcher._resolve_xhslink_short_url(url, proxies=req_proxies)
+            if not url:
+                logger.error("Failed to resolve xhslink short URL")
+                return None
+            logger.info(f"Using resolved URL for fetching: {url}")
 
         # Check if auth state exists before launching browser
         state = AuthHandler.load_state("xiaohongshu")
@@ -929,11 +1025,14 @@ class Fetcher:
             page = context.new_page()
 
             try:
+                logger.info(f"Navigating to: {url}")
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(3000)
 
                 # Check if we're still on login page (auth failed or not logged in)
                 current_url = page.url
+                logger.info(f"Current page URL: {current_url}")
+
                 if "/login" in current_url or "/signin" in current_url:
                     logger.warning(
                         "Saved auth state expired. Starting interactive login..."
@@ -957,12 +1056,13 @@ class Fetcher:
                 # Extract note content
                 # Xiaohongshu note pages have URLs like: https://www.xiaohongshu.com/explore/NOTE_ID
                 title = page.evaluate("""() => {
-                    const titleEl = document.querySelector('h1.title') || 
+                    const titleEl = document.querySelector('h1.title') ||
                                      document.querySelector('.note-title') ||
                                      document.querySelector('h1');
                     return titleEl?.innerText?.trim() || document.title;
                 }
                 """)
+                logger.info(f"Extracted title: {title[:100] if title else 'None'}...")
 
                 content = page.evaluate("""() => {
                     // Try multiple selectors for note content
@@ -999,10 +1099,27 @@ class Fetcher:
                 }
                 """)
 
+                logger.info(f"Extracted content length: {len(content) if content else 0} chars, images: {len(images)}")
+
+                # Check if content is too short (might indicate page not fully loaded)
+                if not content or len(content.strip()) < 50:
+                    logger.warning("Content is too short, page might not have loaded correctly")
+                    # Try to get more info about the page
+                    page_info = page.evaluate("""() => {
+                        return {
+                            url: window.location.href,
+                            title: document.title,
+                            bodyLength: document.body?.innerText?.length || 0
+                        };
+                    }""")
+                    logger.info(f"Page info: {page_info}")
+
                 # Build HTML with full page structure (for cleaning)
+                # Store the cleaned URL in a meta tag for later use in metadata
                 html_parts = [
                     "<html><head><meta charset='utf-8'>",
                     f"<title>{title}</title>",
+                    f'<meta name="source-url" content="{url}">',
                     "</head><body><article>",
                     f"<h1>{title}</h1>",
                     content,
@@ -1026,7 +1143,9 @@ class Fetcher:
                 return html_content
 
             except Exception as e:
-                logger.warning(f"Xiaohongshu handler failed: {e}")
+                logger.error(f"Xiaohongshu handler failed: {e}")
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
             finally:
                 browser.close()
@@ -1646,6 +1765,7 @@ SPECIAL_SITE_HANDLERS = {
         "patterns": [
             r"^https?://(www\.)?xiaohongshu\.com/explore/",
             r"^https?://(www\.)?xiaohongshu\.com/user/profile/",
+            r"^https?://xhslink\.com/",
         ],
         "handler": Fetcher._fetch_xiaohongshu,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
@@ -3204,6 +3324,26 @@ Authentication:
         cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, args.url)
 
     # 5. Output
+    # Extract source URL from HTML meta tag if present (for short link resolution)
+    def _extract_source_url_from_html(html_content, default_url):
+        """Extract source URL from meta tag if present, otherwise return default."""
+        if not html_content:
+            return default_url
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html_content, "html.parser")
+            meta_tag = soup.find("meta", attrs={"name": "source-url"})
+            if meta_tag and meta_tag.get("content"):
+                return meta_tag["content"]
+        except Exception:
+            pass
+        return default_url
+
+    # Use the source URL from meta tag if available (for xhslink resolution)
+    source_url = _extract_source_url_from_html(html_content, args.url)
+    if source_url != args.url:
+        logger.info(f"Using resolved source URL for metadata: {source_url}")
+
     # Determine output path
     output_path = args.output if args.output else None
     if args.O:
@@ -3283,7 +3423,7 @@ Authentication:
                     translated_title=translated_title
                     if translation_performed
                     else None,
-                    source_url=args.url,
+                    source_url=source_url,
                     translator=translator,
                 )
         elif args.speak:
@@ -3297,7 +3437,7 @@ Authentication:
                 html_content=html_content,
                 add_front_matter=not args.no_front_matter,
                 translated_title=translated_title if translation_performed else None,
-                source_url=args.url,
+                source_url=source_url,
                 translator=translator,
             )
 

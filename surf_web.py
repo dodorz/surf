@@ -743,6 +743,19 @@ def process_url():
             except Exception:
                 pass
 
+        # Extract source URL from HTML meta tag if present (for short link resolution)
+        source_url = url
+        if html_content:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, "html.parser")
+                meta_tag = soup.find("meta", attrs={"name": "source-url"})
+                if meta_tag and meta_tag.get("content"):
+                    source_url = meta_tag["content"]
+                    logger.info(f"Using resolved source URL for metadata: {source_url}")
+            except Exception:
+                pass
+
         # Get default directories for frontend
         defaultDirs = {
             "md": config.get("Output", "md_dir", fallback="notes"),
@@ -767,7 +780,7 @@ def process_url():
                     "translated_title": translated_title
                     if translation_performed
                     else None,
-                    "source_url": url,
+                    "source_url": source_url,
                     "translator": translator,
                     "html_inline": data.get("html_inline", False),
                 },
