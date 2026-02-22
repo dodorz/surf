@@ -4,6 +4,7 @@ import configparser
 import os
 import sys
 import logging
+import json
 import requests  # type: ignore
 from readability import Document
 import markdownify
@@ -15,6 +16,7 @@ from playsound import playsound
 from datetime import datetime
 from dateutil import parser as date_parser  # type: ignore
 from bs4 import BeautifulSoup
+from html import escape
 import trafilatura
 import re
 
@@ -373,6 +375,189 @@ class Fetcher:
         return False
 
     @staticmethod
+    def _extract_twitter_oembed_links(html_content):
+        """Extract links from Twitter/X oEmbed HTML in order."""
+        if not html_content:
+            return []
+        soup = BeautifulSoup(html_content, "html.parser")
+        links = []
+        for a in soup.find_all("a", href=True):
+            href = a.get("href", "").strip()
+            if href and href not in links:
+                links.append(href)
+        return links
+
+    @staticmethod
+    def _is_twitter_placeholder_text(text):
+        """
+        Detect common X login/placeholder copy that should not be treated as article content.
+        """
+        if not text:
+            return False
+
+        normalized = re.sub(r"\s+", " ", text.strip().lower())
+        normalized = normalized.replace("\u2019", "'")
+
+        primary_pairs = [
+            ("don't miss what's happening", "people on x are the first to know"),
+            ("dont miss what's happening", "people on x are the first to know"),
+            ("join x today", "already have an account"),
+            ("sign up", "log in"),
+        ]
+        for left, right in primary_pairs:
+            if left in normalized and right in normalized:
+                return True
+
+        extra_patterns = [
+            r"\bpeople on x are the first to know\b",
+            r"\bdon't miss what's happening\b",
+            r"\bjoin x today\b",
+        ]
+        for pattern in extra_patterns:
+            if re.search(pattern, normalized):
+                return True
+
+        return False
+
+    @staticmethod
+    def _is_twitter_placeholder_content(html_content):
+        """Detect whether an HTML snippet is mostly X login/placeholder content."""
+        if not html_content:
+            return True
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = soup.get_text(" ", strip=True)
+        return Fetcher._is_twitter_placeholder_text(text)
+
+    @staticmethod
+    def _resolve_url_with_redirects(url, proxies=None, timeout=30):
+        """Resolve short links (for example t.co) to their final destination URL."""
+        if not url:
+            return None
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            }
+            response = requests.get(
+                url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
+            )
+            return response.url or url
+        except Exception as e:
+            logger.debug(f"Failed to resolve redirect URL {url}: {e}")
+            return None
+
+    @staticmethod
+    def _extract_twitter_article_target(url, oembed_html, proxies=None):
+        """
+        Try to resolve the actual Twitter/X article URL from oEmbed links.
+        Falls back to the original URL.
+        """
+        links = Fetcher._extract_twitter_oembed_links(oembed_html)
+        for link in links:
+            if "t.co/" not in link:
+                continue
+            resolved = Fetcher._resolve_url_with_redirects(link, proxies=proxies)
+            if resolved and re.search(r"/i/article/\d+", resolved):
+                logger.info(f"Resolved Twitter Article URL: {resolved}")
+                return resolved
+        return url
+
+    @staticmethod
+    def _extract_twitter_structured_content(html_content, source_url=None):
+        """
+        Extract meaningful Twitter/X text from structured metadata (JSON-LD/meta tags).
+        Returns a compact HTML document when successful, otherwise None.
+        """
+        if not html_content:
+            return None
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        candidates = []
+        seen = set()
+
+        def add_candidate(text):
+            if not text:
+                return
+            value = re.sub(r"\s+", " ", text).strip()
+            if len(value) < 30:
+                return
+            if Fetcher._is_twitter_placeholder_text(value):
+                return
+            key = value.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(value)
+
+        def collect_from_obj(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    k = str(key).lower()
+                    if k in {"articlebody", "description", "text", "headline", "name"}:
+                        if isinstance(value, str):
+                            add_candidate(value)
+                    collect_from_obj(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    collect_from_obj(item)
+
+        # JSON-LD often contains articleBody/text for tweet/article pages.
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw = script.string or script.get_text()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+                collect_from_obj(data)
+            except Exception:
+                continue
+
+        # Meta tags are weaker but still useful if DOM content is blocked.
+        meta_selectors = [
+            ("meta", {"property": "og:description"}),
+            ("meta", {"name": "description"}),
+            ("meta", {"name": "twitter:description"}),
+        ]
+        for tag_name, attrs in meta_selectors:
+            tag = soup.find(tag_name, attrs=attrs)
+            if tag:
+                add_candidate(tag.get("content"))
+
+        title = None
+        title_tag = soup.find("meta", attrs={"property": "og:title"})
+        if title_tag and title_tag.get("content"):
+            title = title_tag.get("content").strip()
+        elif soup.title and soup.title.string:
+            title = soup.title.string.strip()
+
+        if title and Fetcher._is_twitter_placeholder_text(title):
+            title = None
+
+        if not candidates:
+            return None
+
+        best = max(candidates, key=len)
+        paragraphs = [p.strip() for p in re.split(r"\n{2,}", best) if p.strip()]
+        if not paragraphs:
+            paragraphs = [best]
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(title or 'X Content')}</title>",
+            "</head><body><article>",
+        ]
+        if title:
+            html_parts.append(f"<h1>{escape(title)}</h1>")
+        if source_url:
+            html_parts.append(f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>")
+        for para in paragraphs:
+            html_parts.append(f"<p>{escape(para)}</p>")
+        html_parts.append("</article></body></html>")
+        return "".join(html_parts)
+
+    @staticmethod
     def _get_twitter_forced_proxies(
         config, proxy_mode_override=None, custom_proxy_override=None
     ):
@@ -673,14 +858,30 @@ class Fetcher:
                 f"oEmbed response: author={author_name}, provider={provider_name}"
             )
 
+            # oEmbed occasionally returns login-wall placeholder copy; do not trust it.
+            if Fetcher._is_twitter_placeholder_content(html_content):
+                logger.info(
+                    "oEmbed returned placeholder/login text, falling back to browser fetch"
+                )
+                return Fetcher.fetch_with_browser(
+                    url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    is_twitter_article=True,
+                )
+
             # Check if this is a Twitter Article (oEmbed only returns link)
             if Fetcher._is_twitter_article_only_link(html_content):
                 logger.info(
                     "oEmbed returned link-only content (Twitter Article), fetching with browser..."
                 )
+                article_target_url = Fetcher._extract_twitter_article_target(
+                    url, html_content, proxies=req_proxies
+                )
                 # Fetch directly with browser and clean content
                 article_html = Fetcher.fetch_with_browser(
-                    url,
+                    article_target_url,
                     config,
                     proxy_mode_override,
                     custom_proxy_override,
@@ -867,10 +1068,18 @@ class Fetcher:
 
                 content = page.content()
 
-                # Clean Twitter Article content if needed
-                if Fetcher._is_twitter_url(url) and is_twitter_article:
-                    logger.info("Cleaning Twitter Article content...")
-                    content = Fetcher._clean_twitter_article_content(content)
+                if Fetcher._is_twitter_url(url):
+                    structured = Fetcher._extract_twitter_structured_content(
+                        content, source_url=url
+                    )
+                    if structured:
+                        logger.info("Using structured Twitter/X content extraction")
+                        return structured
+
+                    # Clean Twitter Article content if needed
+                    if is_twitter_article:
+                        logger.info("Cleaning Twitter Article content...")
+                        content = Fetcher._clean_twitter_article_content(content)
 
                 return content
             except Exception as e:

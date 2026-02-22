@@ -8,6 +8,7 @@
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, and Xiaohongshu (RED) with automatic authentication support.
+- **Improved X Article Extraction**: Detects X login-wall placeholders, resolves `t.co` article links, and falls back to structured metadata extraction for better tweet/article body capture.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 

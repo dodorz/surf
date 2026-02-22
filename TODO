@@ -22,13 +22,13 @@
 - [x] Web接口
 - [x] 特定网站的处理
     - [ ] 重定向与短链接
-    - [ ] 认证状态的保存位置
+    - [x] 认证状态的保存位置
     - [x] Twitter
     - [ ] pocketcasts(https://pca.st/episode/)
     - [x] 小红书
-        - [ ] http://xhslink.com/o/XXX
-        - [ ] 加入source时删除URL中不必要参数
-        - [ ] llm指定模型名称时忽略大小写
+        - [x] http://xhslink.com/o/XXX
+        - [x] 加入source时删除URL中不必要参数
+        - [x] llm指定模型名称时忽略大小写
         - [ ] 题图ocr
     - [x] GitHub
     - [x] 国家哲学社会科学文献中心
