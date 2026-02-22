@@ -2373,6 +2373,41 @@ class OutputHandler:
         ).rstrip()
 
     @staticmethod
+    def _safe_filename_title(title, max_len=None):
+        safe_title = "".join(
+            c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
+        ).strip()
+        if max_len:
+            safe_title = safe_title[:max_len]
+        return safe_title or "Untitled"
+
+    @staticmethod
+    def _extract_html_title(html_content):
+        if not html_content:
+            return None
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            title_tag = soup.find("title")
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+                return title or None
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _get_filename_title(title, source_url=None, html_content=None):
+        """
+        Select filename title based on source site rules.
+        For GitHub URLs, prefer page <title>.
+        """
+        if source_url and re.match(r"^https?://(www\.)?github\.com/", source_url, re.IGNORECASE):
+            html_title = OutputHandler._extract_html_title(html_content)
+            if html_title:
+                return html_title
+        return title
+
+    @staticmethod
     def _convert_urls_to_absolute(html_content, base_url):
         """
         将HTML中的相对URL转换为绝对URL。
@@ -2661,6 +2696,10 @@ class OutputHandler:
         if not os.path.exists(md_dir):
             os.makedirs(md_dir)
 
+        filename_title = OutputHandler._get_filename_title(
+            title, source_url=source_url, html_content=html_content
+        )
+
         # Determine filepath
         if output_path:
             # Expand user home directory (~) if present
@@ -2668,9 +2707,7 @@ class OutputHandler:
             # Handle special cases: "." or "./" (current directory)
             if filepath == "." or filepath == "./":
                 # Use current directory + default filename
-                safe_title = "".join(
-                    c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-                ).strip()
+                safe_title = OutputHandler._safe_filename_title(filename_title)
                 filename = f"{safe_title}.md"
                 filepath = os.path.join(".", filename)
             # Ensure directory exists
@@ -2679,9 +2716,7 @@ class OutputHandler:
                 os.makedirs(filepath_dir)
         else:
             # Simple sanitization
-            safe_title = "".join(
-                c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-            ).strip()
+            safe_title = OutputHandler._safe_filename_title(filename_title)
             filename = f"{safe_title}.md"
             filepath = os.path.join(md_dir, filename)
 

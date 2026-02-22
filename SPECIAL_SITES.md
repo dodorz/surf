@@ -198,6 +198,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 - 自动移除 permalink 锚点链接，避免空链接显示
 - 提取仓库标题和描述信息
 - **标题不翻译**: 仓库名称保持原文（通过 `skip_title_translation` 配置），README 内容可以翻译
+- **文件名策略**: 保存 Markdown 文件时，GitHub URL 使用页面 `<title>` 作为文件名基准
 
 ---
 

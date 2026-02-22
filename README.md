@@ -40,6 +40,7 @@ Some sites have default policies that can be overridden with command-line argume
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
 - **Twitter/X**: Uses forced proxy settings
+- **GitHub**: Saved Markdown filename uses the page `<title>`
 
 ## Installation
 
