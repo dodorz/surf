@@ -1973,6 +1973,7 @@ SPECIAL_SITE_HANDLERS = {
     "xiaohongshu": {
         "patterns": [
             r"^https?://(www\.)?xiaohongshu\.com/explore/",
+            r"^https?://(www\.)?xiaohongshu\.com/discovery/item/",
             r"^https?://(www\.)?xiaohongshu\.com/user/profile/",
             r"^https?://xhslink\.com/",
         ],

@@ -181,6 +181,7 @@ surf --login xiaohongshu
 
 # After login, fetch content normally
 surf "https://www.xiaohongshu.com/explore/..."
+surf "https://www.xiaohongshu.com/discovery/item/..."
 
 # Clear saved authentication
 surf --clear-auth xiaohongshu

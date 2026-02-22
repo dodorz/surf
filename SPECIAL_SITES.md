@@ -104,6 +104,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 **匹配规则**:
 ```regex
 ^https?://(www\.)?xiaohongshu\.com/explore/
+^https?://(www\.)?xiaohongshu\.com/discovery/item/
 ^https?://(www\.)?xiaohongshu\.com/user/profile/
 ^https?://xhslink\.com/
 ```

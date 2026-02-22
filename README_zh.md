@@ -168,6 +168,7 @@ surf --login xiaohongshu
 
 # 登录后正常获取内容
 surf "https://www.xiaohongshu.com/explore/..."
+surf "https://www.xiaohongshu.com/discovery/item/..."
 
 # 清除保存的认证
 surf --clear-auth xiaohongshu
