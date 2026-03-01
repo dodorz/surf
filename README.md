@@ -8,7 +8,7 @@
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, and Xiaohongshu (RED) with automatic authentication support.
-- **Improved X Article Extraction**: Detects X login-wall placeholders, resolves `t.co` article links, and falls back to structured metadata extraction for better tweet/article body capture.
+- **Improved X Article Extraction**: Detects more X login-wall placeholder variants, resolves `t.co` article links, falls back to structured metadata extraction, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 
@@ -174,23 +174,29 @@ uv run surf.py "https://example.com" --browser
 
 ### Authentication (--login / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu), use interactive login:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X), use interactive login:
 
 ```bash
 # First-time login for Xiaohongshu
 surf --login xiaohongshu
 
+# Optional: login for Twitter/X (helps with login-wall pages)
+surf --login twitter
+
 # After login, fetch content normally
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
+surf "https://x.com/username/status/1234567890"
 
 # Clear saved authentication
 surf --clear-auth xiaohongshu
+surf --clear-auth twitter
 # Or clear all sites
 surf --clear-auth all
 ```
 
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
+For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling.
 
 ## Help
 

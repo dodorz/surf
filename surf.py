@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 from html import escape
 import trafilatura
 import re
+import unicodedata
 
 
 def _get_version():
@@ -388,6 +389,14 @@ class Fetcher:
         return links
 
     @staticmethod
+    def _extract_twitter_status_id(url):
+        """Extract tweet status ID from Twitter/X URL."""
+        if not url:
+            return None
+        match = re.search(r"/status/(\d+)", url)
+        return match.group(1) if match else None
+
+    @staticmethod
     def _is_twitter_placeholder_text(text):
         """
         Detect common X login/placeholder copy that should not be treated as article content.
@@ -395,26 +404,39 @@ class Fetcher:
         if not text:
             return False
 
-        normalized = re.sub(r"\s+", " ", text.strip().lower())
-        normalized = normalized.replace("\u2019", "'")
+        normalized = unicodedata.normalize("NFKC", text).strip().lower()
+        normalized = re.sub(r"[\u2018\u2019\u201b\u2032\u00b4`]", "'", normalized)
+        normalized = re.sub(r"\s+", " ", normalized)
+        normalized_no_punct = re.sub(r"[^a-z0-9\s]", "", normalized)
 
         primary_pairs = [
             ("don't miss what's happening", "people on x are the first to know"),
             ("dont miss what's happening", "people on x are the first to know"),
+            ("dont miss whats happening", "people on x are the first to know"),
             ("join x today", "already have an account"),
             ("sign up", "log in"),
         ]
         for left, right in primary_pairs:
             if left in normalized and right in normalized:
                 return True
+            left_no_punct = re.sub(r"[^a-z0-9\s]", "", left)
+            right_no_punct = re.sub(r"[^a-z0-9\s]", "", right)
+            if left_no_punct in normalized_no_punct and right_no_punct in normalized_no_punct:
+                return True
 
         extra_patterns = [
             r"\bpeople on x are the first to know\b",
-            r"\bdon't miss what's happening\b",
+            r"\bdon'?t miss what'?s happening\b",
             r"\bjoin x today\b",
         ]
         for pattern in extra_patterns:
             if re.search(pattern, normalized):
+                return True
+            normalized_no_apostrophe = normalized_no_punct
+            if re.search(
+                pattern.replace("'", "").replace("?", ""),
+                normalized_no_apostrophe,
+            ):
                 return True
 
         return False
@@ -423,6 +445,19 @@ class Fetcher:
     def _is_twitter_placeholder_content(html_content):
         """Detect whether an HTML snippet is mostly X login/placeholder content."""
         if not html_content:
+            return True
+        raw = html_content.lower()
+        raw = (
+            raw.replace("\u2019", "'")
+            .replace("&#39;", "'")
+            .replace("&rsquo;", "'")
+            .replace("&apos;", "'")
+        )
+        raw = re.sub(r"\s+", " ", raw)
+        if (
+            re.search(r"don'?t miss what'?s happening", raw)
+            and "people on x are the first to know" in raw
+        ):
             return True
         soup = BeautifulSoup(html_content, "html.parser")
         text = soup.get_text(" ", strip=True)
@@ -463,6 +498,162 @@ class Fetcher:
                 logger.info(f"Resolved Twitter Article URL: {resolved}")
                 return resolved
         return url
+
+    @staticmethod
+    def _fetch_twitter_syndication_html(url, proxies=None):
+        """
+        Fallback extraction via Twitter syndication endpoint for status pages.
+        Returns a compact HTML document when successful, otherwise None.
+        """
+        status_id = Fetcher._extract_twitter_status_id(url)
+        if not status_id:
+            return None
+
+        api_url = f"https://cdn.syndication.twimg.com/tweet-result?id={status_id}&lang=en"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+
+        try:
+            response = requests.get(api_url, headers=headers, proxies=proxies, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.debug(f"Syndication fallback failed for {url}: {e}")
+            return None
+
+        text = (data.get("text") or "").strip()
+        if not text or Fetcher._is_twitter_placeholder_text(text):
+            return None
+
+        user = data.get("user") or {}
+        user_name = (user.get("name") or "").strip()
+        screen_name = (user.get("screen_name") or "").strip()
+        title_base = user_name or (f"@{screen_name}" if screen_name else "X Post")
+        title = f"{title_base} - X Post"
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(title)}</title>",
+            "</head><body><article>",
+            f"<h1>{escape(title_base)}</h1>",
+            f"<p><a href='{escape(url)}'>{escape(url)}</a></p>",
+        ]
+
+        for para in [p.strip() for p in text.splitlines() if p.strip()]:
+            html_parts.append(f"<p>{escape(para)}</p>")
+
+        media = data.get("mediaDetails") or []
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            media_url = (item.get("media_url_https") or item.get("media_url") or "").strip()
+            if media_url:
+                html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
+
+        html_parts.append("</article></body></html>")
+        return "".join(html_parts)
+
+    @staticmethod
+    def _fetch_twitter_fxapi_html(url, proxies=None):
+        """
+        Fallback extraction via api.fxtwitter.com when X login wall blocks browser/oEmbed.
+        Supports tweet text and article blocks.
+        """
+        status_id = Fetcher._extract_twitter_status_id(url)
+        if not status_id:
+            return None
+
+        api_url = f"https://api.fxtwitter.com/status/{status_id}"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            response = requests.get(api_url, headers=headers, proxies=proxies, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as e:
+            logger.debug(f"fxTwitter fallback failed for {url}: {e}")
+            return None
+
+        tweet = payload.get("tweet") if isinstance(payload, dict) else None
+        if not isinstance(tweet, dict):
+            return None
+
+        author = tweet.get("author") or {}
+        author_name = (author.get("name") or "").strip()
+        screen_name = (author.get("screen_name") or "").strip()
+        title_base = author_name or (f"@{screen_name}" if screen_name else "X Post")
+
+        article = tweet.get("article") or {}
+        article_title = (article.get("title") or "").strip()
+        doc_title = article_title or f"{title_base} - X Post"
+
+        lines = []
+        content = article.get("content") or {}
+        blocks = content.get("blocks") or []
+        if isinstance(blocks, list):
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                text = (block.get("text") or "").strip()
+                if text:
+                    lines.extend([p.strip() for p in text.splitlines() if p.strip()])
+
+        if not lines:
+            text = (tweet.get("text") or "").strip()
+            if not text:
+                raw_text = tweet.get("raw_text") or {}
+                text = (raw_text.get("text") or "").strip()
+            if text:
+                lines.extend([p.strip() for p in text.splitlines() if p.strip()])
+
+        if not lines:
+            return None
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(doc_title)}</title>",
+            "</head><body><article>",
+            f"<h1>{escape(doc_title)}</h1>",
+            f"<p><a href='{escape(url)}'>{escape(url)}</a></p>",
+        ]
+        if screen_name:
+            html_parts.append(f"<p>Author: @{escape(screen_name)}</p>")
+
+        for line in lines:
+            html_parts.append(f"<p>{escape(line)}</p>")
+
+        image_urls = []
+        cover_media = article.get("cover_media") or {}
+        cover_info = cover_media.get("media_info") or {}
+        cover_url = (cover_info.get("original_img_url") or "").strip()
+        if cover_url and cover_url not in image_urls:
+            image_urls.append(cover_url)
+
+        media_entities = article.get("media_entities") or []
+        if isinstance(media_entities, list):
+            for item in media_entities:
+                if not isinstance(item, dict):
+                    continue
+                media_info = item.get("media_info") or {}
+                media_url = (media_info.get("original_img_url") or "").strip()
+                if media_url and media_url not in image_urls:
+                    image_urls.append(media_url)
+
+        for media_url in image_urls:
+            html_parts.append(
+                f"<p><img src='{escape(media_url)}' alt='tweet media'></p>"
+            )
+
+        html_parts.append("</article></body></html>")
+        return "".join(html_parts)
 
     @staticmethod
     def _extract_twitter_structured_content(html_content, source_url=None):
@@ -861,15 +1052,38 @@ class Fetcher:
             # oEmbed occasionally returns login-wall placeholder copy; do not trust it.
             if Fetcher._is_twitter_placeholder_content(html_content):
                 logger.info(
-                    "oEmbed returned placeholder/login text, falling back to browser fetch"
+                    "oEmbed returned placeholder/login text, trying syndication fallback"
                 )
-                return Fetcher.fetch_with_browser(
+                syndication_html = Fetcher._fetch_twitter_syndication_html(
+                    url, proxies=req_proxies
+                )
+                if syndication_html:
+                    logger.info("Using Twitter/X syndication fallback content")
+                    return syndication_html
+
+                fxapi_html = Fetcher._fetch_twitter_fxapi_html(url, proxies=req_proxies)
+                if fxapi_html:
+                    logger.info("Using fxTwitter API fallback content")
+                    return fxapi_html
+
+                logger.info(
+                    "Syndication fallback unavailable, falling back to browser fetch"
+                )
+                browser_html = Fetcher.fetch_with_browser(
                     url,
                     config,
                     proxy_mode_override,
                     custom_proxy_override,
                     is_twitter_article=True,
                 )
+                if browser_html and not Fetcher._is_twitter_placeholder_content(
+                    browser_html
+                ):
+                    return browser_html
+                logger.warning(
+                    "Browser fallback still returned placeholder/empty content for Twitter/X"
+                )
+                return None
 
             # Check if this is a Twitter Article (oEmbed only returns link)
             if Fetcher._is_twitter_article_only_link(html_content):
@@ -887,6 +1101,16 @@ class Fetcher:
                     custom_proxy_override,
                     is_twitter_article=True,
                 )
+                if article_html and not Fetcher._is_twitter_placeholder_content(
+                    article_html
+                ):
+                    return article_html
+                fxapi_html = Fetcher._fetch_twitter_fxapi_html(
+                    article_target_url, proxies=req_proxies
+                )
+                if fxapi_html:
+                    logger.info("Using fxTwitter API fallback for Twitter Article")
+                    return fxapi_html
                 return article_html
 
             return html_content
@@ -959,7 +1183,7 @@ class Fetcher:
         )
 
     @staticmethod
-    def _create_stealth_context(browser, url=None):
+    def _create_stealth_context(browser, url=None, auth_site_name=None):
         """
         Create a browser context with anti-detection measures.
         Uses stealth settings to avoid being detected as automation.
@@ -983,16 +1207,24 @@ class Fetcher:
             locale = "en-US"
             timezone = "America/New_York"
 
-        context = browser.new_context(
-            viewport=viewport,
-            user_agent=user_agent,
-            locale=locale,
-            timezone_id=timezone,
-            extra_http_headers={
+        context_options = {
+            "viewport": viewport,
+            "user_agent": user_agent,
+            "locale": locale,
+            "timezone_id": timezone,
+            "extra_http_headers": {
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             },
-        )
+        }
+
+        # If auth state is available for this site, use it; otherwise fallback to clean context.
+        if auth_site_name:
+            context = AuthHandler.create_context_with_auth(
+                browser, auth_site_name, **context_options
+            )
+        else:
+            context = browser.new_context(**context_options)
 
         # Add script to hide webdriver property
         context.add_init_script("""
@@ -1019,7 +1251,8 @@ class Fetcher:
         from playwright.sync_api import sync_playwright
 
         # For Twitter/X URLs, always use forced proxy regardless of INI config
-        if Fetcher._is_twitter_url(url):
+        is_twitter_url = Fetcher._is_twitter_url(url)
+        if is_twitter_url:
             _, pw_proxy = Fetcher._get_twitter_forced_proxies(
                 config, proxy_mode_override, custom_proxy_override
             )
@@ -1035,29 +1268,62 @@ class Fetcher:
             logger.info("Playwright Proxy: None")
 
         with sync_playwright() as p:
-            # Launch browser with stealth args
-            launch_args = {
-                "headless": True,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--disable-web-security",
-                    "--disable-features=BlockInsecurePrivateNetworkRequests",
-                ],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
+            browser = None
+            profile_context = None
+            twitter_profile_dir = (
+                AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
+            )
 
-            browser = p.chromium.launch(**launch_args)
+            # Prefer persistent Twitter profile if it exists (more reliable than storage_state alone).
+            if (
+                is_twitter_url
+                and twitter_profile_dir
+                and os.path.exists(twitter_profile_dir)
+                and os.listdir(twitter_profile_dir)
+            ):
+                persistent_args = {"headless": True}
+                if pw_proxy:
+                    persistent_args["proxy"] = pw_proxy
+                try:
+                    profile_context = p.chromium.launch_persistent_context(
+                        twitter_profile_dir, channel="chrome", **persistent_args
+                    )
+                except Exception as e:
+                    logger.info(
+                        f"Chrome channel unavailable for twitter profile fetch, fallback to Chromium: {e}"
+                    )
+                    profile_context = p.chromium.launch_persistent_context(
+                        twitter_profile_dir, **persistent_args
+                    )
+                context = profile_context
+                page = context.pages[0] if context.pages else context.new_page()
+            else:
+                # Launch browser with stealth args
+                launch_args = {
+                    "headless": True,
+                    "args": [
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                        "--disable-web-security",
+                        "--disable-features=BlockInsecurePrivateNetworkRequests",
+                    ],
+                }
+                if pw_proxy:
+                    launch_args["proxy"] = pw_proxy
 
-            # Create context with anti-detection measures
-            context = Fetcher._create_stealth_context(browser, url)
-            page = context.new_page()
+                browser = p.chromium.launch(**launch_args)
+
+                # For Twitter/X, attach persisted auth state if available.
+                auth_site_name = "twitter" if is_twitter_url else None
+                context = Fetcher._create_stealth_context(
+                    browser, url, auth_site_name=auth_site_name
+                )
+                page = context.new_page()
 
             try:
                 # For Twitter/X, use domcontentloaded + timeout instead of networkidle
                 # because X has persistent connections that never reach networkidle
-                if Fetcher._is_twitter_url(url):
+                if is_twitter_url:
                     logger.info("Using domcontentloaded strategy for Twitter/X")
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     # Wait longer for content to hydrate
@@ -1068,7 +1334,31 @@ class Fetcher:
 
                 content = page.content()
 
-                if Fetcher._is_twitter_url(url):
+                if is_twitter_url:
+                    if Fetcher._is_twitter_placeholder_content(content):
+                        logger.info(
+                            "Browser returned placeholder/login content, trying syndication fallback"
+                        )
+                        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+                            config, proxy_mode_override, custom_proxy_override
+                        )
+                        syndication_html = Fetcher._fetch_twitter_syndication_html(
+                            url, proxies=req_proxies
+                        )
+                        if syndication_html:
+                            logger.info("Using Twitter/X syndication fallback content")
+                            return syndication_html
+                        fxapi_html = Fetcher._fetch_twitter_fxapi_html(
+                            url, proxies=req_proxies
+                        )
+                        if fxapi_html:
+                            logger.info("Using fxTwitter API fallback content")
+                            return fxapi_html
+                        logger.warning(
+                            "Browser returned placeholder/login content and syndication fallback was unavailable"
+                        )
+                        return None
+
                     structured = Fetcher._extract_twitter_structured_content(
                         content, source_url=url
                     )
@@ -1086,8 +1376,15 @@ class Fetcher:
                 logger.error(f"Browser fetch failed: {e}")
                 raise
             finally:
-                context.close()
-                browser.close()
+                try:
+                    context.close()
+                except Exception as close_error:
+                    logger.debug(f"Ignoring context close error: {close_error}")
+                if browser:
+                    try:
+                        browser.close()
+                    except Exception as close_error:
+                        logger.debug(f"Ignoring browser close error: {close_error}")
 
     @staticmethod
     def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
@@ -3104,6 +3401,13 @@ class AuthHandler:
     AUTH_STATE_DIR = os.path.join(get_data_dir(), "auth")
 
     @staticmethod
+    def get_twitter_profile_dir():
+        """Persistent browser profile directory for Twitter/X login session."""
+        if not os.path.exists(AuthHandler.AUTH_STATE_DIR):
+            os.makedirs(AuthHandler.AUTH_STATE_DIR)
+        return os.path.join(AuthHandler.AUTH_STATE_DIR, "twitter_profile")
+
+    @staticmethod
     def _get_state_file(site_name):
         """Get the path to the state file for a specific site."""
         if not os.path.exists(AuthHandler.AUTH_STATE_DIR):
@@ -3166,6 +3470,13 @@ class AuthHandler:
             if os.path.exists(state_file):
                 os.remove(state_file)
                 logger.info(f"Cleared auth state for {site_name}")
+            if site_name.lower() in {"twitter", "x"}:
+                profile_dir = AuthHandler.get_twitter_profile_dir()
+                if os.path.exists(profile_dir):
+                    import shutil
+
+                    shutil.rmtree(profile_dir)
+                    logger.info("Cleared persistent profile for twitter")
         else:
             if os.path.exists(AuthHandler.AUTH_STATE_DIR):
                 import shutil
@@ -3197,47 +3508,98 @@ class AuthHandler:
         """
         from playwright.sync_api import sync_playwright
 
-        req_proxies, pw_proxy = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        normalized_site_name = "twitter" if site_name.lower() in {"twitter", "x"} else site_name.lower()
+        if normalized_site_name == "twitter":
+            _, pw_proxy = Fetcher._get_twitter_forced_proxies(
+                config, proxy_mode_override, custom_proxy_override
+            )
+        else:
+            _, pw_proxy = Fetcher._get_proxies(
+                config, proxy_mode_override, custom_proxy_override
+            )
 
         print(f"\n{'=' * 60}")
-        print(f"Interactive Login for {site_name}")
+        print(f"Interactive Login for {normalized_site_name}")
         print(f"{'=' * 60}")
         print("A browser window will open. Please:")
-        print(f"1. Log in to {site_name} manually")
+        print(f"1. Log in to {normalized_site_name} manually")
         print("2. Complete any CAPTCHA or verification if needed")
         print("3. Once logged in, press Enter in this terminal to save the session")
         print(f"{'=' * 60}\n")
 
         with sync_playwright() as p:
-            browser = (
-                p.chromium.launch(headless=False, proxy=pw_proxy)
-                if pw_proxy
-                else p.chromium.launch(headless=False)
-            )
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
+            browser = None
+            context = None
+            profile_dir = None
+            if normalized_site_name == "twitter":
+                # Use persistent profile and minimal fingerprint modifications for login.
+                profile_dir = AuthHandler.get_twitter_profile_dir()
+                os.makedirs(profile_dir, exist_ok=True)
+                persistent_args = {
+                    "headless": False,
+                }
+                if pw_proxy:
+                    persistent_args["proxy"] = pw_proxy
+
+                try:
+                    context = p.chromium.launch_persistent_context(
+                        profile_dir, channel="chrome", **persistent_args
+                    )
+                except Exception as e:
+                    logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
+                    context = p.chromium.launch_persistent_context(
+                        profile_dir, **persistent_args
+                    )
+            else:
+                launch_args = {"headless": False}
+                if pw_proxy:
+                    launch_args["proxy"] = pw_proxy
+                browser = p.chromium.launch(**launch_args)
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                )
+
+            page = context.pages[0] if context.pages else context.new_page()
 
             try:
                 page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
-                print(f"Browser opened. Please log in to {site_name}...")
+                print(f"Browser opened. Please log in to {normalized_site_name}...")
                 input("Press Enter after you have logged in...")
 
                 # Save the state
-                state = context.storage_state()
-                AuthHandler.save_state(site_name, state)
-                print(f"Login state saved for {site_name}")
+                if normalized_site_name == "twitter" and profile_dir:
+                    # For persistent Twitter context, the profile itself is primary session storage.
+                    # Attempt to export storage_state for compatibility; tolerate target-closed cases.
+                    try:
+                        state = context.storage_state()
+                        AuthHandler.save_state(normalized_site_name, state)
+                    except Exception as state_error:
+                        logger.warning(
+                            f"Unable to export twitter storage_state, will rely on persistent profile: {state_error}"
+                        )
+                else:
+                    state = context.storage_state()
+                    AuthHandler.save_state(normalized_site_name, state)
+                print(f"Login state saved for {normalized_site_name}")
                 return True
 
+            except KeyboardInterrupt:
+                logger.warning("Interactive login cancelled by user.")
+                return False
             except Exception as e:
                 logger.error(f"Interactive login failed: {e}")
                 return False
             finally:
-                browser.close()
+                try:
+                    context.close()
+                except Exception as close_error:
+                    logger.debug(f"Ignoring context close error: {close_error}")
+                if browser:
+                    try:
+                        browser.close()
+                    except Exception as close_error:
+                        logger.debug(f"Ignoring browser close error: {close_error}")
 
     @staticmethod
     def create_context_with_auth(browser, site_name, **context_options):
@@ -3340,7 +3702,9 @@ Special Sites:
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
+  surf --login twitter                       # Login to Twitter/X
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
+  surf --clear-auth twitter                  # Clear auth for Twitter/X
         """,
     )
     # Position argument
@@ -3397,7 +3761,7 @@ Authentication:
     parser.add_argument(
         "--login",
         metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu). Opens browser for manual login.",
+        help="Interactive login for a site (e.g., xiaohongshu, twitter/x). Opens browser for manual login.",
     )
     parser.add_argument(
         "--clear-auth",
@@ -3452,10 +3816,13 @@ Authentication:
 
     # Handle --clear-auth
     if args.clear_auth:
-        if args.clear_auth.lower() == "all":
+        clear_site = args.clear_auth.lower()
+        if clear_site == "all":
             AuthHandler.clear_state()
         else:
-            AuthHandler.clear_state(args.clear_auth)
+            if clear_site == "x":
+                clear_site = "twitter"
+            AuthHandler.clear_state(clear_site)
         return
 
     # Handle --login
@@ -3464,14 +3831,17 @@ Authentication:
         # Define login URLs for supported sites
         login_urls = {
             "xiaohongshu": "https://www.xiaohongshu.com",
+            "twitter": "https://x.com/i/flow/login",
+            "x": "https://x.com/i/flow/login",
         }
         if site_name not in login_urls:
             parser.error(
                 f"Unsupported site: {site_name}. Supported: {', '.join(login_urls.keys())}"
             )
         login_url = login_urls[site_name]
+        login_site = "twitter" if site_name == "x" else site_name
         success = AuthHandler.interactive_login(
-            site_name, login_url, config, args.proxy, args.set_proxy
+            login_site, login_url, config, args.proxy, args.set_proxy
         )
         sys.exit(0 if success else 1)
 
@@ -3542,6 +3912,15 @@ Authentication:
         )
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
+        sys.exit(1)
+
+    if not html_content:
+        if Fetcher._is_twitter_url(args.url):
+            logger.error(
+                "Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue)."
+            )
+        else:
+            logger.error(f"Failed to fetch usable content from {args.url}.")
         sys.exit(1)
 
     # 2. Extract

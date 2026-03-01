@@ -8,7 +8,7 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **特殊网站处理**：针对 Twitter/X、微信公众号、小红书等网站优化处理，支持自动认证。
-- **X Article 提取增强**：自动识别 X 登录引导占位文案、解析 `t.co` 跳转到真实 Article 链接，并在需要时使用结构化元数据兜底提取正文。
+- **X Article 提取增强**：自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并在需要时使用结构化元数据兜底提取正文；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
@@ -161,23 +161,29 @@ surf --version                         # 查看版本
 
 ### 认证功能 (--login / --clear-auth)
 
-对于需要登录的网站（如小红书），使用交互式登录功能：
+对于需要登录的网站（如小红书、Twitter/X），使用交互式登录功能：
 
 ```bash
 # 首次登录小红书
 surf --login xiaohongshu
 
+# 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
+surf --login twitter
+
 # 登录后正常获取内容
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
+surf "https://x.com/username/status/1234567890"
 
 # 清除保存的认证
 surf --clear-auth xiaohongshu
+surf --clear-auth twitter
 # 或清除所有网站的认证
 surf --clear-auth all
 ```
 
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
+对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。
 
 ## 单字符参数连写
 
