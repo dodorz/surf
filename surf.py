@@ -1373,6 +1373,19 @@ class Fetcher:
 
                 return content
             except Exception as e:
+                if is_twitter_url:
+                    logger.warning(
+                        f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}"
+                    )
+                    req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+                        config, proxy_mode_override, custom_proxy_override
+                    )
+                    fxapi_html = Fetcher._fetch_twitter_fxapi_html(
+                        url, proxies=req_proxies
+                    )
+                    if fxapi_html:
+                        logger.info("Using fxTwitter API fallback content")
+                        return fxapi_html
                 logger.error(f"Browser fetch failed: {e}")
                 raise
             finally:
