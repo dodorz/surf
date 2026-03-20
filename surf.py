@@ -15,7 +15,7 @@ import edge_tts
 from playsound import playsound
 from datetime import datetime
 from dateutil import parser as date_parser  # type: ignore
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, UnicodeDammit
 from html import escape
 import trafilatura
 import re
@@ -109,6 +109,34 @@ class Config:
 
 
 class Fetcher:
+    @staticmethod
+    def _decode_response_text(response):
+        """
+        Decode HTML bytes with charset hints from headers and markup before
+        falling back to requests' default text decoding.
+        """
+        candidates = []
+        for encoding in (
+            getattr(response, "encoding", None),
+            getattr(response, "apparent_encoding", None),
+            "utf-8",
+            "gb18030",
+        ):
+            if encoding and encoding not in candidates:
+                candidates.append(encoding)
+
+        dammit = UnicodeDammit(response.content, known_definite_encodings=candidates)
+        if dammit.unicode_markup:
+            return dammit.unicode_markup
+
+        for encoding in candidates:
+            try:
+                return response.content.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+
+        return response.text
+
     @staticmethod
     def _get_system_proxy_win():
         """
@@ -311,9 +339,10 @@ class Fetcher:
                     url, headers=headers, proxies=req_proxies, timeout=10
                 )
                 response.raise_for_status()
+                decoded_text = Fetcher._decode_response_text(response)
 
                 # Check if likely dynamic (heuristic: very short content or explicit noscript)
-                if len(response.text) < 1000 or "<noscript>" in response.text:
+                if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
                     logger.info(
                         "Content seems short or requires JS. Switching to browser..."
                     )
@@ -321,7 +350,7 @@ class Fetcher:
                         url, config, proxy_mode_override, custom_proxy_override
                     )
 
-                return response.text
+                return decoded_text
             except Exception as e:
                 logger.warning(f"Requests failed: {e}. Switching to browser...")
                 return Fetcher.fetch_with_browser(
@@ -2676,6 +2705,60 @@ class ContentProcessor:
 
 
 class OutputHandler:
+    _MOJIBAKE_CHARS = "ÃÂâäåæçèéêëïðñøùœž€™�"
+
+    @staticmethod
+    def _mojibake_score(text):
+        """Estimate how likely text contains UTF-8 mojibake."""
+        if not text:
+            return 0
+
+        suspicious_pairs = (
+            "Ã©", "Ã¨", "Ã ", "Â ", "â€™", "â€œ", "â€", "å", "æ", "ç", "ï", "ð"
+        )
+        char_score = sum(text.count(ch) for ch in OutputHandler._MOJIBAKE_CHARS)
+        pair_score = sum(text.count(pair) * 2 for pair in suspicious_pairs)
+        replacement_penalty = text.count("\ufffd") * 3
+        return char_score + pair_score + replacement_penalty
+
+    @staticmethod
+    def normalize_markdown_encoding(text):
+        """
+        Repair common mojibake patterns and normalize markdown text before UTF-8 output.
+        """
+        if not text:
+            return text
+
+        normalized = unicodedata.normalize("NFC", text)
+        best = normalized
+        changed = False
+
+        for _ in range(3):
+            best_score = OutputHandler._mojibake_score(best)
+            improved = False
+
+            for source_encoding in ("latin-1", "cp1252"):
+                try:
+                    candidate = best.encode(source_encoding).decode("utf-8")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    continue
+
+                candidate = unicodedata.normalize("NFC", candidate)
+                candidate_score = OutputHandler._mojibake_score(candidate)
+                if candidate_score < best_score:
+                    best = candidate
+                    best_score = candidate_score
+                    improved = True
+                    changed = True
+
+            if not improved:
+                break
+
+        if changed:
+            logger.info("Normalized markdown text encoding before UTF-8 output")
+
+        return best
+
     @staticmethod
     def _sanitize_filename(filename):
         return "".join(
@@ -2897,7 +2980,9 @@ class OutputHandler:
         # 提取title元素
         title_tag = soup.find("title")
         if title_tag:
-            metadata["title"] = title_tag.get_text(strip=True)
+            metadata["title"] = OutputHandler.normalize_markdown_encoding(
+                title_tag.get_text(strip=True)
+            )
 
         # 提取发布日期 - 尝试多种常见的meta标签
         date_selectors = [
@@ -2927,7 +3012,11 @@ class OutputHandler:
             keywords_value = keywords_tag.get("content") or keywords_tag.get("value")
             if keywords_value:
                 # 分割关键词为列表
-                tags = [tag.strip() for tag in keywords_value.split(",") if tag.strip()]
+                tags = [
+                    OutputHandler.normalize_markdown_encoding(tag.strip())
+                    for tag in keywords_value.split(",")
+                    if tag.strip()
+                ]
                 metadata["tags"] = tags
 
         # 设置updated为当前时间
@@ -4080,6 +4169,11 @@ Authentication:
             sys.exit(1)
 
     else:  # md (default)
+        title = OutputHandler.normalize_markdown_encoding(title)
+        md_content = OutputHandler.normalize_markdown_encoding(md_content)
+        if translated_title:
+            translated_title = OutputHandler.normalize_markdown_encoding(translated_title)
+
         # Determine if translation was performed
         translation_performed = lang_mode != "raw"
 
