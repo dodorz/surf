@@ -322,6 +322,9 @@ class Fetcher:
             html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
             if html_content:
                 return html_content
+            if site_config and site_config.get("no_generic_fallback"):
+                logger.info(f"{site_name}: Special handler failed; skipping generic fallback")
+                return None
 
         req_proxies, pw_proxy = Fetcher._get_proxies(
             config, proxy_mode_override, custom_proxy_override
@@ -1029,6 +1032,298 @@ class Fetcher:
         return str(soup)
 
     @staticmethod
+    def _get_zhihu_headers(referer_url):
+        """Build browser-like headers for Zhihu web/API requests."""
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": referer_url,
+            "Origin": "https://www.zhihu.com",
+        }
+
+    @staticmethod
+    def _extract_zhihu_answer_id(url):
+        """Extract answer id from Zhihu answer URL."""
+        match = re.search(r"/question/\d+/answer/(\d+)", url)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _extract_zhihu_article_id(url):
+        """Extract article id from Zhihu column URL."""
+        patterns = [
+            r"zhuanlan\.zhihu\.com/p/(\d+)",
+            r"www\.zhihu\.com/p/(\d+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
+    def _format_unix_timestamp(timestamp_value):
+        """Format a unix timestamp into a readable local datetime string."""
+        if not timestamp_value:
+            return ""
+        try:
+            return datetime.fromtimestamp(int(timestamp_value)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _build_zhihu_html(
+        title,
+        content_html,
+        source_url,
+        author_name="",
+        question_title="",
+        created_time="",
+        updated_time="",
+        voteup_count=None,
+        comment_count=None,
+    ):
+        """Build a compact HTML document from Zhihu structured content."""
+        display_title = (title or question_title or "Zhihu").strip()
+        content_html = (content_html or "").strip()
+        if not content_html:
+            return None
+
+        metadata_parts = [f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>"]
+        if question_title and question_title.strip() and question_title.strip() != display_title:
+            metadata_parts.append(f"<p>Question: {escape(question_title.strip())}</p>")
+        if author_name and author_name.strip():
+            metadata_parts.append(f"<p>Author: {escape(author_name.strip())}</p>")
+        if created_time:
+            metadata_parts.append(f"<p>Created: {escape(created_time)}</p>")
+        if updated_time and updated_time != created_time:
+            metadata_parts.append(f"<p>Updated: {escape(updated_time)}</p>")
+        stats = []
+        if isinstance(voteup_count, int):
+            stats.append(f"Upvotes: {voteup_count}")
+        if isinstance(comment_count, int):
+            stats.append(f"Comments: {comment_count}")
+        if stats:
+            metadata_parts.append(f"<p>{escape(' | '.join(stats))}</p>")
+
+        return "".join(
+            [
+                "<html><head><meta charset='utf-8'>",
+                "<meta name='referrer' content='no-referrer-when-downgrade'>",
+                f"<title>{escape(display_title)}</title>",
+                "</head><body><article>",
+                f"<h1>{escape(display_title)}</h1>",
+                "".join(metadata_parts),
+                content_html,
+                "</article></body></html>",
+            ]
+        )
+
+    @staticmethod
+    def _extract_zhihu_dom_content(html_content, source_url):
+        """Fallback extraction from rendered Zhihu DOM."""
+        if not html_content:
+            return None
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        page_text = soup.get_text(" ", strip=True)
+        if (
+            "安全验证" in page_text
+            or "验证你是否是真人" in page_text
+            or "captcha" in page_text.lower()
+        ):
+            logger.warning("Zhihu browser fallback returned a security verification page")
+            return None
+
+        title = ""
+        title_selectors = [
+            "h1.QuestionHeader-title",
+            "h1.Post-Title",
+            "h1",
+        ]
+        for selector in title_selectors:
+            node = soup.select_one(selector)
+            if node and node.get_text(" ", strip=True):
+                title = node.get_text(" ", strip=True)
+                break
+        if not title and soup.title and soup.title.string:
+            title = soup.title.string.strip()
+
+        author_name = ""
+        for selector in [".AuthorInfo-name", ".Post-Author .UserLink-link", ".UserLink-link"]:
+            node = soup.select_one(selector)
+            if node and node.get_text(" ", strip=True):
+                author_name = node.get_text(" ", strip=True)
+                break
+
+        content_node = None
+        candidate_selectors = [
+            ".AnswerItem .RichContent .RichContent-inner",
+            ".RichContent .RichContent-inner",
+            ".Post-RichTextContainer .RichText",
+            ".Post-RichText",
+            ".RichText",
+            "article",
+        ]
+        for selector in candidate_selectors:
+            nodes = soup.select(selector)
+            if not nodes:
+                continue
+            content_node = max(nodes, key=lambda node: len(node.get_text(" ", strip=True)))
+            if content_node and len(content_node.get_text(" ", strip=True)) > 80:
+                break
+
+        if not content_node:
+            return None
+
+        content_html = "".join(str(child) for child in content_node.contents).strip() or str(content_node)
+        return Fetcher._build_zhihu_html(
+            title=title,
+            content_html=content_html,
+            source_url=source_url,
+            author_name=author_name,
+        )
+
+    @staticmethod
+    def _fetch_zhihu_alt_page(answer_id=None, article_id=None, proxies=None):
+        """
+        Fetch public Zhihu mirror pages as a non-Playwright fallback.
+        These pages can be more permissive than the canonical answer/article URLs.
+        """
+        candidate_urls = []
+        if answer_id:
+            candidate_urls.extend(
+                [
+                    f"https://en.zhihu.com/answer/{answer_id}",
+                    f"https://www.zhihu.com/answer/{answer_id}",
+                ]
+            )
+        if article_id:
+            candidate_urls.extend(
+                [
+                    f"https://en.zhihu.com/p/{article_id}",
+                    f"https://www.zhihu.com/p/{article_id}",
+                ]
+            )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+
+        for candidate_url in candidate_urls:
+            try:
+                response = requests.get(
+                    candidate_url, headers=headers, proxies=proxies, timeout=20
+                )
+                response.raise_for_status()
+                decoded_text = Fetcher._decode_response_text(response)
+                if len(decoded_text) < 500:
+                    continue
+                extracted = Fetcher._extract_zhihu_dom_content(decoded_text, candidate_url)
+                if extracted:
+                    return extracted
+            except Exception as e:
+                logger.info(f"Zhihu alt page fetch failed for {candidate_url}: {e}")
+
+        return None
+
+    @staticmethod
+    def _fetch_zhihu_content(
+        url, config, proxy_mode_override=None, custom_proxy_override=None
+    ):
+        """
+        Fetch Zhihu answer/article content via public API first.
+        Falls back to browser-rendered DOM extraction when the API is blocked.
+        """
+        if proxy_mode_override is None:
+            proxy_mode_override = "no"
+            custom_proxy_override = None
+            logger.info("zhihu: Forcing 'no proxy' inside special handler")
+
+        req_proxies, _ = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        headers = Fetcher._get_zhihu_headers(url)
+
+        answer_id = Fetcher._extract_zhihu_answer_id(url)
+        article_id = Fetcher._extract_zhihu_article_id(url)
+
+        try:
+            if answer_id:
+                api_url = (
+                    "https://www.zhihu.com/api/v4/answers/"
+                    f"{answer_id}?include=content,comment_count,voteup_count,"
+                    "created_time,updated_time,author.headline,question.title"
+                )
+                response = requests.get(
+                    api_url, headers=headers, proxies=req_proxies, timeout=30
+                )
+                response.raise_for_status()
+                payload = response.json()
+                html_content = Fetcher._build_zhihu_html(
+                    title=(payload.get("question") or {}).get("title", ""),
+                    question_title=(payload.get("question") or {}).get("title", ""),
+                    content_html=payload.get("content", ""),
+                    source_url=url,
+                    author_name=(payload.get("author") or {}).get("name", ""),
+                    created_time=Fetcher._format_unix_timestamp(payload.get("created_time")),
+                    updated_time=Fetcher._format_unix_timestamp(payload.get("updated_time")),
+                    voteup_count=payload.get("voteup_count"),
+                    comment_count=payload.get("comment_count"),
+                )
+                if html_content:
+                    return html_content
+
+            if article_id:
+                api_url = (
+                    "https://www.zhihu.com/api/v4/articles/"
+                    f"{article_id}?include=title,content,comment_count,voteup_count,"
+                    "created,updated,author.name"
+                )
+                response = requests.get(
+                    api_url, headers=headers, proxies=req_proxies, timeout=30
+                )
+                response.raise_for_status()
+                payload = response.json()
+                html_content = Fetcher._build_zhihu_html(
+                    title=payload.get("title", ""),
+                    content_html=payload.get("content", ""),
+                    source_url=url,
+                    author_name=(payload.get("author") or {}).get("name", ""),
+                    created_time=Fetcher._format_unix_timestamp(payload.get("created") or payload.get("created_time")),
+                    updated_time=Fetcher._format_unix_timestamp(payload.get("updated") or payload.get("updated_time")),
+                    voteup_count=payload.get("voteup_count"),
+                    comment_count=payload.get("comment_count"),
+                )
+                if html_content:
+                    return html_content
+        except Exception as e:
+            logger.warning(f"Zhihu API fetch failed: {e}")
+
+        alt_html = Fetcher._fetch_zhihu_alt_page(
+            answer_id=answer_id, article_id=article_id, proxies=req_proxies
+        )
+        if alt_html:
+            return alt_html
+
+        try:
+            browser_html = Fetcher.fetch_with_browser(
+                url, config, proxy_mode_override, custom_proxy_override
+            )
+            return Fetcher._extract_zhihu_dom_content(browser_html, url)
+        except Exception as e:
+            logger.warning(f"Zhihu browser fallback failed: {e}")
+            return None
+
+    @staticmethod
     def _fetch_twitter_oembed(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
@@ -1217,6 +1512,10 @@ class Fetcher:
         Create a browser context with anti-detection measures.
         Uses stealth settings to avoid being detected as automation.
         """
+        is_zhihu_url = bool(
+            url and re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
+        )
+
         # Twitter/X specific settings
         if url and Fetcher._is_twitter_url(url):
             logger.info("Using Twitter-specific stealth settings")
@@ -1227,6 +1526,14 @@ class Fetcher:
             )
             locale = "en-US"
             timezone = "America/New_York"
+        elif is_zhihu_url:
+            viewport = {"width": 1440, "height": 1080}
+            user_agent = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+            locale = "zh-CN"
+            timezone = "Asia/Shanghai"
         else:
             viewport = {"width": 1920, "height": 1080}
             user_agent = (
@@ -1242,7 +1549,7 @@ class Fetcher:
             "locale": locale,
             "timezone_id": timezone,
             "extra_http_headers": {
-                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8" if is_zhihu_url else "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             },
         }
@@ -1278,6 +1585,10 @@ class Fetcher:
     ):
         logger.info("Launching browser...")
         from playwright.sync_api import sync_playwright
+
+        is_zhihu_url = bool(
+            re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
+        )
 
         # For Twitter/X URLs, always use forced proxy regardless of INI config
         is_twitter_url = Fetcher._is_twitter_url(url)
@@ -1342,8 +1653,12 @@ class Fetcher:
 
                 browser = p.chromium.launch(**launch_args)
 
-                # For Twitter/X, attach persisted auth state if available.
-                auth_site_name = "twitter" if is_twitter_url else None
+                # Attach persisted auth state for sites with saved login sessions.
+                auth_site_name = None
+                if is_twitter_url:
+                    auth_site_name = "twitter"
+                elif is_zhihu_url:
+                    auth_site_name = "zhihu"
                 context = Fetcher._create_stealth_context(
                     browser, url, auth_site_name=auth_site_name
                 )
@@ -1357,6 +1672,10 @@ class Fetcher:
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     # Wait longer for content to hydrate
                     page.wait_for_timeout(5000)
+                elif is_zhihu_url:
+                    logger.info("Using domcontentloaded strategy for Zhihu")
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(4000)
                 else:
                     page.goto(url, wait_until="networkidle", timeout=60000)
                     page.wait_for_timeout(2000)
@@ -2308,6 +2627,17 @@ SPECIAL_SITE_HANDLERS = {
         "handler": Fetcher._fetch_wechat_article,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
         "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
+    },
+    "zhihu": {
+        "patterns": [
+            r"^https?://(www\.)?zhihu\.com/question/\d+/answer/\d+",
+            r"^https?://zhuanlan\.zhihu\.com/p/\d+",
+            r"^https?://(www\.)?zhihu\.com/p/\d+",
+        ],
+        "handler": Fetcher._fetch_zhihu_content,
+        "default_no_proxy": True,
+        "default_no_translate": True,
+        "no_generic_fallback": True,
     },
     "xiaohongshu": {
         "patterns": [
@@ -3656,11 +3986,19 @@ class AuthHandler:
                 launch_args = {"headless": False}
                 if pw_proxy:
                     launch_args["proxy"] = pw_proxy
-                browser = p.chromium.launch(**launch_args)
-                context = browser.new_context(
-                    viewport={"width": 1280, "height": 800},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                )
+                try:
+                    browser = p.chromium.launch(channel="chrome", **launch_args)
+                except Exception as e:
+                    logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
+                    browser = p.chromium.launch(**launch_args)
+
+                if normalized_site_name == "zhihu":
+                    context = Fetcher._create_stealth_context(browser, login_url)
+                else:
+                    context = browser.new_context(
+                        viewport={"width": 1280, "height": 800},
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    )
 
             page = context.pages[0] if context.pages else context.new_page()
 
@@ -3935,6 +4273,7 @@ Authentication:
             "xiaohongshu": "https://www.xiaohongshu.com",
             "twitter": "https://x.com/i/flow/login",
             "x": "https://x.com/i/flow/login",
+            "zhihu": "https://www.zhihu.com/",
         }
         if site_name not in login_urls:
             parser.error(
@@ -3995,8 +4334,12 @@ Authentication:
     handler, site_name, site_config = _get_handler_for_url(args.url)
     if site_config:
         # Apply special site defaults (can be overridden by command line)
-        # default_no_proxy is now handled inside Fetcher.fetch for consistency
-        
+        if site_config.get("default_no_proxy") and proxy_mode is None:
+            logger.info(
+                f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)"
+            )
+            proxy_mode = "no"
+
         if site_config.get("default_no_translate") and lang_mode == "trans":
             logger.info(
                 f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)"

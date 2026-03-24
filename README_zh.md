@@ -7,7 +7,7 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
-- **特殊网站处理**：针对 Twitter/X、微信公众号、小红书等网站优化处理，支持自动认证。
+- **特殊网站处理**：针对 Twitter/X、微信公众号、知乎、小红书等网站优化处理，支持自动认证。
 - **X Article 提取增强**：自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并在需要时使用结构化元数据兜底提取正文；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
@@ -22,6 +22,7 @@
 
 - **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
 - **Twitter/X**：使用强制代理设置
+- **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取，并避免再掉回通用抓取链路
 - **GitHub**：保存 Markdown 时文件名使用页面 `<title>`
 
 ## 安装
@@ -161,7 +162,7 @@ surf --version                         # 查看版本
 
 ### 认证功能 (--login / --clear-auth)
 
-对于需要登录的网站（如小红书、Twitter/X），使用交互式登录功能：
+对于需要登录的网站（如小红书、Twitter/X、知乎），使用交互式登录功能：
 
 ```bash
 # 首次登录小红书
@@ -170,14 +171,19 @@ surf --login xiaohongshu
 # 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
 surf --login twitter
 
+# 可选：登录知乎（可提高安全验证页面抓取成功率）
+surf --login zhihu
+
 # 登录后正常获取内容
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
+surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
 
 # 清除保存的认证
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
+surf --clear-auth zhihu
 # 或清除所有网站的认证
 surf --clear-auth all
 ```

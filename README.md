@@ -7,7 +7,7 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-- **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, and Xiaohongshu (RED) with automatic authentication support.
+- **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with automatic authentication support.
 - **Improved X Article Extraction**: Detects more X login-wall placeholder variants, resolves `t.co` article links, falls back to structured metadata extraction, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
@@ -40,6 +40,7 @@ Some sites have default policies that can be overridden with command-line argume
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
 - **Twitter/X**: Uses forced proxy settings
+- **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first and avoids the generic fallback chain
 - **GitHub**: Saved Markdown filename uses the page `<title>`
 
 ## Installation
@@ -174,7 +175,7 @@ uv run surf.py "https://example.com" --browser
 
 ### Authentication (--login / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X), use interactive login:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu), use interactive login:
 
 ```bash
 # First-time login for Xiaohongshu
@@ -183,14 +184,19 @@ surf --login xiaohongshu
 # Optional: login for Twitter/X (helps with login-wall pages)
 surf --login twitter
 
+# Optional: login for Zhihu (helps with security verification pages)
+surf --login zhihu
+
 # After login, fetch content normally
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
+surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
 
 # Clear saved authentication
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
+surf --clear-auth zhihu
 # Or clear all sites
 surf --clear-auth all
 ```
