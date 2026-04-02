@@ -6,6 +6,7 @@ import sys
 import logging
 import json
 import requests  # type: ignore
+from requests.utils import get_encoding_from_headers
 from readability import Document
 import markdownify
 from langdetect import detect
@@ -109,29 +110,86 @@ class Config:
 
 
 class Fetcher:
+    _HTML_META_CHARSET_RE = re.compile(
+        rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE
+    )
+    _HTML_CONTENT_CHARSET_RE = re.compile(
+        rb'content\s*=\s*["\'][^"\']*charset\s*=\s*([^"\';\s]+)', re.IGNORECASE
+    )
+
+    @staticmethod
+    def _sniff_html_charset(prefix: bytes):
+        """Charset from <meta charset> or meta Content-Type content=...;charset= (HTML5)."""
+        if not prefix:
+            return None
+        m = Fetcher._HTML_META_CHARSET_RE.search(prefix)
+        if m:
+            raw = m.group(1).decode("ascii", errors="ignore").strip()
+            return raw.lower() if raw else None
+        m = Fetcher._HTML_CONTENT_CHARSET_RE.search(prefix)
+        if m:
+            raw = m.group(1).decode("ascii", errors="ignore").strip()
+            return raw.lower() if raw else None
+        return None
+
     @staticmethod
     def _decode_response_text(response):
         """
         Decode HTML bytes with charset hints from headers and markup before
         falling back to requests' default text decoding.
         """
+        content = response.content
+        prefix = content[:32768]
+
+        # Order matters: many servers send "text/html" without charset; requests
+        # then defaults to ISO-8859-1 while the document is UTF-8 in <meta charset>.
+        definite = []
+        sniffed = Fetcher._sniff_html_charset(prefix)
+        if sniffed:
+            definite.append(sniffed)
+
+        header_enc = get_encoding_from_headers(response.headers)
+        if header_enc:
+            low = {e.lower() for e in definite}
+            if header_enc.lower() not in low:
+                definite.append(header_enc)
+
+        if "utf-8" not in {e.lower() for e in definite}:
+            definite.append("utf-8")
+
+        for encoding in definite:
+            try:
+                return content.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+
         candidates = []
+        ct = (response.headers.get("Content-Type") or "").lower()
+        header_has_charset = "charset=" in ct
         for encoding in (
             getattr(response, "encoding", None),
             getattr(response, "apparent_encoding", None),
             "utf-8",
             "gb18030",
         ):
-            if encoding and encoding not in candidates:
+            if not encoding:
+                continue
+            # Unlabeled HTML: requests' ISO-8859-1 default is a poor first guess.
+            if (
+                not header_has_charset
+                and encoding.upper() == "ISO-8859-1"
+            ):
+                continue
+            if encoding not in candidates:
                 candidates.append(encoding)
 
-        dammit = UnicodeDammit(response.content, known_definite_encodings=candidates)
+        dammit = UnicodeDammit(content, known_definite_encodings=candidates)
         if dammit.unicode_markup:
             return dammit.unicode_markup
 
         for encoding in candidates:
             try:
-                return response.content.decode(encoding)
+                return content.decode(encoding)
             except (LookupError, UnicodeDecodeError):
                 continue
 
