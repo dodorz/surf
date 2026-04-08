@@ -3369,6 +3369,7 @@ class ContentProcessor:
         Converts HTML to Markdown using markdownify.
         """
         logger.info("Converting to Markdown...")
+        html = OutputHandler._strip_twitter_blockquote_wrapper(html)
         # strip=['a'] can be used to remove links if desired, but usually we keep them.
         # heading_style='ATX' ensures # style headings
         return markdownify.markdownify(html, heading_style="ATX")
@@ -3659,6 +3660,29 @@ class OutputHandler:
         except Exception:
             return None
         return None
+
+    @staticmethod
+    def _strip_twitter_blockquote_wrapper(html):
+        """Remove the outer Twitter/X embed blockquote so markdownify won't emit quote markers."""
+        if not html:
+            return html
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            changed = False
+            for blockquote in soup.find_all("blockquote"):
+                classes = blockquote.get("class") or []
+                if not any(cls in {"twitter-tweet", "twitter-video"} for cls in classes):
+                    continue
+
+                extracted = [child.extract() for child in list(blockquote.children)]
+                for node in reversed(extracted):
+                    blockquote.insert_after(node)
+                blockquote.decompose()
+                changed = True
+
+            return str(soup) if changed else html
+        except Exception:
+            return html
 
     @staticmethod
     def _get_filename_title(title, source_url=None, html_content=None):
