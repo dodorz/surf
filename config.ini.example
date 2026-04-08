@@ -42,6 +42,16 @@ proxy_mode = auto
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
 
+[Twitter]
+; Backend selection: auto (twitter-cli first, then native fallback), cli (twitter-cli only), native (Surf built-in only)
+backend = auto
+; Optional executable path or command name for twitter-cli
+cli_bin =
+; Optional browser hint for twitter-cli cookies: chrome, edge, brave, firefox, arc
+browser =
+; Optional browser profile hint for twitter-cli, for example: Default or Profile 2
+profile =
+
 [publish]
 ; Default publish target
 target = pastebin

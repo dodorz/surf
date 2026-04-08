@@ -8,7 +8,7 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **特殊网站处理**：针对 Twitter/X、微信公众号、知乎、小红书等网站优化处理，支持自动认证。
-- **X Article 提取增强**：自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并在需要时使用结构化元数据兜底提取正文；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
+- **X/Twitter 提取增强**：`auto` 模式下优先使用 `twitter-cli` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并在需要时使用结构化元数据兜底提取正文；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
@@ -21,8 +21,8 @@
 部分网站有默认策略，可通过命令行参数覆盖：
 
 - **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
-- **Twitter/X**：使用强制代理设置
-- **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取，并避免再掉回通用抓取链路
+- **Twitter/X**：使用强制代理设置，且 `auto` 模式会先尝试 `twitter-cli`，失败后再走 Surf 内置回退链路
+- **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
 - **GitHub**：保存 Markdown 时文件名使用页面 `<title>`
 
 ## 安装
@@ -90,6 +90,16 @@ volume = +0%
 proxy_mode = auto
 ; 自定义代理地址 (例如 http://127.0.0.1:7890)
 custom_proxy =
+
+[Twitter]
+; 后端选择: auto（先 twitter-cli，再 native 回退）, cli（仅 twitter-cli）, native（仅 Surf 内置实现）
+backend = auto
+; 可选：twitter-cli 可执行文件路径或命令名
+cli_bin =
+; 可选：twitter-cli 读取 Cookie 时优先使用的浏览器：chrome、edge、brave、firefox、arc
+browser =
+; 可选：twitter-cli 的浏览器 profile，例如 Default 或 Profile 2
+profile =
 ```
 
 ## 用法
@@ -171,7 +181,11 @@ surf --login xiaohongshu
 # 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
 surf --login twitter
 
-# 可选：登录知乎（可提高安全验证页面抓取成功率）
+# 优先使用 twitter-cli 和本机浏览器 Cookie
+surf --twitter-backend auto "https://x.com/username/status/1234567890"
+surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
+
+# 可选：登录知乎（Cookie 会用于 API/镜像页请求，并提高浏览器验证页成功率）
 surf --login zhihu
 
 # 登录后正常获取内容
@@ -189,7 +203,7 @@ surf --clear-auth all
 ```
 
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
-对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。
+对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统已安装 `twitter-cli`，`auto` 模式会优先让它复用本机浏览器 Cookie，失败后再回退到 Surf 现有的 Playwright/oEmbed 链路。
 
 ## 单字符参数连写
 

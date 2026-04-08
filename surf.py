@@ -5,6 +5,9 @@ import os
 import sys
 import logging
 import json
+import shutil
+import subprocess
+import tempfile
 import requests  # type: ignore
 from requests.utils import get_encoding_from_headers
 from readability import Document
@@ -348,6 +351,10 @@ class Fetcher:
         use_browser=False,
         proxy_mode_override=None,
         custom_proxy_override=None,
+        twitter_backend=None,
+        twitter_cli_bin=None,
+        twitter_browser=None,
+        twitter_profile=None,
     ):
         """
         Fetches the content of a URL.
@@ -377,7 +384,21 @@ class Fetcher:
 
         if handler:
             logger.info(f"Using special handler for {site_name}")
-            html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
+            if site_name == "twitter":
+                html_content = handler(
+                    url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    backend=twitter_backend,
+                    cli_bin=twitter_cli_bin,
+                    browser=twitter_browser,
+                    profile=twitter_profile,
+                )
+            else:
+                html_content = handler(
+                    url, config, proxy_mode_override, custom_proxy_override
+                )
             if html_content:
                 return html_content
             if site_config and site_config.get("no_generic_fallback"):
@@ -464,6 +485,343 @@ class Fetcher:
                 return True
 
         return False
+
+    @staticmethod
+    def _get_twitter_backend_options(
+        config,
+        backend=None,
+        cli_bin=None,
+        browser=None,
+        profile=None,
+    ):
+        """Resolve Twitter backend options from CLI overrides and config."""
+        return {
+            "backend": (
+                backend or config.get("Twitter", "backend", fallback="auto") or "auto"
+            ).strip().lower(),
+            "cli_bin": (cli_bin or config.get("Twitter", "cli_bin", fallback="") or "").strip(),
+            "browser": (browser or config.get("Twitter", "browser", fallback="") or "").strip(),
+            "profile": (profile or config.get("Twitter", "profile", fallback="") or "").strip(),
+        }
+
+    @staticmethod
+    def _resolve_twitter_cli_bin(cli_bin=""):
+        """Resolve twitter-cli executable from explicit path or PATH."""
+        candidates = [cli_bin] if cli_bin else ["twitter", "twitter-cli"]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if os.path.isfile(candidate):
+                return candidate
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+        return None
+
+    @staticmethod
+    def _extract_twitter_text_lines(value):
+        """Flatten text-ish values from twitter-cli JSON into paragraph lines."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [line.strip() for line in value.splitlines() if line.strip()]
+        if isinstance(value, list):
+            lines = []
+            for item in value:
+                lines.extend(Fetcher._extract_twitter_text_lines(item))
+            return lines
+        if isinstance(value, dict):
+            lines = []
+            for key in (
+                "articleText",
+                "full_text",
+                "fullText",
+                "text",
+                "raw_text",
+                "rawText",
+                "content",
+                "display_text",
+                "displayText",
+            ):
+                if key in value:
+                    lines.extend(Fetcher._extract_twitter_text_lines(value.get(key)))
+            return lines
+        return []
+
+    @staticmethod
+    def _extract_twitter_media_urls(value):
+        """Collect image/media URLs from nested twitter-cli structures."""
+        urls = []
+        seen = set()
+
+        def add(url):
+            if isinstance(url, str):
+                normalized = url.strip()
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    urls.append(normalized)
+
+        def walk(node):
+            if isinstance(node, dict):
+                for key, item in node.items():
+                    low = key.lower()
+                    if low in {
+                        "url",
+                        "media_url",
+                        "media_url_https",
+                        "original_img_url",
+                        "image",
+                        "image_url",
+                        "imageurl",
+                        "thumbnail_url",
+                        "thumbnailurl",
+                    }:
+                        add(item)
+                    else:
+                        walk(item)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(value)
+        return urls
+
+    @staticmethod
+    def _extract_twitter_author_info(data):
+        """Best-effort author extraction from twitter-cli structured data."""
+        author = data.get("author") or data.get("user") or data.get("account") or {}
+        if not isinstance(author, dict):
+            author = {}
+        name = (
+            author.get("name")
+            or data.get("authorName")
+            or data.get("userName")
+            or ""
+        )
+        screen_name = (
+            author.get("screen_name")
+            or author.get("screenName")
+            or author.get("username")
+            or data.get("screen_name")
+            or data.get("screenName")
+            or data.get("username")
+            or ""
+        )
+        return str(name).strip(), str(screen_name).strip()
+
+    @staticmethod
+    def _convert_twitter_cli_json_to_html(payload, source_url):
+        """Convert twitter-cli structured output to compact HTML for downstream extraction."""
+        if not isinstance(payload, dict):
+            return None
+
+        if payload.get("ok") is False:
+            error = payload.get("error") or {}
+            logger.info(
+                "twitter-cli returned structured error: %s",
+                error.get("code") or error.get("message") or "unknown_error",
+            )
+            return None
+
+        data = payload.get("data", payload)
+        if isinstance(data, list):
+            data = data[0] if data else None
+        if not isinstance(data, dict):
+            return None
+
+        article_title = (
+            data.get("articleTitle")
+            or data.get("article_title")
+            or data.get("title")
+            or ""
+        )
+        author_name, screen_name = Fetcher._extract_twitter_author_info(data)
+        title_base = (
+            str(article_title).strip()
+            or author_name
+            or (f"@{screen_name}" if screen_name else "X Post")
+        )
+
+        lines = []
+        for key in ("articleText", "full_text", "fullText", "text", "raw_text", "rawText"):
+            lines.extend(Fetcher._extract_twitter_text_lines(data.get(key)))
+            if lines:
+                break
+        if not lines:
+            lines = Fetcher._extract_twitter_text_lines(data)
+        if not lines:
+            return None
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(title_base)}</title>",
+            "</head><body><article>",
+            f"<h1>{escape(title_base)}</h1>",
+            f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>",
+        ]
+        if screen_name:
+            html_parts.append(f"<p>Author: @{escape(screen_name)}</p>")
+        elif author_name:
+            html_parts.append(f"<p>Author: {escape(author_name)}</p>")
+
+        for line in lines:
+            html_parts.append(f"<p>{escape(line)}</p>")
+
+        for media_url in Fetcher._extract_twitter_media_urls(data):
+            html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
+
+        html_parts.append("</article></body></html>")
+        return "".join(html_parts)
+
+    @staticmethod
+    def _fetch_twitter_via_cli(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        cli_bin=None,
+        browser=None,
+        profile=None,
+    ):
+        """
+        Fetch Twitter/X content via twitter-cli using local browser cookies.
+        Uses structured JSON output and converts it into HTML for the normal pipeline.
+        """
+        resolved_bin = Fetcher._resolve_twitter_cli_bin(cli_bin)
+        if not resolved_bin:
+            logger.info("twitter-cli executable not found; skipping cli backend")
+            return None
+
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        proxy_url = None
+        if req_proxies:
+            proxy_url = req_proxies.get("https") or req_proxies.get("http")
+
+        env = os.environ.copy()
+        if browser:
+            env["TWITTER_BROWSER"] = browser
+        if profile:
+            env["TWITTER_CHROME_PROFILE"] = profile
+        if proxy_url:
+            env["TWITTER_PROXY"] = proxy_url
+
+        commands = [
+            [resolved_bin, "article", url, "--json"],
+            [resolved_bin, "tweet", url, "--json", "--full-text"],
+        ]
+
+        for command in commands:
+            tmp_path = None
+            completed = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False, encoding="utf-8"
+                ) as tmp_file:
+                    tmp_path = tmp_file.name
+                command_with_output = command + ["--output", tmp_path]
+                logger.info("Trying twitter-cli backend: %s", " ".join(command))
+                completed = subprocess.run(
+                    command_with_output,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                    env=env,
+                    check=False,
+                )
+            except Exception as e:
+                logger.warning(f"twitter-cli execution failed: {e}")
+                return None
+            finally:
+                if tmp_path and os.path.exists(tmp_path) and (
+                    completed is None or completed.returncode != 0
+                ):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            stderr = (completed.stderr or "").strip()
+            if completed.returncode != 0:
+                logger.info(
+                    "twitter-cli command failed (%s): %s",
+                    completed.returncode,
+                    stderr or "no output",
+                )
+                continue
+
+            if not tmp_path or not os.path.exists(tmp_path):
+                logger.info("twitter-cli did not produce an output file")
+                continue
+
+            try:
+                with open(tmp_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception as e:
+                logger.info(f"twitter-cli output could not be parsed: {e}")
+                continue
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            html = Fetcher._convert_twitter_cli_json_to_html(payload, url)
+            if html:
+                return html
+
+        return None
+
+    @staticmethod
+    def _fetch_twitter_content(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        backend=None,
+        cli_bin=None,
+        browser=None,
+        profile=None,
+    ):
+        """Fetch Twitter/X content with selectable backend and native fallback."""
+        options = Fetcher._get_twitter_backend_options(
+            config,
+            backend=backend,
+            cli_bin=cli_bin,
+            browser=browser,
+            profile=profile,
+        )
+        backend_name = options["backend"]
+        cli_first = []
+        if backend_name == "cli":
+            cli_first = ["cli"]
+        elif backend_name == "native":
+            cli_first = ["native"]
+        else:
+            cli_first = ["cli", "native"]
+
+        for mode in cli_first:
+            if mode == "cli":
+                html = Fetcher._fetch_twitter_via_cli(
+                    url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    cli_bin=options["cli_bin"],
+                    browser=options["browser"],
+                    profile=options["profile"],
+                )
+            else:
+                html = Fetcher._fetch_twitter_oembed(
+                    url, config, proxy_mode_override, custom_proxy_override
+                )
+            if html:
+                return html
+        return None
 
     @staticmethod
     def _extract_twitter_oembed_links(html_content):
@@ -1246,7 +1604,7 @@ class Fetcher:
         )
 
     @staticmethod
-    def _fetch_zhihu_alt_page(answer_id=None, article_id=None, proxies=None):
+    def _fetch_zhihu_alt_page(answer_id=None, article_id=None, proxies=None, cookie_header=None):
         """
         Fetch public Zhihu mirror pages as a non-Playwright fallback.
         These pages can be more permissive than the canonical answer/article URLs.
@@ -1275,6 +1633,8 @@ class Fetcher:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
+        if cookie_header:
+            headers["Cookie"] = cookie_header
 
         for candidate_url in candidate_urls:
             try:
@@ -1310,6 +1670,10 @@ class Fetcher:
             config, proxy_mode_override, custom_proxy_override
         )
         headers = Fetcher._get_zhihu_headers(url)
+        cookie_header = AuthHandler.cookie_header_for_zhihu()
+        if cookie_header:
+            headers = {**headers, "Cookie": cookie_header}
+            logger.info("zhihu: Using saved login cookies for HTTP/API requests")
 
         answer_id = Fetcher._extract_zhihu_answer_id(url)
         article_id = Fetcher._extract_zhihu_article_id(url)
@@ -1363,11 +1727,27 @@ class Fetcher:
                 )
                 if html_content:
                     return html_content
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code in (401, 403):
+                tip = ""
+                if not cookie_header:
+                    tip = " Run `surf --login zhihu` to save cookies for the API."
+                logger.info(
+                    "Zhihu API returned HTTP %s; trying mirror page / browser.%s",
+                    code,
+                    tip,
+                )
+            else:
+                logger.warning(f"Zhihu API fetch failed: {e}")
         except Exception as e:
             logger.warning(f"Zhihu API fetch failed: {e}")
 
         alt_html = Fetcher._fetch_zhihu_alt_page(
-            answer_id=answer_id, article_id=article_id, proxies=req_proxies
+            answer_id=answer_id,
+            article_id=article_id,
+            proxies=req_proxies,
+            cookie_header=cookie_header,
         )
         if alt_html:
             return alt_html
@@ -2675,7 +3055,7 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?twitter\.com/",
             r"^https?://(www\.)?x\.com/",
         ],
-        "handler": Fetcher._fetch_twitter_oembed,
+        "handler": Fetcher._fetch_twitter_content,
     },
     "wechat": {
         "patterns": [
@@ -3905,12 +4285,13 @@ class AuthHandler:
         return os.path.join(AuthHandler.AUTH_STATE_DIR, f"{site_name}_state.json")
 
     @staticmethod
-    def load_state(site_name):
+    def load_state(site_name, log_load=True):
         """
         Load saved browser state for a site.
 
         Args:
             site_name: Identifier for the site (e.g., 'xiaohongshu', 'twitter')
+            log_load: If False, skip the info log (for frequent reads e.g. cookie injection)
 
         Returns:
             dict: Browser state dictionary, or None if not found
@@ -3922,11 +4303,35 @@ class AuthHandler:
                     import json
 
                     state = json.load(f)
-                    logger.info(f"Loaded auth state for {site_name}")
+                    if log_load:
+                        logger.info(f"Loaded auth state for {site_name}")
                     return state
             except Exception as e:
                 logger.warning(f"Failed to load auth state for {site_name}: {e}")
         return None
+
+    @staticmethod
+    def cookie_header_for_zhihu():
+        """
+        Build a Cookie header value from saved Playwright storage for zhihu.com domains.
+        Zhihu's v4 API often returns 403 without logged-in cookies.
+        """
+        state = AuthHandler.load_state("zhihu", log_load=False)
+        if not state:
+            return None
+        cookies = state.get("cookies") or []
+        by_name = {}
+        for c in cookies:
+            domain = (c.get("domain") or "").lower()
+            if "zhihu.com" not in domain:
+                continue
+            name = c.get("name")
+            if not name:
+                continue
+            by_name[name] = c.get("value", "")
+        if not by_name:
+            return None
+        return "; ".join(f"{k}={v}" for k, v in by_name.items())
 
     @staticmethod
     def save_state(site_name, state):
@@ -4197,12 +4602,18 @@ Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
                         Override with -x/--proxy and -l/--lang if needed.
   Twitter/X:           Always uses proxy settings.
+                       `auto` backend tries twitter-cli first, then native fallback.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
   surf --login twitter                       # Login to Twitter/X
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
   surf --clear-auth twitter                  # Clear auth for Twitter/X
+
+Twitter/X Backend:
+  surf --twitter-backend auto URL            # twitter-cli first, then native fallback
+  surf --twitter-backend cli URL             # Force twitter-cli backend
+  surf --twitter-browser chrome URL          # Prefer Chrome cookies for twitter-cli
         """,
     )
     # Position argument
@@ -4265,6 +4676,24 @@ Authentication:
         "--clear-auth",
         metavar="SITE",
         help="Clear saved authentication for a site (use 'all' to clear all)",
+    )
+    parser.add_argument(
+        "--twitter-backend",
+        choices=["auto", "cli", "native"],
+        help="Twitter/X backend: auto=twitter-cli then native fallback, cli=twitter-cli only, native=surf built-in only",
+    )
+    parser.add_argument(
+        "--twitter-cli-bin",
+        help="Path or command name for twitter-cli (default: auto-detect from PATH)",
+    )
+    parser.add_argument(
+        "--twitter-browser",
+        choices=["arc", "chrome", "edge", "firefox", "brave"],
+        help="Preferred browser cookie source for twitter-cli",
+    )
+    parser.add_argument(
+        "--twitter-profile",
+        help="Preferred browser profile for twitter-cli (for example: Default or Profile 2)",
     )
 
     # HTML options
@@ -4412,6 +4841,10 @@ Authentication:
             use_browser=args.browser,
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
+            twitter_backend=args.twitter_backend,
+            twitter_cli_bin=args.twitter_cli_bin,
+            twitter_browser=args.twitter_browser,
+            twitter_profile=args.twitter_profile,
         )
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
