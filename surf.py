@@ -505,6 +505,37 @@ class Fetcher:
         }
 
     @staticmethod
+    def _tag_twitter_html_content(html_content, kind):
+        """Annotate generated Twitter/X HTML so later stages can distinguish tweet vs article."""
+        if not html_content or kind not in {"tweet", "article"}:
+            return html_content
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            head = soup.find("head")
+            if not head:
+                head = soup.new_tag("head")
+                if soup.html:
+                    soup.html.insert(0, head)
+                else:
+                    html = soup.new_tag("html")
+                    html.append(head)
+                    body = soup.new_tag("body")
+                    for child in list(soup.contents):
+                        body.append(child.extract())
+                    html.append(body)
+                    soup.append(html)
+
+            meta = soup.find("meta", attrs={"name": "surf-twitter-kind"})
+            if not meta:
+                meta = soup.new_tag("meta")
+                meta.attrs["name"] = "surf-twitter-kind"
+                head.append(meta)
+            meta.attrs["content"] = kind
+            return str(soup)
+        except Exception:
+            return html_content
+
+    @staticmethod
     def _resolve_twitter_cli_bin(cli_bin=""):
         """Resolve twitter-cli executable from explicit path or PATH."""
         candidates = [cli_bin] if cli_bin else ["twitter", "twitter-cli"]
@@ -636,11 +667,13 @@ class Fetcher:
             or ""
         )
         author_name, screen_name = Fetcher._extract_twitter_author_info(data)
+        kind = "article" if str(article_title).strip() else "tweet"
         title_base = (
             str(article_title).strip()
             or author_name
             or (f"@{screen_name}" if screen_name else "X Post")
         )
+        doc_title = title_base if kind == "article" else f"{title_base} - X Post"
 
         lines = []
         for key in ("articleText", "full_text", "fullText", "text", "raw_text", "rawText"):
@@ -654,7 +687,8 @@ class Fetcher:
 
         html_parts = [
             "<html><head><meta charset='utf-8'>",
-            f"<title>{escape(title_base)}</title>",
+            f"<title>{escape(doc_title)}</title>",
+            f"<meta name='surf-twitter-kind' content='{escape(kind)}'>",
             "</head><body><article>",
             f"<h1>{escape(title_base)}</h1>",
             f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>",
@@ -671,7 +705,7 @@ class Fetcher:
             html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
 
         html_parts.append("</article></body></html>")
-        return "".join(html_parts)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
 
     @staticmethod
     def _fetch_twitter_via_cli(
@@ -1003,7 +1037,7 @@ class Fetcher:
                 html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
 
         html_parts.append("</article></body></html>")
-        return "".join(html_parts)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), "tweet")
 
     @staticmethod
     def _fetch_twitter_fxapi_html(url, proxies=None):
@@ -1042,6 +1076,7 @@ class Fetcher:
         article = tweet.get("article") or {}
         article_title = (article.get("title") or "").strip()
         doc_title = article_title or f"{title_base} - X Post"
+        kind = "article" if article_title else "tweet"
 
         lines = []
         content = article.get("content") or {}
@@ -1101,7 +1136,7 @@ class Fetcher:
             )
 
         html_parts.append("</article></body></html>")
-        return "".join(html_parts)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
 
     @staticmethod
     def _extract_twitter_structured_content(html_content, source_url=None):
@@ -1841,7 +1876,7 @@ class Fetcher:
                 if browser_html and not Fetcher._is_twitter_placeholder_content(
                     browser_html
                 ):
-                    return browser_html
+                    return Fetcher._tag_twitter_html_content(browser_html, "article")
                 logger.warning(
                     "Browser fallback still returned placeholder/empty content for Twitter/X"
                 )
@@ -1866,7 +1901,7 @@ class Fetcher:
                 if article_html and not Fetcher._is_twitter_placeholder_content(
                     article_html
                 ):
-                    return article_html
+                    return Fetcher._tag_twitter_html_content(article_html, "article")
                 fxapi_html = Fetcher._fetch_twitter_fxapi_html(
                     article_target_url, proxies=req_proxies
                 )
@@ -3557,11 +3592,85 @@ class OutputHandler:
         return None
 
     @staticmethod
+    def _is_twitter_non_article(source_url=None, html_content=None):
+        if not source_url or not Fetcher._is_twitter_url(source_url):
+            return False
+        if re.search(r"/i/article/\d+", source_url):
+            return False
+        if html_content:
+            try:
+                soup = BeautifulSoup(html_content, "html.parser")
+                meta = soup.find("meta", attrs={"name": "surf-twitter-kind"})
+                if meta:
+                    return (meta.get("content") or "").strip().lower() == "tweet"
+            except Exception:
+                pass
+            html_title = OutputHandler._extract_html_title(html_content) or ""
+            if "x post" in html_title.lower():
+                return True
+        return bool(re.search(r"/status/\d+", source_url))
+
+    @staticmethod
+    def _extract_first_sentence(text):
+        if not text:
+            return None
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return None
+        match = re.search(r"^(.+?[。！？!?\.]+)(?:\s|$)", normalized)
+        if match:
+            return match.group(1).strip()
+        return normalized
+
+    @staticmethod
+    def _extract_twitter_first_sentence_title(html_content, source_url=None):
+        if not OutputHandler._is_twitter_non_article(source_url, html_content):
+            return None
+        if not html_content:
+            return None
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            html_title = OutputHandler._extract_html_title(html_content) or ""
+            skip_lines = set()
+            if html_title:
+                skip_lines.add(html_title.strip())
+                if html_title.lower().endswith(" - x post"):
+                    skip_lines.add(html_title[:-9].strip())
+
+            text_lines = []
+            for text in soup.stripped_strings:
+                line = re.sub(r"\s+", " ", text).strip()
+                if not line:
+                    continue
+                if source_url and line == source_url:
+                    continue
+                if line in skip_lines:
+                    continue
+                if re.fullmatch(r"https?://\S+", line):
+                    continue
+                if line.lower().startswith("author:"):
+                    continue
+                text_lines.append(line)
+
+            for line in text_lines:
+                sentence = OutputHandler._extract_first_sentence(line)
+                if sentence:
+                    return sentence
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _get_filename_title(title, source_url=None, html_content=None):
         """
         Select filename title based on source site rules.
         For GitHub URLs, prefer page <title>.
         """
+        twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+            html_content, source_url=source_url
+        )
+        if twitter_title:
+            return twitter_title
         if source_url and re.match(r"^https?://(www\.)?github\.com/", source_url, re.IGNORECASE):
             html_title = OutputHandler._extract_html_title(html_content)
             if html_title:
@@ -3751,6 +3860,12 @@ class OutputHandler:
             metadata["title"] = OutputHandler.normalize_markdown_encoding(
                 title_tag.get_text(strip=True)
             )
+
+        twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+            html_content, source_url=source_url
+        )
+        if twitter_title:
+            metadata["title"] = OutputHandler.normalize_markdown_encoding(twitter_title)
 
         # 提取发布日期 - 尝试多种常见的meta标签
         date_selectors = [
@@ -4875,6 +4990,12 @@ Twitter/X Backend:
     except Exception as e:
         logger.error(f"Failed to convert to markdown: {e}")
         sys.exit(1)
+
+    twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+        html_content, source_url=args.url
+    )
+    if twitter_title:
+        title = twitter_title
 
     # 4. Translate
     target_lang = config.get("Output", "target_language", fallback="zh-cn")

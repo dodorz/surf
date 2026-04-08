@@ -8,7 +8,7 @@
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with automatic authentication support.
-- **Improved X/Twitter Extraction**: Supports `twitter-cli` in `auto` mode, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, falls back to structured metadata extraction, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
+- **Improved X/Twitter Extraction**: Supports `twitter-cli` in `auto` mode, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, falls back to structured metadata extraction, uses the first sentence as the title for non-article posts, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 
