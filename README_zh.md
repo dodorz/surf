@@ -42,6 +42,30 @@
     uv run playwright install
     ```
 
+## Web 界面
+
+`surf_web.py` 提供的是一个基于 Flask 的本地 Web 界面，适合开发和个人使用。它内部调用的 `app.run(...)` 是 Flask 自带的开发服务器，所以你看到“不要用于生产部署”的提示是正常的。
+
+本机访问时可以直接启动：
+
+```bash
+uv run python surf_web.py --host 127.0.0.1 --port 18473
+```
+
+如果要对外网或局域网正式部署，请改用真正的 WSGI 服务器，并让它加载 `surf_web:app`：
+
+```bash
+# Windows 上更适合的生产服务器
+uv add waitress
+uv run waitress-serve --listen=0.0.0.0:18473 surf_web:app
+
+# Linux 上常见的生产服务器
+uv add gunicorn
+uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
+```
+
+如果要暴露到公网，建议再前置反向代理并启用 HTTPS，同时只开放必要端口。
+
 ## 配置
 
 复制 `config.ini.example` 为 `config.ini` 并编辑以设置您的 API 密钥和路径。

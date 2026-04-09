@@ -60,6 +60,30 @@ We recommend using `uv` for a clean environment.
     uv run playwright install
     ```
 
+## Web UI
+
+`surf_web.py` provides a local Flask-based web interface for development and personal use. The built-in `app.run(...)` server is Flask's development server, so the warning about production deployment is expected.
+
+For local access:
+
+```bash
+uv run python surf_web.py --host 127.0.0.1 --port 18473
+```
+
+For external or public deployment, use a real WSGI server and point it at `surf_web:app`:
+
+```bash
+# Windows-friendly production server
+uv add waitress
+uv run waitress-serve --listen=0.0.0.0:18473 surf_web:app
+
+# Common Linux production server
+uv add gunicorn
+uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
+```
+
+If you expose it to the internet, put it behind a reverse proxy with HTTPS and open only the required port in your firewall or security group.
+
 ## Configuration
 
 Copy `config.ini.example` to `config.ini` and edit it to set your API keys and paths.
