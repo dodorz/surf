@@ -24,6 +24,7 @@ from html import escape
 import trafilatura
 import re
 import unicodedata
+from urllib.parse import urlparse
 
 
 def _get_version():
@@ -246,7 +247,7 @@ class Fetcher:
         if mode == "no":
             return None, None
 
-        if mode == "set":
+        if mode == "custom":
             # Use command line override if provided, otherwise use config
             custom = (
                 custom_proxy_override
@@ -497,7 +498,7 @@ class Fetcher:
         """Resolve Twitter backend options from CLI overrides and config."""
         return {
             "backend": (
-                backend or config.get("Twitter", "backend", fallback="auto") or "auto"
+                backend or config.get("Twitter", "backend", fallback="cli") or "cli"
             ).strip().lower(),
             "cli_bin": (cli_bin or config.get("Twitter", "cli_bin", fallback="") or "").strip(),
             "browser": (browser or config.get("Twitter", "browser", fallback="") or "").strip(),
@@ -536,18 +537,17 @@ class Fetcher:
             return html_content
 
     @staticmethod
-    def _resolve_twitter_cli_bin(cli_bin=""):
-        """Resolve twitter-cli executable from explicit path or PATH."""
-        candidates = [cli_bin] if cli_bin else ["twitter", "twitter-cli"]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            if os.path.isfile(candidate):
-                return candidate
-            resolved = shutil.which(candidate)
-            if resolved:
-                return resolved
-        return None
+    def _resolve_twitter_cli_command(cli_bin=""):
+        """Resolve the twitter-cli invocation. Surf always uses uvx --from twitter-cli twitter."""
+        uvx_bin = shutil.which("uvx")
+        if not uvx_bin:
+            return None
+        if cli_bin:
+            logger.info(
+                "Ignoring --twitter-cli-bin=%s; Surf always invokes twitter-cli via uvx",
+                cli_bin,
+            )
+        return [uvx_bin, "--from", "twitter-cli", "twitter"]
 
     @staticmethod
     def _extract_twitter_text_lines(value):
@@ -721,9 +721,9 @@ class Fetcher:
         Fetch Twitter/X content via twitter-cli using local browser cookies.
         Uses structured JSON output and converts it into HTML for the normal pipeline.
         """
-        resolved_bin = Fetcher._resolve_twitter_cli_bin(cli_bin)
-        if not resolved_bin:
-            logger.info("twitter-cli executable not found; skipping cli backend")
+        cli_command = Fetcher._resolve_twitter_cli_command(cli_bin)
+        if not cli_command:
+            logger.info("uvx not found; skipping twitter-cli backend")
             return None
 
         req_proxies, _ = Fetcher._get_twitter_forced_proxies(
@@ -734,6 +734,7 @@ class Fetcher:
             proxy_url = req_proxies.get("https") or req_proxies.get("http")
 
         env = os.environ.copy()
+        env.setdefault("UV_CACHE_DIR", os.path.join(os.getcwd(), ".uv-cache"))
         if browser:
             env["TWITTER_BROWSER"] = browser
         if profile:
@@ -742,8 +743,8 @@ class Fetcher:
             env["TWITTER_PROXY"] = proxy_url
 
         commands = [
-            [resolved_bin, "article", url, "--json"],
-            [resolved_bin, "tweet", url, "--json", "--full-text"],
+            cli_command + ["article", url, "--json"],
+            cli_command + ["tweet", url, "--json", "--full-text"],
         ]
 
         for command in commands:
@@ -879,6 +880,38 @@ class Fetcher:
         return match.group(1) if match else None
 
     @staticmethod
+    def _extract_twitter_article_id(url):
+        """Extract Twitter/X article ID from both canonical and profile article URLs."""
+        if not url:
+            return None
+        match = re.search(r"/(?:i/)?article/(\d+)", url)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _is_twitter_article_url(url):
+        """Check whether the URL points to a Twitter/X Article page."""
+        return bool(Fetcher._extract_twitter_article_id(url))
+
+    @staticmethod
+    def _normalize_twitter_article_url(url):
+        """
+        Normalize profile-style Twitter/X Article URLs to the canonical /i/article/<id> form.
+        Example: https://x.com/user/article/123 -> https://x.com/i/article/123
+        """
+        if not url:
+            return url
+        article_id = Fetcher._extract_twitter_article_id(url)
+        if not article_id:
+            return url
+        parsed = urlparse(url)
+        query = f"?{parsed.query}" if parsed.query else ""
+        fragment = f"#{parsed.fragment}" if parsed.fragment else ""
+        normalized = f"{parsed.scheme or 'https'}://{parsed.netloc or 'x.com'}/i/article/{article_id}{query}{fragment}"
+        if normalized != url:
+            logger.info(f"Normalized Twitter Article URL: {normalized}")
+        return normalized
+
+    @staticmethod
     def _is_twitter_placeholder_text(text):
         """
         Detect common X login/placeholder copy that should not be treated as article content.
@@ -976,10 +1009,11 @@ class Fetcher:
             if "t.co/" not in link:
                 continue
             resolved = Fetcher._resolve_url_with_redirects(link, proxies=proxies)
-            if resolved and re.search(r"/i/article/\d+", resolved):
-                logger.info(f"Resolved Twitter Article URL: {resolved}")
-                return resolved
-        return url
+            if resolved and Fetcher._is_twitter_article_url(resolved):
+                normalized = Fetcher._normalize_twitter_article_url(resolved)
+                logger.info(f"Resolved Twitter Article URL: {normalized}")
+                return normalized
+        return Fetcher._normalize_twitter_article_url(url)
 
     @staticmethod
     def _fetch_twitter_syndication_html(url, proxies=None):
@@ -1237,7 +1271,7 @@ class Fetcher:
     ):
         """
         Get proxies for Twitter/X with forced proxy usage.
-        Priority: command-line args > env vars > WinINET > config custom_proxy
+        Priority: command-line args > WinINET > env vars > config custom_proxy
         Twitter/X must always use proxy regardless of INI configuration.
 
         Returns:
@@ -1249,7 +1283,7 @@ class Fetcher:
             if mode == "no":
                 logger.info("Twitter: Command-line specified no proxy")
                 return None, None
-            elif mode == "set" and custom_proxy_override:
+            elif mode == "custom" and custom_proxy_override:
                 logger.info(
                     f"Twitter: Using command-line custom proxy: {custom_proxy_override}"
                 )
@@ -1260,31 +1294,13 @@ class Fetcher:
                 pw_proxy = {"server": custom_proxy_override}
                 return req_proxies, pw_proxy
             elif mode == "win":
-                # Use WinINET
-                pass  # Fall through to WinINET logic below
+                logger.info("Twitter: Command-line specified Windows proxy")
             else:
-                # auto or other - fall through to auto logic
-                pass
+                logger.info(
+                    "Twitter: Defaulting forced proxy handling to Windows proxy (same as -x win)"
+                )
 
-        # Priority 1: Environment variables
-        http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
-        https_proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
-        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
-
-        if http_proxy or https_proxy:
-            server = https_proxy or http_proxy
-            req_proxies = {}
-            if http_proxy:
-                req_proxies["http"] = http_proxy
-            if https_proxy:
-                req_proxies["https"] = https_proxy
-            pw_proxy = {"server": server}
-            if no_proxy:
-                pw_proxy["bypass"] = no_proxy
-            logger.info(f"Twitter: Using environment proxy: {server}")
-            return req_proxies, pw_proxy
-
-        # Priority 2: WinINET (Windows registry)
+        # Priority 1: WinINET (same default behavior as `surf -x win`)
         try:
             import winreg
 
@@ -1326,6 +1342,24 @@ class Fetcher:
             key.Close()
         except Exception as e:
             logger.debug(f"Could not read WinINET proxy for Twitter: {e}")
+
+        # Priority 2: Environment variables
+        http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
+        https_proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
+
+        if http_proxy or https_proxy:
+            server = https_proxy or http_proxy
+            req_proxies = {}
+            if http_proxy:
+                req_proxies["http"] = http_proxy
+            if https_proxy:
+                req_proxies["https"] = https_proxy
+            pw_proxy = {"server": server}
+            if no_proxy:
+                pw_proxy["bypass"] = no_proxy
+            logger.info(f"Twitter: Using environment proxy fallback: {server}")
+            return req_proxies, pw_proxy
 
         # Priority 3: Config custom_proxy
         custom_proxy = config.get("Network", "custom_proxy")
@@ -1815,6 +1849,22 @@ class Fetcher:
         Returns:
             HTML content string from oEmbed API, or None if oEmbed failed/article detected
         """
+        article_url = Fetcher._normalize_twitter_article_url(url)
+        if Fetcher._is_twitter_article_url(url):
+            logger.info(
+                "Direct Twitter Article URL detected; skipping oEmbed and fetching canonical article URL"
+            )
+            article_html = Fetcher.fetch_with_browser(
+                article_url,
+                config,
+                proxy_mode_override,
+                custom_proxy_override,
+                is_twitter_article=True,
+            )
+            if article_html and not Fetcher._is_twitter_placeholder_content(article_html):
+                return Fetcher._tag_twitter_html_content(article_html, "article")
+            return article_html
+
         # oEmbed API endpoint for Twitter
         oembed_url = f"https://publish.twitter.com/oembed?url={url}"
 
@@ -2059,6 +2109,12 @@ class Fetcher:
         logger.info("Launching browser...")
         from playwright.sync_api import sync_playwright
 
+        twitter_target_url = (
+            Fetcher._normalize_twitter_article_url(url)
+            if Fetcher._is_twitter_url(url) and Fetcher._is_twitter_article_url(url)
+            else url
+        )
+
         is_zhihu_url = bool(
             re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
         )
@@ -2142,7 +2198,7 @@ class Fetcher:
                 # because X has persistent connections that never reach networkidle
                 if is_twitter_url:
                     logger.info("Using domcontentloaded strategy for Twitter/X")
-                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.goto(twitter_target_url, wait_until="domcontentloaded", timeout=60000)
                     # Wait longer for content to hydrate
                     page.wait_for_timeout(5000)
                 elif is_zhihu_url:
@@ -2164,13 +2220,13 @@ class Fetcher:
                             config, proxy_mode_override, custom_proxy_override
                         )
                         syndication_html = Fetcher._fetch_twitter_syndication_html(
-                            url, proxies=req_proxies
+                            twitter_target_url, proxies=req_proxies
                         )
                         if syndication_html:
                             logger.info("Using Twitter/X syndication fallback content")
                             return syndication_html
                         fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                            url, proxies=req_proxies
+                            twitter_target_url, proxies=req_proxies
                         )
                         if fxapi_html:
                             logger.info("Using fxTwitter API fallback content")
@@ -2181,7 +2237,7 @@ class Fetcher:
                         return None
 
                     structured = Fetcher._extract_twitter_structured_content(
-                        content, source_url=url
+                        content, source_url=twitter_target_url
                     )
                     if structured:
                         logger.info("Using structured Twitter/X content extraction")
@@ -2202,7 +2258,7 @@ class Fetcher:
                         config, proxy_mode_override, custom_proxy_override
                     )
                     fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                        url, proxies=req_proxies
+                        twitter_target_url, proxies=req_proxies
                     )
                     if fxapi_html:
                         logger.info("Using fxTwitter API fallback content")
@@ -3596,7 +3652,7 @@ class OutputHandler:
     def _is_twitter_non_article(source_url=None, html_content=None):
         if not source_url or not Fetcher._is_twitter_url(source_url):
             return False
-        if re.search(r"/i/article/\d+", source_url):
+        if Fetcher._is_twitter_article_url(source_url):
             return False
         if html_content:
             try:
@@ -4741,7 +4797,9 @@ Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
                         Override with -x/--proxy and -l/--lang if needed.
   Twitter/X:           Always uses proxy settings.
-                       `auto` backend tries twitter-cli first, then native fallback.
+                       Defaults to the same proxy behavior as `-x win`.
+                       Default backend prefers `uvx --from twitter-cli twitter`.
+                       `auto` backend tries CLI first, then native fallback.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -4750,8 +4808,8 @@ Authentication:
   surf --clear-auth twitter                  # Clear auth for Twitter/X
 
 Twitter/X Backend:
-  surf --twitter-backend auto URL            # twitter-cli first, then native fallback
-  surf --twitter-backend cli URL             # Force twitter-cli backend
+  surf --twitter-backend cli URL             # Prefer uvx --from twitter-cli twitter
+  surf --twitter-backend auto URL            # CLI first, then native fallback
   surf --twitter-browser chrome URL          # Prefer Chrome cookies for twitter-cli
         """,
     )
@@ -4819,11 +4877,11 @@ Twitter/X Backend:
     parser.add_argument(
         "--twitter-backend",
         choices=["auto", "cli", "native"],
-        help="Twitter/X backend: auto=twitter-cli then native fallback, cli=twitter-cli only, native=surf built-in only",
+        help="Twitter/X backend: cli=prefer uvx --from twitter-cli twitter, auto=CLI first then native fallback, native=surf built-in only",
     )
     parser.add_argument(
         "--twitter-cli-bin",
-        help="Path or command name for twitter-cli (default: auto-detect from PATH)",
+        help="Deprecated; ignored because Surf always invokes uvx --from twitter-cli twitter",
     )
     parser.add_argument(
         "--twitter-browser",

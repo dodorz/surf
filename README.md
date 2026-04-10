@@ -8,7 +8,7 @@
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Special Site Handling**: Optimized handling for Twitter/X, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with automatic authentication support.
-- **Improved X/Twitter Extraction**: Supports `twitter-cli` in `auto` mode, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, falls back to structured metadata extraction, uses the first sentence as the title for non-article posts, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
+- **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, falls back to structured metadata extraction, uses the first sentence as the title for non-article posts, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 
@@ -39,7 +39,7 @@ surf "https://example.com" -r
 Some sites have default policies that can be overridden with command-line arguments:
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
-- **Twitter/X**: Uses forced proxy settings and, in `auto` mode, tries `twitter-cli` before Surf's built-in fallback chain
+- **Twitter/X**: Uses forced proxy settings equivalent to `-x win` by default and prefers `uvx --from twitter-cli twitter`; `auto` keeps native fallback available
 - **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
 - **GitHub**: Saved Markdown filename uses the page `<title>`
 
@@ -132,9 +132,9 @@ proxy_mode = auto
 custom_proxy =
 
 [Twitter]
-; Backend selection: auto (twitter-cli first, then native fallback), cli (twitter-cli only), native (Surf built-in only)
-backend = auto
-; Optional executable path or command name for twitter-cli
+; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
+backend = cli
+; Deprecated: Surf always invokes `uvx --from twitter-cli twitter`
 cli_bin =
 ; Optional browser hint for twitter-cli cookies: chrome, edge, brave, firefox, arc
 browser =
@@ -218,8 +218,8 @@ surf --login xiaohongshu
 # Optional: login for Twitter/X (helps with login-wall pages)
 surf --login twitter
 
-# Prefer twitter-cli with local browser cookies
-surf --twitter-backend auto "https://x.com/username/status/1234567890"
+# Prefer uvx --from twitter-cli twitter with local browser cookies
+surf --twitter-backend cli "https://x.com/username/status/1234567890"
 surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
 
 # Optional: login for Zhihu (feeds cookies to API/mirror requests and helps browser verification)
@@ -240,7 +240,7 @@ surf --clear-auth all
 ```
 
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
-For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `twitter-cli` is installed, `auto` mode tries it first so Surf can reuse local browser cookies before falling back to the built-in Playwright/oEmbed chain.
+For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
 
 ## Help
 

@@ -43,8 +43,8 @@ proxy_mode = auto
 custom_proxy =
 
 [Twitter]
-; Backend selection: auto (twitter-cli first, then native fallback), cli (twitter-cli only), native (Surf built-in only)
-backend = auto
+; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
+backend = cli
 ; Optional executable path or command name for twitter-cli
 cli_bin =
 ; Optional browser hint for twitter-cli cookies: chrome, edge, brave, firefox, arc
