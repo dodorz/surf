@@ -2362,6 +2362,38 @@ class Fetcher:
             return None, None
 
     @staticmethod
+    def _canonicalize_xiaohongshu_image_url(url):
+        """Normalize Xiaohongshu CDN image URLs for stable comparison/deduplication."""
+        if not url:
+            return ""
+        normalized = str(url).strip()
+        if normalized.startswith("//"):
+            normalized = f"https:{normalized}"
+        normalized = normalized.replace("\\u002F", "/").replace("\\/", "/")
+        normalized = normalized.split("?", 1)[0].split("#", 1)[0].split("!", 1)[0]
+        return normalized
+
+    @staticmethod
+    def _xiaohongshu_image_match_key(url):
+        """Build a looser key so the same image can match across resized/CDN variants."""
+        normalized = Fetcher._canonicalize_xiaohongshu_image_url(url)
+        if not normalized:
+            return ""
+        parsed = urlparse(normalized)
+        path = (parsed.path or "").strip("/")
+        if not path:
+            return normalized
+        parts = [p for p in path.split("/") if p]
+        if not parts:
+            return normalized
+        tail = parts[-1]
+        if "." in tail:
+            tail = tail.rsplit(".", 1)[0]
+        if len(parts) >= 2:
+            return "/".join([parts[-2], tail])
+        return tail
+
+    @staticmethod
     def _fetch_xiaohongshu(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
@@ -2486,12 +2518,223 @@ class Fetcher:
                 }
                 """)
 
-                # Extract images
+                # Extract note images from note-detail data first; broad JSON scanning
+                # tends to pull unrelated UI/media assets from the page.
                 images = page.evaluate("""() => {
-                    const imgs = Array.from(document.querySelectorAll('img'));
-                    return imgs
-                        .map(img => img.src)
-                        .filter(src => src && src.includes('xhscdn.com'));
+                    const normalizeUrl = (value) => {
+                        if (!value || typeof value !== 'string') {
+                            return '';
+                        }
+                        let normalized = value
+                            .trim();
+                        normalized = normalized.split('\\\\u002F').join('/');
+                        normalized = normalized.split('\\u002F').join('/');
+                        normalized = normalized.split('\\\\/').join('/');
+                        normalized = normalized.split('\\/').join('/');
+                        if (normalized.startsWith('//')) {
+                            normalized = `https:${normalized}`;
+                        }
+                        return normalized;
+                    };
+
+                    const ordered = [];
+                    const seen = new Set();
+                    const pushUrl = (value) => {
+                        const url = normalizeUrl(value);
+                        if (!url || !url.includes('xhscdn.com') || url.includes('sns-avatar-qc.xhscdn.com') || seen.has(url)) {
+                            return;
+                        }
+                        seen.add(url);
+                        ordered.push(url);
+                    };
+
+                    const collectFromImageList = (list) => {
+                        if (!Array.isArray(list)) {
+                            return false;
+                        }
+                        const before = ordered.length;
+                        for (const item of list) {
+                            if (!item || typeof item !== 'object') {
+                                continue;
+                            }
+                            const directCandidates = [
+                                item.url,
+                                item.urlDefault,
+                                item.urlPre,
+                                item.masterUrl,
+                                item.original,
+                                item.origin,
+                            ];
+                            for (const candidate of directCandidates) {
+                                pushUrl(candidate);
+                            }
+                            const infoList = item.infoList || item.imageInfoList || item.variants;
+                            if (Array.isArray(infoList)) {
+                                for (const info of infoList) {
+                                    if (!info || typeof info !== 'object') {
+                                        continue;
+                                    }
+                                    pushUrl(info.url);
+                                    pushUrl(info.urlDefault);
+                                    pushUrl(info.urlPre);
+                                }
+                            }
+                        }
+                        return ordered.length > before;
+                    };
+
+                    const searchNoteObjects = (value, depth = 0) => {
+                        if (!value || depth > 12) {
+                            return false;
+                        }
+                        if (Array.isArray(value)) {
+                            for (const item of value) {
+                                if (searchNoteObjects(item, depth + 1)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                        if (typeof value !== 'object') {
+                            return false;
+                        }
+
+                        const noteLikeLists = [
+                            value.imageList,
+                            value.imagesList,
+                            value.noteImageList,
+                            value.noteImages,
+                        ];
+                        for (const list of noteLikeLists) {
+                            if (collectFromImageList(list)) {
+                                return true;
+                            }
+                        }
+
+                        const noteLikeChildren = [
+                            value.noteDetailMap,
+                            value.noteDetail,
+                            value.noteData,
+                            value.note,
+                            value.noteCard,
+                            value.currentNote,
+                            value.post,
+                            value.data,
+                        ];
+                        for (const child of noteLikeChildren) {
+                            if (searchNoteObjects(child, depth + 1)) {
+                                return true;
+                            }
+                        }
+
+                        for (const key of Object.keys(value)) {
+                            const lowerKey = key.toLowerCase();
+                            if (
+                                lowerKey.includes('notedetail') ||
+                                lowerKey.includes('notecard') ||
+                                lowerKey.includes('imagelist') ||
+                                lowerKey.includes('imageslist')
+                            ) {
+                                if (searchNoteObjects(value[key], depth + 1)) {
+                                    return true;
+                                }
+                            }
+                        }
+
+                        return false;
+                    };
+
+                    const parseJsonText = (text) => {
+                        if (!text || (!text.includes('imageList') && !text.includes('noteDetail') && !text.includes('noteCard'))) {
+                            return false;
+                        }
+                        try {
+                            return searchNoteObjects(JSON.parse(text));
+                        } catch {
+                            return false;
+                        }
+                    };
+
+                    const jsonSources = [
+                        window.__INITIAL_STATE__,
+                        window.__INITIAL_DATA__,
+                        window.__NEXT_DATA__,
+                        window.__NUXT__,
+                    ];
+                    for (const source of jsonSources) {
+                        if (source && searchNoteObjects(source)) {
+                            return ordered;
+                        }
+                    }
+
+                    const nextData = document.getElementById('__NEXT_DATA__');
+                    if (nextData && parseJsonText(nextData.textContent || '')) {
+                        return ordered;
+                    }
+
+                    for (const script of document.querySelectorAll('script[type="application/json"], script[type="application/ld+json"], script')) {
+                        const text = script.textContent || '';
+                        if (parseJsonText(text)) {
+                            return ordered;
+                        }
+                    }
+
+                    const getImageUrl = (img) => {
+                        const candidates = [
+                            img.currentSrc,
+                            img.src,
+                            img.getAttribute('data-src'),
+                            img.getAttribute('data-original'),
+                            img.getAttribute('data-xhs-img'),
+                            img.getAttribute('data-image'),
+                        ];
+                        for (const candidate of candidates) {
+                            const before = ordered.length;
+                            pushUrl(candidate);
+                            if (ordered.length > before) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+
+                    const contentRoots = [
+                        document.querySelector('.note-content'),
+                        document.querySelector('.content'),
+                        document.querySelector('.note-desc'),
+                        document.querySelector('[class*="note"]'),
+                        document.querySelector('[class*="swiper"]'),
+                        document.querySelector('[class*="carousel"]'),
+                        document.querySelector('main'),
+                        document.querySelector('article'),
+                    ].filter(Boolean);
+
+                    for (const root of contentRoots) {
+                        for (const img of root.querySelectorAll('img')) {
+                            getImageUrl(img);
+                        }
+                    }
+
+                    if (ordered.length) {
+                        return ordered;
+                    }
+
+                    const noteScopedRoots = [
+                        document.querySelector('main'),
+                        document.querySelector('article'),
+                        document.querySelector('[class*="note"]'),
+                        document.body,
+                    ].filter(Boolean);
+
+                    for (const root of noteScopedRoots) {
+                        for (const img of root.querySelectorAll('img')) {
+                            getImageUrl(img);
+                        }
+                        if (ordered.length) {
+                            return ordered;
+                        }
+                    }
+                    return ordered;
                 }
                 """)
 
@@ -2512,24 +2755,125 @@ class Fetcher:
 
                 # Build HTML with full page structure (for cleaning)
                 # Store the cleaned URL in a meta tag for later use in metadata
+                content_soup = BeautifulSoup(content or "", "html.parser")
+                content_image_map = {}
+                content_image_key_map = {}
+                content_image_list = []
+                for img in content_soup.find_all("img"):
+                    img_url = (
+                        img.get("src")
+                        or img.get("data-src")
+                        or img.get("data-original")
+                        or ""
+                    ).strip()
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                        img_url
+                    )
+                    if (
+                        canonical_img_url
+                        and "xhscdn.com" in canonical_img_url
+                        and "sns-avatar-qc.xhscdn.com" not in canonical_img_url
+                        and canonical_img_url not in content_image_map
+                    ):
+                        content_image_map[canonical_img_url] = img_url
+                        content_image_list.append(img_url)
+                        match_key = Fetcher._xiaohongshu_image_match_key(img_url)
+                        if match_key and match_key not in content_image_key_map:
+                            content_image_key_map[match_key] = img_url
+
+                ordered_content_images = []
+                seen_ordered_images = set()
+                for img_url in images:
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                        img_url
+                    )
+                    match_key = Fetcher._xiaohongshu_image_match_key(img_url)
+                    if (
+                        canonical_img_url
+                        and canonical_img_url in content_image_map
+                        and canonical_img_url not in seen_ordered_images
+                    ):
+                        ordered_content_images.append(content_image_map[canonical_img_url])
+                        seen_ordered_images.add(canonical_img_url)
+                    elif (
+                        match_key
+                        and match_key in content_image_key_map
+                    ):
+                        matched_content_url = content_image_key_map[match_key]
+                        matched_canonical = (
+                            Fetcher._canonicalize_xiaohongshu_image_url(
+                                matched_content_url
+                            )
+                        )
+                        if matched_canonical and matched_canonical not in seen_ordered_images:
+                            ordered_content_images.append(matched_content_url)
+                            seen_ordered_images.add(matched_canonical)
+
+                gallery_images = ordered_content_images[:]
+                if not gallery_images and content_image_list:
+                    # Prefer only images that were actually present in the extracted note body.
+                    # This avoids unrelated JSON images and duplicate re-insertion.
+                    gallery_images = content_image_list[:]
+                    for img_url in gallery_images:
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                            img_url
+                        )
+                        if canonical_img_url:
+                            seen_ordered_images.add(canonical_img_url)
+
+                if not gallery_images:
+                    seen_gallery_images = set()
+                    for img_url in images:
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                            img_url
+                        )
+                        if (
+                            canonical_img_url
+                            and canonical_img_url not in seen_gallery_images
+                        ):
+                            gallery_images.append(img_url)
+                            seen_gallery_images.add(canonical_img_url)
+
+                if gallery_images:
+                    # Rebuild note images once and remove original in-content copies
+                    # so the note body keeps exactly one gallery.
+                    for img in content_soup.find_all("img"):
+                        img_url = (
+                            img.get("src")
+                            or img.get("data-src")
+                            or img.get("data-original")
+                            or ""
+                        ).strip()
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                            img_url
+                        )
+                        if (
+                            canonical_img_url
+                            and "xhscdn.com" in canonical_img_url
+                            and "sns-avatar-qc.xhscdn.com" not in canonical_img_url
+                        ):
+                            img.decompose()
+
+                content = str(content_soup)
+
                 html_parts = [
                     "<html><head><meta charset='utf-8'>",
                     f"<title>{title}</title>",
                     f'<meta name="source-url" content="{url}">',
+                    '<meta name="surf-source-site" content="xiaohongshu">',
                     "</head><body><article>",
                     f"<h1>{title}</h1>",
-                    content,
                 ]
 
-                # Add images if found (excluding avatars which are already in content)
-                if images:
+                # Insert a single ordered gallery when we can align the structured order
+                # against images already present in the extracted content block.
+                if gallery_images:
                     html_parts.append("<div class='images'>")
-                    for img_url in images:
-                        # Skip avatar images (they're already styled separately)
-                        if "sns-avatar-qc.xhscdn.com" not in img_url:
-                            html_parts.append(f'<img src="{img_url}" />')
+                    for img_url in gallery_images:
+                        html_parts.append(f'<img src="{img_url}" />')
                     html_parts.append("</div>")
 
+                html_parts.append(content)
                 html_parts.append("</article></body></html>")
                 html_content = "".join(html_parts)
 
@@ -3372,6 +3716,26 @@ class ContentProcessor:
         logger.info("Extracting main content...")
 
         preprocessed_soup = ContentProcessor._preprocess_html(html)
+
+        # Site-specific HTML that is already normalized should bypass Readability.
+        # Xiaohongshu note pages are especially fragile here: short text + image galleries
+        # often make Readability keep only a tiny text node and drop the images.
+        source_site_tag = preprocessed_soup.find(
+            "meta", attrs={"name": "surf-source-site"}
+        )
+        source_site = (
+            source_site_tag.get("content", "").strip().lower()
+            if source_site_tag
+            else ""
+        )
+        if source_site == "xiaohongshu":
+            article = preprocessed_soup.find("article")
+            preserved_html = str(article) if article else str(preprocessed_soup)
+            img_count = preserved_html.count("<img")
+            logger.info(
+                f"Bypassing Readability for xiaohongshu. Preserved HTML length: {len(preserved_html)}, images: {img_count}"
+            )
+            return Document(str(preprocessed_soup)).title(), preserved_html
 
         # 1. Get Readability Summary
         try:
