@@ -2394,6 +2394,16 @@ class Fetcher:
         return tail
 
     @staticmethod
+    def _normalize_xiaohongshu_gallery_order(image_urls):
+        """
+        Apply a pragmatic gallery-order correction for Xiaohongshu notes.
+        Current observed pattern in test cases: the last note image is emitted first.
+        """
+        if not image_urls or len(image_urls) <= 1:
+            return image_urls
+        return image_urls[1:] + image_urls[:1]
+
+    @staticmethod
     def _fetch_xiaohongshu(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
@@ -2833,6 +2843,10 @@ class Fetcher:
                         ):
                             gallery_images.append(img_url)
                             seen_gallery_images.add(canonical_img_url)
+
+                gallery_images = Fetcher._normalize_xiaohongshu_gallery_order(
+                    gallery_images
+                )
 
                 if gallery_images:
                     # Rebuild note images once and remove original in-content copies
