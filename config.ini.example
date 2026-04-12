@@ -55,7 +55,10 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
+; OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)
+engine = rapidocr
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
+; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
 ; Optional explicit path to the local tesseract executable
 tesseract_cmd =

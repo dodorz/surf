@@ -15,7 +15,7 @@
 - **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
 - **认证管理**：支持需要登录的网站（如小红书）的交互式登录功能。
-- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
+- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
 
 ### 特殊网站策略
 
@@ -44,8 +44,8 @@
     uv run playwright install
     ```
 
-3.  **可选：安装本地 Tesseract 以启用图片 OCR**：
-    `surf` 通过本地 `tesseract` 可执行文件执行图片 OCR。请单独安装 Tesseract，并确保它在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
+3.  **可选：安装图片 OCR 引擎**：
+    `surf` 默认优先使用 Python 依赖中的 RapidOCR。如果您额外安装了本地 Tesseract，Surf 会在需要时自动回退，或者可通过 `--ocr-engine tesseract` 强制使用。请确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
 
 ## Web 界面
 
@@ -133,7 +133,10 @@ profile =
 [OCR]
 ; 默认是否对文章插图执行 OCR（默认 false；小红书站点会覆盖为 true）
 enabled = false
+; OCR 引擎：rapidocr（默认）、tesseract，或 auto（先 rapidocr 再 tesseract）
+engine = rapidocr
 ; Tesseract 语言，例如：chi_sim+eng、eng、jpn+eng
+; RapidOCR 不使用这个参数，仅在选择/回退到 Tesseract 时生效
 lang = chi_sim+eng
 ; 可选：本地 tesseract 可执行文件路径
 tesseract_cmd =
@@ -217,11 +220,14 @@ surf --version                         # 查看版本
 surf "https://example.com/article" --ocr-images
 surf "https://www.xiaohongshu.com/explore/..." --no-ocr-images
 surf "https://example.com/article" --ocr-images --ocr-lang eng
+surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
 ```
 
 说明：
 
-- OCR 依赖本地 `tesseract` 可执行文件，并通过 `pytesseract` 调用。
+- OCR 默认优先使用 `rapidocr-onnxruntime`。
+- 如果 RapidOCR 不可用或没有产出可用文本，Surf 会自动回退到本地 Tesseract；如需强制使用，可传 `--ocr-engine tesseract`。
+- `--ocr-lang` 仅对 Tesseract 生效。
 - 小红书默认开启插图 OCR。
 - OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。
 

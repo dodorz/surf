@@ -33,7 +33,7 @@ surf "https://example.com" -r
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
 - **Authentication Management**: Interactive login support for sites requiring authentication (e.g., Xiaohongshu).
-- **Experimental Image OCR**: Optional local OCR on article images via Tesseract. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
+- **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 
 ### Special Site Policies
 
@@ -62,8 +62,8 @@ We recommend using `uv` for a clean environment.
     uv run playwright install
     ```
 
-3.  **Optional: Install local Tesseract for image OCR**:
-    `surf` uses the local `tesseract` executable for image OCR. Install Tesseract separately and ensure it is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
+3.  **Optional: Install OCR engine(s) for image OCR**:
+    `surf` prefers `RapidOCR` via the Python package dependency. If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
 
 ## Web UI
 
@@ -149,7 +149,10 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
+; OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)
+engine = rapidocr
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
+; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
 ; Optional explicit path to the local tesseract executable
 tesseract_cmd =
@@ -230,11 +233,14 @@ Run local OCR on article images and append recognized text below each image:
 uv run surf.py "https://example.com/article" --ocr-images
 uv run surf.py "https://www.xiaohongshu.com/explore/..." --no-ocr-images
 uv run surf.py "https://example.com/article" --ocr-images --ocr-lang eng
+uv run surf.py "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
 ```
 
 Notes:
 
-- OCR uses the local `tesseract` executable through `pytesseract`.
+- OCR prefers `rapidocr-onnxruntime` by default.
+- If RapidOCR is unavailable or produces no usable text, Surf falls back to local Tesseract unless you force `--ocr-engine tesseract`.
+- `--ocr-lang` only applies to Tesseract.
 - Xiaohongshu enables image OCR by default.
 - OCR failures only skip the affected image; they do not abort the article fetch.
 
