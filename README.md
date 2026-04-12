@@ -33,12 +33,14 @@ surf "https://example.com" -r
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
 - **Authentication Management**: Interactive login support for sites requiring authentication (e.g., Xiaohongshu).
+- **Experimental Image OCR**: Optional local OCR on article images via Tesseract. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 
 ### Special Site Policies
 
 Some sites have default policies that can be overridden with command-line arguments:
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
+- **Xiaohongshu**: Also enables local image OCR by default unless you pass `--no-ocr-images`
 - **Twitter/X**: Uses forced proxy settings equivalent to `-x win` by default and prefers `uvx --from twitter-cli twitter`; `auto` keeps native fallback available
 - **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
 - **GitHub**: Saved Markdown filename uses the page `<title>`
@@ -59,6 +61,9 @@ We recommend using `uv` for a clean environment.
     uv sync
     uv run playwright install
     ```
+
+3.  **Optional: Install local Tesseract for image OCR**:
+    `surf` uses the local `tesseract` executable for image OCR. Install Tesseract separately and ensure it is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
 
 ## Web UI
 
@@ -140,6 +145,16 @@ cli_bin =
 browser =
 ; Optional browser profile hint for twitter-cli, for example: Default or Profile 2
 profile =
+
+[OCR]
+; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
+enabled = false
+; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
+lang = chi_sim+eng
+; Optional explicit path to the local tesseract executable
+tesseract_cmd =
+; OCR at most this many images per article
+max_images = 8
 ```
 
 ## Usage
@@ -206,6 +221,22 @@ Force using Playwright (useful for tricky sites).
 ```bash
 uv run surf.py "https://example.com" --browser
 ```
+
+### Image OCR (--ocr-images / --no-ocr-images)
+
+Run local OCR on article images and append recognized text below each image:
+
+```bash
+uv run surf.py "https://example.com/article" --ocr-images
+uv run surf.py "https://www.xiaohongshu.com/explore/..." --no-ocr-images
+uv run surf.py "https://example.com/article" --ocr-images --ocr-lang eng
+```
+
+Notes:
+
+- OCR uses the local `tesseract` executable through `pytesseract`.
+- Xiaohongshu enables image OCR by default.
+- OCR failures only skip the affected image; they do not abort the article fetch.
 
 ### Authentication (--login / --clear-auth)
 

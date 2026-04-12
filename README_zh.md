@@ -15,12 +15,14 @@
 - **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
 - **认证管理**：支持需要登录的网站（如小红书）的交互式登录功能。
+- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
 
 ### 特殊网站策略
 
 部分网站有默认策略，可通过命令行参数覆盖：
 
 - **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
+- **小红书**：额外默认开启插图 OCR，可用 `--no-ocr-images` 关闭
 - **Twitter/X**：默认使用等同于 `-x win` 的强制代理设置，并优先使用 `uvx --from twitter-cli twitter`；若需要保留 native 兜底可显式使用 `auto`
 - **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
 - **GitHub**：保存 Markdown 时文件名使用页面 `<title>`
@@ -41,6 +43,9 @@
     uv sync
     uv run playwright install
     ```
+
+3.  **可选：安装本地 Tesseract 以启用图片 OCR**：
+    `surf` 通过本地 `tesseract` 可执行文件执行图片 OCR。请单独安装 Tesseract，并确保它在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
 
 ## Web 界面
 
@@ -124,6 +129,16 @@ cli_bin =
 browser =
 ; 可选：twitter-cli 的浏览器 profile，例如 Default 或 Profile 2
 profile =
+
+[OCR]
+; 默认是否对文章插图执行 OCR（默认 false；小红书站点会覆盖为 true）
+enabled = false
+; Tesseract 语言，例如：chi_sim+eng、eng、jpn+eng
+lang = chi_sim+eng
+; 可选：本地 tesseract 可执行文件路径
+tesseract_cmd =
+; 每篇文章最多 OCR 这么多张图
+max_images = 8
 ```
 
 ## 用法
@@ -193,6 +208,22 @@ surf "https://example.com" --config myconfig.ini  # 指定配置文件
 surf "https://example.com" --verbose   # 详细日志输出
 surf --version                         # 查看版本
 ```
+
+### 插图 OCR (--ocr-images / --no-ocr-images)
+
+对文章插图执行本地 OCR，并把识别文本追加到图片下方：
+
+```bash
+surf "https://example.com/article" --ocr-images
+surf "https://www.xiaohongshu.com/explore/..." --no-ocr-images
+surf "https://example.com/article" --ocr-images --ocr-lang eng
+```
+
+说明：
+
+- OCR 依赖本地 `tesseract` 可执行文件，并通过 `pytesseract` 调用。
+- 小红书默认开启插图 OCR。
+- OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。
 
 ### 认证功能 (--login / --clear-auth)
 

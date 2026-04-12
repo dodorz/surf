@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import io
 import requests  # type: ignore
 from requests.utils import get_encoding_from_headers
 from readability import Document
@@ -3536,6 +3537,7 @@ SPECIAL_SITE_HANDLERS = {
         "handler": Fetcher._fetch_xiaohongshu,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
         "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
+        "default_ocr_images": True,
     },
     "ncpssd": {
         "patterns": [
@@ -3808,6 +3810,250 @@ class ContentProcessor:
         # heading_style='ATX' ensures # style headings
         return markdownify.markdownify(html, heading_style="ATX")
 
+
+class OcrHandler:
+    @staticmethod
+    def _is_enabled_for_site(site_name, site_config, args, config):
+        if getattr(args, "no_ocr_images", False):
+            return False
+        if getattr(args, "ocr_images", False):
+            return True
+        if site_config and site_config.get("default_ocr_images"):
+            return True
+        value = config.get("OCR", "enabled", fallback="false")
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _get_int_config(config, key, fallback):
+        try:
+            return int(config.get("OCR", key, fallback=str(fallback)))
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _normalize_ocr_text(text):
+        if not text:
+            return ""
+        lines = []
+        for line in text.splitlines():
+            cleaned = re.sub(r"\s+", " ", line).strip()
+            if cleaned:
+                lines.append(cleaned)
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _prepare_image_for_ocr(image):
+        from PIL import Image as PilImage  # type: ignore
+        from PIL import ImageOps  # type: ignore
+
+        prepared = image.convert("L")
+        prepared = ImageOps.autocontrast(prepared)
+
+        width, height = prepared.size
+        max_side = max(width, height)
+        if max_side < 1800:
+            scale = max(2, int(1800 / max_side))
+            prepared = prepared.resize(
+                (width * scale, height * scale),
+                resample=PilImage.Resampling.LANCZOS,
+            )
+
+        # A light threshold often helps screenshot-like text blocks.
+        prepared = prepared.point(lambda px: 255 if px > 180 else 0)
+        return prepared
+
+    @staticmethod
+    def _resolve_ocr_languages(pytesseract_module, requested_langs):
+        try:
+            available = set(pytesseract_module.get_languages(config=""))
+        except Exception:
+            available = set()
+
+        requested = [lang.strip() for lang in requested_langs.split("+") if lang.strip()]
+        if not requested:
+            requested = ["eng"]
+
+        supported = [lang for lang in requested if not available or lang in available]
+        missing = [lang for lang in requested if available and lang not in available]
+
+        if missing:
+            logger.warning(
+                "OCR language data missing for: %s. Available langs: %s",
+                ", ".join(missing),
+                ", ".join(sorted(available)) if available else "unknown",
+            )
+
+        if supported:
+            return ["+".join(supported)]
+        if available and "eng" in available:
+            logger.warning("Falling back to OCR language: eng")
+            return ["eng"]
+        return [requested_langs]
+
+    @staticmethod
+    def _run_ocr(pytesseract_module, image, lang_candidates):
+        best_text = ""
+        configs = ["--psm 6", "--psm 11"]
+
+        for lang in lang_candidates:
+            for tesseract_config in configs:
+                try:
+                    text = pytesseract_module.image_to_string(
+                        image, lang=lang, config=tesseract_config
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "OCR attempt failed for lang=%s config=%s: %s",
+                        lang,
+                        tesseract_config,
+                        e,
+                    )
+                    continue
+                text = OcrHandler._normalize_ocr_text(text)
+                if len(text) > len(best_text):
+                    best_text = text
+        return best_text
+
+    @staticmethod
+    def _download_image(url, source_url, proxies, timeout=20):
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
+        if source_url:
+            parsed = urlparse(source_url)
+            headers["Referer"] = source_url
+            if parsed.scheme and parsed.netloc:
+                headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
+        response.raise_for_status()
+        return response.content
+
+    @staticmethod
+    def _build_ocr_block(soup, ocr_text):
+        block = soup.new_tag("div")
+        block["class"] = "surf-ocr"
+
+        label = soup.new_tag("p")
+        strong = soup.new_tag("strong")
+        strong.string = "OCR Text"
+        label.append(strong)
+        block.append(label)
+
+        for line in ocr_text.splitlines():
+            para = soup.new_tag("p")
+            para.string = line
+            block.append(para)
+
+        return block
+
+    @staticmethod
+    def annotate_html_with_ocr(
+        html_content,
+        source_url,
+        site_name,
+        site_config,
+        args,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+    ):
+        if not html_content:
+            return html_content
+        if not OcrHandler._is_enabled_for_site(site_name, site_config, args, config):
+            return html_content
+
+        try:
+            from PIL import Image  # type: ignore
+            import pytesseract  # type: ignore
+        except Exception as e:
+            logger.warning(f"OCR disabled: missing optional OCR dependencies: {e}")
+            return html_content
+
+        tesseract_cmd = config.get("OCR", "tesseract_cmd", fallback="").strip()
+        if tesseract_cmd:
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+        try:
+            pytesseract.get_tesseract_version()
+        except Exception as e:
+            logger.warning(f"OCR disabled: local tesseract is unavailable: {e}")
+            return html_content
+
+        req_proxies, _ = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        ocr_lang = getattr(args, "ocr_lang", None) or config.get(
+            "OCR", "lang", fallback="chi_sim+eng"
+        )
+        ocr_lang_candidates = OcrHandler._resolve_ocr_languages(
+            pytesseract, ocr_lang
+        )
+        max_images = OcrHandler._get_int_config(config, "max_images", 8)
+        min_width = OcrHandler._get_int_config(config, "min_width", 240)
+        min_height = OcrHandler._get_int_config(config, "min_height", 120)
+        min_text_length = OcrHandler._get_int_config(config, "min_text_length", 8)
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        root = soup.find("article") or soup.find("main") or soup.body or soup
+        seen_urls = set()
+        processed = 0
+
+        for img in root.find_all("img"):
+            if processed >= max_images:
+                break
+            if img.find_next_sibling(class_="surf-ocr"):
+                continue
+
+            img_url = (
+                img.get("src")
+                or img.get("data-src")
+                or img.get("data-original")
+                or ""
+            ).strip()
+            if (
+                not img_url
+                or img_url.startswith("data:")
+                or img_url in seen_urls
+                or any(token in img_url.lower() for token in ("avatar", "logo", "emoji", "icon"))
+            ):
+                continue
+            seen_urls.add(img_url)
+
+            try:
+                image_bytes = OcrHandler._download_image(
+                    img_url, source_url, req_proxies
+                )
+                image = Image.open(io.BytesIO(image_bytes))
+                image.load()
+                width, height = image.size
+                if width < min_width or height < min_height:
+                    continue
+                prepared_image = OcrHandler._prepare_image_for_ocr(image)
+                ocr_text = OcrHandler._run_ocr(
+                    pytesseract, prepared_image, ocr_lang_candidates
+                )
+                if len(ocr_text) < min_text_length:
+                    logger.info(
+                        "OCR produced too little text for image: %s",
+                        img_url[:120],
+                    )
+                    continue
+                img.insert_after(OcrHandler._build_ocr_block(soup, ocr_text))
+                processed += 1
+            except Exception as e:
+                logger.debug(f"OCR skipped for image {img_url}: {e}")
+
+        if processed:
+            logger.info(f"OCR annotated {processed} images")
+        else:
+            logger.warning(
+                "OCR ran but produced no usable text. Check OCR language data, image quality, or try --ocr-lang eng / configure Tesseract languages."
+            )
+        return str(soup)
+
     @staticmethod
     def _chunk_text(text, max_chars=4000):
         """
@@ -3940,6 +4186,11 @@ class ContentProcessor:
         except Exception as e:
             logger.error(f"Translation failed: {e}")
             return text, title
+
+
+# Restore ContentProcessor API after inserting OcrHandler between methods.
+ContentProcessor._chunk_text = staticmethod(OcrHandler._chunk_text)
+ContentProcessor.translate_if_needed = classmethod(OcrHandler.translate_if_needed.__func__)
 
 
 class OutputHandler:
@@ -5185,6 +5436,11 @@ Authentication:
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
   surf --clear-auth twitter                  # Clear auth for Twitter/X
 
+OCR:
+  surf --ocr-images URL                      # Run local OCR on article images
+  surf --no-ocr-images URL                   # Disable OCR, including Xiaohongshu default
+  Xiaohongshu:                              OCR on images is enabled by default
+
 Twitter/X Backend:
   surf --twitter-backend cli URL             # Prefer uvx --from twitter-cli twitter
   surf --twitter-backend auto URL            # CLI first, then native fallback
@@ -5274,6 +5530,22 @@ Twitter/X Backend:
     # HTML options
     parser.add_argument(
         "--html-inline", action="store_true", help="Inline CSS/JS in HTML output"
+    )
+
+    ocr_group = parser.add_mutually_exclusive_group()
+    ocr_group.add_argument(
+        "--ocr-images",
+        action="store_true",
+        help="Run local OCR on article images (experimental)",
+    )
+    ocr_group.add_argument(
+        "--no-ocr-images",
+        action="store_true",
+        help="Disable image OCR, including sites that enable it by default",
+    )
+    parser.add_argument(
+        "--ocr-lang",
+        help="OCR language(s) for local tesseract, e.g. chi_sim+eng",
     )
 
     # Network
@@ -5434,6 +5706,20 @@ Twitter/X Backend:
             logger.error(f"Failed to fetch usable content from {args.url}.")
         sys.exit(1)
 
+    def _extract_source_url_from_html(html_blob, default_url):
+        if not html_blob:
+            return default_url
+        try:
+            soup = BeautifulSoup(html_blob, "html.parser")
+            meta_tag = soup.find("meta", attrs={"name": "source-url"})
+            if meta_tag and meta_tag.get("content"):
+                return meta_tag["content"]
+        except Exception:
+            pass
+        return default_url
+
+    source_url = _extract_source_url_from_html(html_content, args.url)
+
     # 2. Extract
     try:
         title, cleaned_html = ContentProcessor.extract_content(html_content)
@@ -5443,6 +5729,21 @@ Twitter/X Backend:
     except Exception as e:
         logger.error(f"Failed to extract content: {e}")
         sys.exit(1)
+
+    # 2.5 OCR images
+    try:
+        cleaned_html = OcrHandler.annotate_html_with_ocr(
+            cleaned_html,
+            source_url=source_url,
+            site_name=site_name,
+            site_config=site_config,
+            args=args,
+            config=config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+    except Exception as e:
+        logger.warning(f"Image OCR failed and was skipped: {e}")
 
     # 3. Convert
     try:
@@ -5514,23 +5815,7 @@ Twitter/X Backend:
         cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, args.url)
 
     # 5. Output
-    # Extract source URL from HTML meta tag if present (for short link resolution)
-    def _extract_source_url_from_html(html_content, default_url):
-        """Extract source URL from meta tag if present, otherwise return default."""
-        if not html_content:
-            return default_url
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html_content, "html.parser")
-            meta_tag = soup.find("meta", attrs={"name": "source-url"})
-            if meta_tag and meta_tag.get("content"):
-                return meta_tag["content"]
-        except Exception:
-            pass
-        return default_url
-
     # Use the source URL from meta tag if available (for xhslink resolution)
-    source_url = _extract_source_url_from_html(html_content, args.url)
     if source_url != args.url:
         logger.info(f"Using resolved source URL for metadata: {source_url}")
 
