@@ -8,7 +8,7 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **特殊网站处理**：针对 Twitter/X、微信公众号、知乎、小红书等网站优化处理，支持自动认证。
-- **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；在需要时使用结构化元数据兜底提取正文；对非 article 的消息会直接取正文第一句作为标题；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
+- **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；对非 article 的消息会直接取正文第一句作为标题；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。

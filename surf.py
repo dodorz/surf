@@ -532,6 +532,13 @@ class Fetcher:
                 meta.attrs["name"] = "surf-twitter-kind"
                 head.append(meta)
             meta.attrs["content"] = kind
+
+            source_meta = soup.find("meta", attrs={"name": "surf-source-site"})
+            if not source_meta:
+                source_meta = soup.new_tag("meta")
+                source_meta.attrs["name"] = "surf-source-site"
+                head.append(source_meta)
+            source_meta.attrs["content"] = "twitter"
             return str(soup)
         except Exception:
             return html_content
@@ -601,11 +608,18 @@ class Fetcher:
                         "media_url",
                         "media_url_https",
                         "original_img_url",
+                        "originalimageurl",
+                        "original_image_url",
                         "image",
                         "image_url",
                         "imageurl",
+                        "image_src",
+                        "image_source",
                         "thumbnail_url",
                         "thumbnailurl",
+                        "mediaurl",
+                        "mediaurlhttps",
+                        "display_url",
                     }:
                         add(item)
                     else:
@@ -639,6 +653,681 @@ class Fetcher:
             or ""
         )
         return str(name).strip(), str(screen_name).strip()
+
+    @staticmethod
+    def _render_twitter_entities_to_html(text, entities):
+        if not text:
+            return ""
+        if not isinstance(entities, list):
+            return escape(text)
+
+        marks = {}
+        link_ranges = {}
+
+        def _to_int(value):
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            start = _to_int(
+                entity.get("from")
+                or entity.get("start")
+                or entity.get("offset")
+                or entity.get("indices", [None, None])[0]
+            )
+            end = _to_int(
+                entity.get("to")
+                or entity.get("end")
+                or entity.get("offset_end")
+                or entity.get("indices", [None, None])[1]
+            )
+            if start is None or end is None or start < 0 or end <= start:
+                continue
+
+            kinds = set()
+            for key in ("type", "types", "style", "styles", "format", "formats"):
+                value = entity.get(key)
+                if isinstance(value, str):
+                    kinds.update(part.strip().lower() for part in re.split(r"[\s,|/+]+", value) if part.strip())
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            kinds.add(item.strip().lower())
+
+            if entity.get("bold") or "bold" in kinds or "strong" in kinds:
+                marks.setdefault(start, []).append("<strong>")
+                marks.setdefault(end, []).append("</strong>")
+            if entity.get("italic") or "italic" in kinds or "emphasis" in kinds or "italicized" in kinds:
+                marks.setdefault(start, []).append("<em>")
+                marks.setdefault(end, []).append("</em>")
+
+            link_url = (
+                entity.get("expanded_url")
+                or entity.get("expandedUrl")
+                or entity.get("url")
+                or entity.get("href")
+            )
+            if isinstance(link_url, str) and link_url.strip():
+                link_ranges[(start, end)] = link_url.strip()
+
+        if not marks and not link_ranges:
+            return escape(text)
+
+        out = []
+        for idx, char in enumerate(text):
+            if idx in marks:
+                for token in sorted(marks[idx], key=lambda item: item.startswith("</")):
+                    out.append(token)
+            for (start, end), link_url in link_ranges.items():
+                if idx == start:
+                    out.append(f"<a href='{escape(link_url)}'>")
+                if idx == end:
+                    out.append("</a>")
+            out.append(escape(char))
+
+        text_len = len(text)
+        if text_len in marks:
+            closing = [token for token in marks[text_len] if token.startswith("</")]
+            opening = [token for token in marks[text_len] if not token.startswith("</")]
+            out.extend(closing + opening)
+        for (start, end), _ in link_ranges.items():
+            if end == text_len:
+                out.append("</a>")
+        return "".join(out)
+
+    @staticmethod
+    def _extract_twitter_rich_text_html(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [escape(line.strip()) for line in value.splitlines() if line.strip()]
+        if isinstance(value, list):
+            blocks = []
+            for item in value:
+                blocks.extend(Fetcher._extract_twitter_rich_text_html(item))
+            return blocks
+        if isinstance(value, dict):
+            text = value.get("text")
+            entities = value.get("entities") or value.get("facets") or value.get("annotations")
+            if isinstance(text, str) and text.strip():
+                rendered = Fetcher._render_twitter_entities_to_html(text, entities)
+                return [part for part in rendered.splitlines() if part.strip()]
+
+            blocks = []
+            for key in (
+                "articleText",
+                "full_text",
+                "fullText",
+                "text",
+                "raw_text",
+                "rawText",
+                "content",
+                "display_text",
+                "displayText",
+            ):
+                if key in value:
+                    blocks.extend(Fetcher._extract_twitter_rich_text_html(value.get(key)))
+                    if blocks:
+                        break
+            return blocks
+        return []
+
+    @staticmethod
+    def _extract_fx_text_and_entities(node):
+        if isinstance(node, str):
+            return node, None
+        if not isinstance(node, dict):
+            return "", None
+
+        for key in ("text", "content", "value", "raw_text", "rawText"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                entities = (
+                    node.get("entities")
+                    or node.get("facets")
+                    or node.get("annotations")
+                    or node.get("formatting")
+                )
+                return value, entities
+            if isinstance(value, dict):
+                nested_text, nested_entities = Fetcher._extract_fx_text_and_entities(value)
+                if nested_text:
+                    return nested_text, nested_entities
+        return "", None
+
+    @staticmethod
+    def _extract_fx_block_type(block):
+        if not isinstance(block, dict):
+            return ""
+        for key in ("type", "block_type", "kind", "name", "$type"):
+            value = block.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+        return ""
+
+    @staticmethod
+    def _apply_fx_ranges(text, style_ranges=None, entity_ranges=None, entity_map=None):
+        text = text or ""
+        opens = {}
+        closes = {}
+        media_refs = []
+
+        def add_open(pos, token):
+            opens.setdefault(pos, []).append(token)
+
+        def add_close(pos, token):
+            closes.setdefault(pos, []).append(token)
+
+        def get_entity(key):
+            if isinstance(entity_map, dict):
+                if key in entity_map:
+                    return entity_map[key]
+                key_str = str(key)
+                if key_str in entity_map:
+                    return entity_map[key_str]
+            return None
+
+        if isinstance(style_ranges, list):
+            for item in style_ranges:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    offset = int(item.get("offset", 0))
+                    length = int(item.get("length", 0))
+                except Exception:
+                    continue
+                if length <= 0:
+                    continue
+                end = offset + length
+                style = str(item.get("style", "")).strip().upper()
+                if style == "BOLD":
+                    add_open(offset, "<strong>")
+                    add_close(end, "</strong>")
+                elif style == "ITALIC":
+                    add_open(offset, "<em>")
+                    add_close(end, "</em>")
+                elif style == "CODE":
+                    add_open(offset, "<code>")
+                    add_close(end, "</code>")
+
+        if isinstance(entity_ranges, list):
+            for item in entity_ranges:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    offset = int(item.get("offset", 0))
+                    length = int(item.get("length", 0))
+                except Exception:
+                    continue
+                if length < 0:
+                    continue
+                end = offset + length
+                entity = get_entity(item.get("key"))
+                if not isinstance(entity, dict):
+                    continue
+                entity_type = str(entity.get("type", "")).strip().upper()
+                data = entity.get("data") or {}
+                if entity_type == "LINK":
+                    href = (
+                        data.get("url")
+                        or data.get("href")
+                        or data.get("expanded_url")
+                        or data.get("expandedUrl")
+                    )
+                    if isinstance(href, str) and href.strip():
+                        add_open(offset, f"<a href='{escape(href.strip())}'>")
+                        add_close(end, "</a>")
+                elif entity_type == "CODE":
+                    add_open(offset, "<code>")
+                    add_close(end, "</code>")
+                elif entity_type in {"IMAGE", "PHOTO", "MEDIA", "EMBEDDED_LINK"}:
+                    media_refs.append(entity)
+
+        out = []
+        for idx, char in enumerate(text):
+            if idx in closes:
+                out.extend(sorted(closes[idx], reverse=True))
+            if idx in opens:
+                out.extend(opens[idx])
+            if char == "\n":
+                out.append("<br>")
+            else:
+                out.append(escape(char))
+        text_len = len(text)
+        if text_len in closes:
+            out.extend(sorted(closes[text_len], reverse=True))
+        if text_len in opens:
+            out.extend(opens[text_len])
+        return "".join(out), media_refs
+
+    @staticmethod
+    def _extract_twitter_media_urls_from_entity(entity):
+        if not isinstance(entity, dict):
+            return []
+        data = entity.get("data") or {}
+        candidates = []
+        for node in (entity, data):
+            candidates.extend(Fetcher._extract_twitter_media_urls(node))
+        seen = []
+        for url in candidates:
+            if url not in seen:
+                seen.append(url)
+        return seen
+
+    @staticmethod
+    def _is_fx_likely_code_line(text):
+        if not text:
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+        command_patterns = [
+            r"^[A-Za-z0-9_.-]+\s+[A-Za-z0-9_/~.-]",
+            r"^(vim|cat|cd|ls|pwd|git|docker|python|pip|uv|npm|pnpm|yarn|hermes|rm|cp|mv)\b",
+            r"^~?/[A-Za-z0-9_./-]+$",
+            r"^[A-Za-z_][A-Za-z0-9_]*\s*[:=]\s*.+$",
+        ]
+        if any(re.match(pattern, stripped) for pattern in command_patterns):
+            return True
+        if "`" in stripped:
+            return True
+        if stripped.count("/") >= 2 and " " not in stripped:
+            return True
+        return False
+
+    @staticmethod
+    def _render_fx_block_html(block, entity_map=None):
+        if not isinstance(block, dict):
+            return [], []
+
+        block_type = Fetcher._extract_fx_block_type(block)
+        text = block.get("text") if isinstance(block.get("text"), str) else ""
+        if not text:
+            text, _ = Fetcher._extract_fx_text_and_entities(block)
+        inline_style_ranges = block.get("inlineStyleRanges") or block.get("inline_style_ranges")
+        entity_ranges = block.get("entityRanges") or block.get("entity_ranges")
+        rendered, media_refs = Fetcher._apply_fx_ranges(
+            text,
+            style_ranges=inline_style_ranges,
+            entity_ranges=entity_ranges,
+            entity_map=entity_map,
+        )
+        html_chunks = []
+
+        if block_type == "atomic":
+            media_refs.append(block)
+            return [], media_refs
+
+        if text:
+            if block_type == "code-block" or "code" in block_type or block.get("language") or block.get("code"):
+                html_chunks.append(f"<pre><code>{escape(text)}</code></pre>")
+            elif block_type in {"blockquote", "pullquote"} or "quote" in block_type:
+                html_chunks.append(f"<blockquote><p>{rendered}</p></blockquote>")
+            elif block_type in {"header-one", "title"}:
+                html_chunks.append(f"<h1>{rendered}</h1>")
+            elif block_type in {"header-two", "header", "heading"}:
+                html_chunks.append(f"<h2>{rendered}</h2>")
+            elif block_type in {"header-three", "subheading", "subtitle"}:
+                html_chunks.append(f"<h3>{rendered}</h3>")
+            elif block_type == "ordered-list-item":
+                html_chunks.append(f"<li data-list-type='ol'>{rendered}</li>")
+            elif block_type == "unordered-list-item":
+                html_chunks.append(f"<li data-list-type='ul'>{rendered}</li>")
+            elif block_type == "unstyled" and Fetcher._is_fx_likely_code_line(text):
+                html_chunks.append(f"<pre><code>{escape(text)}</code></pre>")
+            else:
+                html_chunks.append(f"<p>{rendered}</p>")
+
+        return html_chunks, media_refs
+
+    @staticmethod
+    def _extract_fx_block_sequence(article, tweet):
+        blocks_html = []
+        seen_images = set()
+        entity_map = ((article.get("content") or {}).get("entityMap") or {})
+        ordered_media_queue = []
+
+        def enqueue_media_from(node):
+            for media_url in Fetcher._extract_twitter_media_urls(node):
+                if media_url not in ordered_media_queue:
+                    ordered_media_queue.append(media_url)
+
+        enqueue_media_from(article.get("cover_media") or {})
+        enqueue_media_from(article.get("media_entities") or [])
+        enqueue_media_from(tweet.get("media") or [])
+        enqueue_media_from(tweet.get("media_extended") or [])
+
+        def append_media_from(node):
+            media_urls = Fetcher._extract_twitter_media_urls(node)
+            for media_url in media_urls:
+                if media_url not in seen_images:
+                    seen_images.add(media_url)
+                    blocks_html.append(
+                        f"<p><img src='{escape(media_url)}' alt='tweet media'></p>"
+                    )
+
+        content = article.get("content") or {}
+        blocks = content.get("blocks") or []
+        if isinstance(blocks, list) and blocks:
+            pending_list_type = None
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_fragments, media_refs = Fetcher._render_fx_block_html(
+                    block, entity_map=entity_map
+                )
+                if block_fragments:
+                    for fragment in block_fragments:
+                        if fragment.startswith("<li "):
+                            list_type = "ol" if "data-list-type='ol'" in fragment else "ul"
+                            clean_fragment = fragment.replace(" data-list-type='ol'", "").replace(
+                                " data-list-type='ul'", ""
+                            )
+                            if pending_list_type != list_type:
+                                if pending_list_type:
+                                    blocks_html.append(f"</{pending_list_type}>")
+                                blocks_html.append(f"<{list_type}>")
+                                pending_list_type = list_type
+                            blocks_html.append(clean_fragment)
+                        else:
+                            if pending_list_type:
+                                blocks_html.append(f"</{pending_list_type}>")
+                                pending_list_type = None
+                            blocks_html.append(fragment)
+                else:
+                    if pending_list_type:
+                        blocks_html.append(f"</{pending_list_type}>")
+                        pending_list_type = None
+
+                # fxTwitter article often uses atomic blocks as positional media placeholders
+                # while the actual URLs live in top-level media_entities / cover_media.
+                if Fetcher._extract_fx_block_type(block) == "atomic":
+                    appended_from_block = len(seen_images)
+                    for entity in media_refs:
+                        append_media_from(entity)
+                    append_media_from(block)
+                    if len(seen_images) == appended_from_block:
+                        while ordered_media_queue:
+                            next_url = ordered_media_queue.pop(0)
+                            if next_url not in seen_images:
+                                seen_images.add(next_url)
+                                blocks_html.append(
+                                    f"<p><img src='{escape(next_url)}' alt='tweet media'></p>"
+                                )
+                                break
+                    continue
+
+                for entity in media_refs:
+                    append_media_from(entity)
+                append_media_from(block)
+            if pending_list_type:
+                blocks_html.append(f"</{pending_list_type}>")
+
+        if not blocks_html:
+            text = (tweet.get("text") or "").strip()
+            entities = tweet.get("entities") or tweet.get("facets") or tweet.get("annotations")
+            if not text:
+                raw_text = tweet.get("raw_text") or {}
+                text, entities = Fetcher._extract_fx_text_and_entities(raw_text)
+            if text:
+                blocks_html.append(f"<p>{Fetcher._render_fx_text_html(text, entities)}</p>")
+
+        append_media_from(article.get("cover_media") or {})
+        append_media_from(article.get("media_entities") or [])
+        append_media_from(tweet.get("media") or [])
+        append_media_from(tweet.get("media_extended") or [])
+        return blocks_html
+
+    @staticmethod
+    def _log_fx_article_structure(article):
+        try:
+            content = article.get("content") or {}
+            blocks = content.get("blocks") or []
+            entity_map = content.get("entityMap") or {}
+            block_types = []
+            for idx, block in enumerate(blocks[:20]):
+                if not isinstance(block, dict):
+                    continue
+                block_types.append(
+                    {
+                        "i": idx,
+                        "type": Fetcher._extract_fx_block_type(block) or "unknown",
+                        "text_len": len(block.get("text") or ""),
+                        "styles": len(block.get("inlineStyleRanges") or block.get("inline_style_ranges") or []),
+                        "entities": len(block.get("entityRanges") or block.get("entity_ranges") or []),
+                    }
+                )
+
+            entity_types = []
+            if isinstance(entity_map, dict):
+                for key, entity in list(entity_map.items())[:30]:
+                    if not isinstance(entity, dict):
+                        continue
+                    entity_types.append(
+                        {
+                            "key": key,
+                            "type": str(entity.get("type", "unknown")),
+                            "data_keys": sorted(list((entity.get("data") or {}).keys()))[:8],
+                        }
+                    )
+
+            logger.info(
+                "fxTwitter article structure: blocks=%s entityMap=%s block_types=%s entity_types=%s",
+                len(blocks) if isinstance(blocks, list) else 0,
+                len(entity_map) if isinstance(entity_map, dict) else 0,
+                json.dumps(block_types, ensure_ascii=False),
+                json.dumps(entity_types, ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.debug("Failed to log fxTwitter article structure: %s", e)
+
+    @staticmethod
+    def _is_twitter_decorative_image(img):
+        src = (img.get("src") or "").strip().lower()
+        alt = (img.get("alt") or "").strip().lower()
+        if not src:
+            return True
+        if src.startswith("data:"):
+            return True
+        if any(token in src for token in ("profile_images", "/emoji/", "emoji", "avatar", "icon")):
+            return True
+        if alt in {"", "image"}:
+            return False
+        if any(token in alt for token in ("avatar", "profile photo", "emoji", "icon")):
+            return True
+        parent_link = img.find_parent("a", href=True)
+        if parent_link and "/photo/" not in parent_link.get("href", "") and "/status/" not in parent_link.get("href", ""):
+            if "pbs.twimg.com/media/" not in src and "video_thumb" not in src:
+                return True
+        return False
+
+    @staticmethod
+    def _twitter_node_has_block_children(node):
+        for child in getattr(node, "children", []):
+            if getattr(child, "name", None) in {"p", "div", "ul", "ol", "li", "blockquote", "pre", "h1", "h2", "h3"}:
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_twitter_markup_fragment(node):
+        fragment = BeautifulSoup(str(node), "html.parser")
+        root = fragment.find()
+        if not root:
+            return ""
+
+        for img in root.find_all("img"):
+            img.decompose()
+
+        for tag in root.find_all(True):
+            style = (tag.get("style") or "").lower()
+            classes = " ".join(tag.get("class") or []).lower()
+            is_bold = (
+                tag.name in {"strong", "b"}
+                or "font-weight" in style and any(token in style for token in ("bold", "600", "700", "800", "900"))
+                or any(token in classes for token in ("bold", "semibold", "fontbold", "font-semibold"))
+            )
+            is_italic = (
+                tag.name in {"em", "i"}
+                or "font-style:italic" in style
+                or "italic" in classes
+            )
+
+            if tag.name == "span":
+                if is_bold:
+                    tag.name = "strong"
+                elif is_italic:
+                    tag.name = "em"
+                else:
+                    tag.unwrap()
+                    continue
+
+            if tag.name == "a":
+                href = (tag.get("href") or "").strip()
+                tag.attrs = {"href": href} if href else {}
+                continue
+
+            if tag.name in {"strong", "b"}:
+                tag.name = "strong"
+                tag.attrs = {}
+            elif tag.name in {"em", "i"}:
+                tag.name = "em"
+                tag.attrs = {}
+            elif tag.name == "br":
+                tag.attrs = {}
+            elif tag.name not in {"p", "div", "blockquote", "pre", "code", "ul", "ol", "li", "h1", "h2", "h3"}:
+                tag.attrs = {}
+
+        html = str(root)
+        html = re.sub(r">\s+<", "><", html)
+        return html.strip()
+
+    @staticmethod
+    def _extract_twitter_dom_sequence(best_article):
+        blocks = []
+        seen_text = set()
+        seen_images = set()
+        consumed_nodes = set()
+
+        for node in best_article.find_all(True):
+            node_id = id(node)
+            if node_id in consumed_nodes:
+                continue
+
+            if node.name == "img":
+                if Fetcher._is_twitter_decorative_image(node):
+                    continue
+                src = (node.get("src") or "").strip()
+                if src and src not in seen_images:
+                    seen_images.add(src)
+                    blocks.append(("image", src))
+                continue
+
+            is_text_candidate = False
+            if node.get("data-testid") == "tweetText":
+                is_text_candidate = True
+            elif node.name in {"p", "blockquote", "pre", "li", "h1", "h2", "h3"}:
+                is_text_candidate = True
+            elif node.name == "div" and node.get_text(" ", strip=True) and not Fetcher._twitter_node_has_block_children(node):
+                is_text_candidate = True
+
+            if not is_text_candidate:
+                continue
+
+            if node.find_parent(attrs={"data-testid": "tweetText"}) and node.get("data-testid") != "tweetText":
+                continue
+
+            text = re.sub(r"\s+", " ", node.get_text(" ", strip=True)).strip()
+            if len(text) < 2:
+                continue
+            if text.lower() in seen_text:
+                continue
+
+            html = Fetcher._normalize_twitter_markup_fragment(node)
+            if not html:
+                continue
+
+            seen_text.add(text.lower())
+            for descendant in node.find_all(True):
+                consumed_nodes.add(id(descendant))
+            consumed_nodes.add(node_id)
+            blocks.append(("html", html))
+
+        return blocks
+
+    @staticmethod
+    def _extract_twitter_dom_content(html_content, source_url=None):
+        """
+        Preserve the main tweet/article DOM when browser fetching succeeded.
+        This keeps inline styles like <strong> and embedded images instead of flattening to plain text.
+        """
+        if not html_content:
+            return None
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        target_status_id = Fetcher._extract_twitter_status_id(source_url)
+
+        def _score_article(article):
+            score = 0
+            text_length = len(article.get_text(" ", strip=True))
+            score += min(text_length, 1000)
+            if article.find(attrs={"data-testid": "tweetText"}):
+                score += 500
+            if article.find("img"):
+                score += 120 * len(article.find_all("img"))
+            if target_status_id:
+                for link in article.find_all("a", href=True):
+                    if f"/status/{target_status_id}" in link.get("href", ""):
+                        score += 400
+                        break
+            return score
+
+        best_article = None
+        articles = soup.find_all("article")
+        if articles:
+            best_article = max(articles, key=_score_article)
+
+        kind = "tweet"
+        if source_url and Fetcher._is_twitter_article_url(source_url):
+            kind = "article"
+            main = soup.find("main")
+            if main and len(main.get_text(" ", strip=True)) > 80:
+                best_article = main
+
+        if not best_article:
+            return None
+
+        blocks = Fetcher._extract_twitter_dom_sequence(best_article)
+        if not blocks:
+            return None
+        text_length = sum(len(re.sub(r"<[^>]+>", "", value)) for kind, value in blocks if kind == "html")
+        image_count = sum(1 for kind, _ in blocks if kind == "image")
+        if text_length < 20 and image_count == 0:
+            return None
+
+        title = None
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        if not title:
+            title = "X Post" if kind == "tweet" else "X Article"
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(title)}</title>",
+            "</head><body><article>",
+        ]
+        if source_url:
+            html_parts.append(f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>")
+        for kind_name, value in blocks:
+            if kind_name == "image":
+                html_parts.append(f"<p><img src='{escape(value)}' alt='tweet media'></p>")
+            else:
+                html_parts.append(value)
+        html_parts.append("</article></body></html>")
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
 
     @staticmethod
     def _convert_twitter_cli_json_to_html(payload, source_url):
@@ -677,11 +1366,13 @@ class Fetcher:
 
         lines = []
         for key in ("articleText", "full_text", "fullText", "text", "raw_text", "rawText"):
-            lines.extend(Fetcher._extract_twitter_text_lines(data.get(key)))
+            lines.extend(Fetcher._extract_twitter_rich_text_html(data.get(key)))
             if lines:
                 break
         if not lines:
-            lines = Fetcher._extract_twitter_text_lines(data)
+            lines = Fetcher._extract_twitter_rich_text_html(data)
+        if not lines:
+            lines = [escape(line) for line in Fetcher._extract_twitter_text_lines(data)]
         if not lines:
             return None
 
@@ -699,7 +1390,7 @@ class Fetcher:
             html_parts.append(f"<p>Author: {escape(author_name)}</p>")
 
         for line in lines:
-            html_parts.append(f"<p>{escape(line)}</p>")
+            html_parts.append(f"<p>{line}</p>")
 
         for media_url in Fetcher._extract_twitter_media_urls(data):
             html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
@@ -856,6 +1547,14 @@ class Fetcher:
                 )
             if html:
                 return html
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        fallback_html = Fetcher._fetch_twitter_status_fallbacks(
+            url, proxies=req_proxies
+        )
+        if fallback_html:
+            return fallback_html
         return None
 
     @staticmethod
@@ -1112,26 +1811,11 @@ class Fetcher:
         doc_title = article_title or f"{title_base} - X Post"
         kind = "article" if article_title else "tweet"
 
-        lines = []
-        content = article.get("content") or {}
-        blocks = content.get("blocks") or []
-        if isinstance(blocks, list):
-            for block in blocks:
-                if not isinstance(block, dict):
-                    continue
-                text = (block.get("text") or "").strip()
-                if text:
-                    lines.extend([p.strip() for p in text.splitlines() if p.strip()])
+        if kind == "article":
+            Fetcher._log_fx_article_structure(article)
 
-        if not lines:
-            text = (tweet.get("text") or "").strip()
-            if not text:
-                raw_text = tweet.get("raw_text") or {}
-                text = (raw_text.get("text") or "").strip()
-            if text:
-                lines.extend([p.strip() for p in text.splitlines() if p.strip()])
-
-        if not lines:
+        body_blocks = Fetcher._extract_fx_block_sequence(article, tweet)
+        if not body_blocks:
             return None
 
         html_parts = [
@@ -1144,33 +1828,29 @@ class Fetcher:
         if screen_name:
             html_parts.append(f"<p>Author: @{escape(screen_name)}</p>")
 
-        for line in lines:
-            html_parts.append(f"<p>{escape(line)}</p>")
-
-        image_urls = []
-        cover_media = article.get("cover_media") or {}
-        cover_info = cover_media.get("media_info") or {}
-        cover_url = (cover_info.get("original_img_url") or "").strip()
-        if cover_url and cover_url not in image_urls:
-            image_urls.append(cover_url)
-
-        media_entities = article.get("media_entities") or []
-        if isinstance(media_entities, list):
-            for item in media_entities:
-                if not isinstance(item, dict):
-                    continue
-                media_info = item.get("media_info") or {}
-                media_url = (media_info.get("original_img_url") or "").strip()
-                if media_url and media_url not in image_urls:
-                    image_urls.append(media_url)
-
-        for media_url in image_urls:
-            html_parts.append(
-                f"<p><img src='{escape(media_url)}' alt='tweet media'></p>"
-            )
+        html_parts.extend(body_blocks)
 
         html_parts.append("</article></body></html>")
         return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
+
+    @staticmethod
+    def _fetch_twitter_status_fallbacks(url, proxies=None, article_target_url=None):
+        """
+        Try status-id based fallback endpoints that do not require loading x.com directly.
+        Prefer syndication for tweets, then fxTwitter for both tweets/articles.
+        """
+        syndication_html = Fetcher._fetch_twitter_syndication_html(url, proxies=proxies)
+        if syndication_html:
+            logger.info("Using Twitter/X syndication fallback content")
+            return syndication_html
+
+        target_url = article_target_url or url
+        fxapi_html = Fetcher._fetch_twitter_fxapi_html(target_url, proxies=proxies)
+        if fxapi_html:
+            logger.info("Using fxTwitter API fallback content")
+            return fxapi_html
+
+        return None
 
     @staticmethod
     def _extract_twitter_structured_content(html_content, source_url=None):
@@ -1901,17 +2581,11 @@ class Fetcher:
                 logger.info(
                     "oEmbed returned placeholder/login text, trying syndication fallback"
                 )
-                syndication_html = Fetcher._fetch_twitter_syndication_html(
+                fallback_html = Fetcher._fetch_twitter_status_fallbacks(
                     url, proxies=req_proxies
                 )
-                if syndication_html:
-                    logger.info("Using Twitter/X syndication fallback content")
-                    return syndication_html
-
-                fxapi_html = Fetcher._fetch_twitter_fxapi_html(url, proxies=req_proxies)
-                if fxapi_html:
-                    logger.info("Using fxTwitter API fallback content")
-                    return fxapi_html
+                if fallback_html:
+                    return fallback_html
 
                 logger.info(
                     "Syndication fallback unavailable, falling back to browser fetch"
@@ -1952,17 +2626,24 @@ class Fetcher:
                     article_html
                 ):
                     return Fetcher._tag_twitter_html_content(article_html, "article")
-                fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                    article_target_url, proxies=req_proxies
+                fallback_html = Fetcher._fetch_twitter_status_fallbacks(
+                    url,
+                    proxies=req_proxies,
+                    article_target_url=article_target_url,
                 )
-                if fxapi_html:
-                    logger.info("Using fxTwitter API fallback for Twitter Article")
-                    return fxapi_html
+                if fallback_html:
+                    return fallback_html
                 return article_html
 
             return html_content
         except requests.exceptions.RequestException as e:
-            logger.warning(f"oEmbed API failed ({e}), falling back to browser fetch")
+            logger.warning(f"oEmbed API failed ({e}), trying status-id fallbacks")
+            fallback_html = Fetcher._fetch_twitter_status_fallbacks(
+                url, proxies=req_proxies
+            )
+            if fallback_html:
+                return fallback_html
+            logger.warning("Status-id fallbacks unavailable, falling back to browser fetch")
             return None
 
     @staticmethod
@@ -2236,17 +2917,26 @@ class Fetcher:
                         )
                         return None
 
+                    # Clean Twitter Article content if needed
+                    if is_twitter_article:
+                        logger.info("Cleaning Twitter Article content...")
+                        content = Fetcher._clean_twitter_article_content(content)
+
+                    dom_content = Fetcher._extract_twitter_dom_content(
+                        content, source_url=twitter_target_url
+                    )
+                    if dom_content:
+                        logger.info("Using preserved Twitter/X DOM content")
+                        return dom_content
+
                     structured = Fetcher._extract_twitter_structured_content(
                         content, source_url=twitter_target_url
                     )
                     if structured:
                         logger.info("Using structured Twitter/X content extraction")
-                        return structured
-
-                    # Clean Twitter Article content if needed
-                    if is_twitter_article:
-                        logger.info("Cleaning Twitter Article content...")
-                        content = Fetcher._clean_twitter_article_content(content)
+                        return Fetcher._tag_twitter_html_content(
+                            structured, "article" if is_twitter_article else "tweet"
+                        )
 
                 return content
             except Exception as e:
@@ -3742,12 +4432,12 @@ class ContentProcessor:
             if source_site_tag
             else ""
         )
-        if source_site == "xiaohongshu":
+        if source_site in {"xiaohongshu", "twitter"}:
             article = preprocessed_soup.find("article")
             preserved_html = str(article) if article else str(preprocessed_soup)
             img_count = preserved_html.count("<img")
             logger.info(
-                f"Bypassing Readability for xiaohongshu. Preserved HTML length: {len(preserved_html)}, images: {img_count}"
+                f"Bypassing Readability for {source_site}. Preserved HTML length: {len(preserved_html)}, images: {img_count}"
             )
             return Document(str(preprocessed_soup)).title(), preserved_html
 
