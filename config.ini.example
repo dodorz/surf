@@ -52,6 +52,24 @@ browser =
 ; Optional browser profile hint for twitter-cli, for example: Default or Profile 2
 profile =
 
+[OCR]
+; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
+enabled = false
+; OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)
+engine = rapidocr
+; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
+; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
+lang = chi_sim+eng
+; Optional explicit path to the local tesseract executable
+tesseract_cmd =
+; OCR at most this many images per article
+max_images = 8
+; Skip very small images
+min_width = 240
+min_height = 120
+; Minimum OCR text length to keep
+min_text_length = 8
+
 [publish]
 ; Default publish target
 target = pastebin

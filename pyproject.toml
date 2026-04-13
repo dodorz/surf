@@ -45,6 +45,9 @@ dependencies = [
     "python-dateutil",
     "flask",
     "lxml>=6.0.2",
+    "pillow",
+    "rapidocr-onnxruntime",
+    "pytesseract",
 ]
 
 [project.optional-dependencies]
