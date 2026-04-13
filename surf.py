@@ -353,6 +353,7 @@ class Fetcher:
         use_browser=False,
         proxy_mode_override=None,
         custom_proxy_override=None,
+        fetch_thread=None,
         twitter_backend=None,
         twitter_cli_bin=None,
         twitter_browser=None,
@@ -392,15 +393,22 @@ class Fetcher:
                     config,
                     proxy_mode_override,
                     custom_proxy_override,
+                    fetch_thread=fetch_thread,
                     backend=twitter_backend,
                     cli_bin=twitter_cli_bin,
                     browser=twitter_browser,
                     profile=twitter_profile,
                 )
-            else:
+            elif site_name in {"bluesky", "weibo", "threads"}:
                 html_content = handler(
-                    url, config, proxy_mode_override, custom_proxy_override
+                    url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    fetch_thread=fetch_thread,
                 )
+            else:
+                html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
             if html_content:
                 return html_content
             if site_config and site_config.get("no_generic_fallback"):
@@ -1509,6 +1517,7 @@ class Fetcher:
         config,
         proxy_mode_override=None,
         custom_proxy_override=None,
+        fetch_thread=None,
         backend=None,
         cli_bin=None,
         browser=None,
@@ -1547,6 +1556,14 @@ class Fetcher:
                     url, config, proxy_mode_override, custom_proxy_override
                 )
             if html:
+                thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+                if thread_mode and Fetcher._extract_twitter_status_id(url):
+                    thread_items, thread_current_index = Fetcher._get_twitter_thread_items(
+                        url, config, proxy_mode_override, custom_proxy_override, thread_mode
+                    )
+                    html = Fetcher._merge_thread_context_into_html(
+                        html, "twitter", thread_items, thread_current_index
+                    )
                 return html
         req_proxies, _ = Fetcher._get_twitter_forced_proxies(
             config, proxy_mode_override, custom_proxy_override
@@ -1555,6 +1572,14 @@ class Fetcher:
             url, proxies=req_proxies
         )
         if fallback_html:
+            thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+            if thread_mode and Fetcher._extract_twitter_status_id(url):
+                thread_items, thread_current_index = Fetcher._get_twitter_thread_items(
+                    url, config, proxy_mode_override, custom_proxy_override, thread_mode
+                )
+                fallback_html = Fetcher._merge_thread_context_into_html(
+                    fallback_html, "twitter", thread_items, thread_current_index
+                )
             return fallback_html
         return None
 
@@ -2968,6 +2993,431 @@ class Fetcher:
                         logger.debug(f"Ignoring browser close error: {close_error}")
 
     @staticmethod
+    def _normalize_thread_author_key(author):
+        if not author:
+            return ""
+        return re.sub(r"\s+", " ", str(author).strip()).lower()
+
+    @staticmethod
+    def _escape_thread_text(text):
+        return escape(text or "").replace("\n", "<br>")
+
+    @staticmethod
+    def _render_thread_post_block(item, heading):
+        author = escape(item.get("author") or "Unknown")
+        handle = escape(item.get("handle") or "")
+        timestamp = escape(item.get("timestamp") or "")
+        permalink = escape(item.get("permalink") or "")
+        text_html = Fetcher._escape_thread_text(item.get("text") or "")
+
+        html_parts = ["<section class='surf-thread-post'>", f"<h2>{escape(heading)}</h2>"]
+        meta_parts = [f"<strong>{author}</strong>"]
+        if handle:
+            meta_parts.append(handle)
+        if timestamp:
+            meta_parts.append(timestamp)
+        if meta_parts:
+            html_parts.append(f"<p>{' | '.join(meta_parts)}</p>")
+        if text_html:
+            html_parts.append(f"<p>{text_html}</p>")
+        if permalink:
+            html_parts.append(f"<p><a href=\"{permalink}\">View post</a></p>")
+        html_parts.append("</section>")
+        return "".join(html_parts)
+
+    @staticmethod
+    def _normalize_thread_mode(fetch_thread, default_mode="backward"):
+        if fetch_thread is False:
+            return None
+        if isinstance(fetch_thread, str):
+            mode = fetch_thread.strip().lower()
+            if mode in {"forward", "backward", "both"}:
+                return mode
+        return default_mode
+
+    @staticmethod
+    def _ensure_source_site_meta(html_content, site_name):
+        if not html_content:
+            return html_content
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            head = soup.find("head")
+            if not head:
+                head = soup.new_tag("head")
+                if soup.html:
+                    soup.html.insert(0, head)
+                else:
+                    html = soup.new_tag("html")
+                    html.append(head)
+                    body = soup.new_tag("body")
+                    for child in list(soup.contents):
+                        body.append(child.extract())
+                    html.append(body)
+                    soup.append(html)
+            source_meta = soup.find("meta", attrs={"name": "surf-source-site"})
+            if not source_meta:
+                source_meta = soup.new_tag("meta")
+                source_meta.attrs["name"] = "surf-source-site"
+                head.append(source_meta)
+            source_meta.attrs["content"] = site_name
+            return str(soup)
+        except Exception:
+            return html_content
+
+    @staticmethod
+    def _merge_thread_context_into_html(html_content, site_name, thread_items, current_index=None):
+        if not html_content or not thread_items:
+            return Fetcher._ensure_source_site_meta(html_content, site_name)
+
+        if current_index is None or current_index < 0 or current_index >= len(thread_items):
+            current_index = len(thread_items) - 1
+
+        before_items = thread_items[:current_index]
+        after_items = thread_items[current_index + 1 :]
+        if not before_items and not after_items:
+            return Fetcher._ensure_source_site_meta(html_content, site_name)
+
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            article = soup.find("article")
+            if not article:
+                body = soup.find("body")
+                article = soup.new_tag("article")
+                if body:
+                    for child in list(body.contents):
+                        article.append(child.extract())
+                    body.append(article)
+                else:
+                    soup.append(article)
+
+            section = soup.new_tag("section")
+            section.attrs["class"] = ["surf-thread-context"]
+
+            title = soup.new_tag("h2")
+            title.string = "Thread Context"
+            section.append(title)
+
+            for item in before_items:
+                fragment = BeautifulSoup(Fetcher._render_thread_post_block(item, "Earlier Post"), "html.parser")
+                for child in fragment.contents:
+                    section.append(child)
+
+            for item in after_items:
+                fragment = BeautifulSoup(Fetcher._render_thread_post_block(item, "Later Reply"), "html.parser")
+                for child in fragment.contents:
+                    section.append(child)
+
+            article.insert(0, section)
+            return Fetcher._ensure_source_site_meta(str(soup), site_name)
+        except Exception as e:
+            logger.warning(f"Failed to merge thread context: {e}")
+            return Fetcher._ensure_source_site_meta(html_content, site_name)
+
+    @staticmethod
+    def _render_social_thread_html(site_name, page_url, thread_items, current_index=None):
+        if not thread_items:
+            return None
+
+        site_labels = {
+            "bluesky": "Bluesky",
+            "threads": "Threads",
+            "weibo": "Weibo",
+        }
+        site_label = site_labels.get(site_name, site_name.title())
+        if current_index is None or current_index < 0 or current_index >= len(thread_items):
+            current_index = len(thread_items) - 1
+
+        current = thread_items[current_index]
+        author = escape(current.get("author") or "Unknown")
+        before_items = thread_items[:current_index]
+        after_items = thread_items[current_index + 1 :]
+
+        html_parts = [
+            "<!DOCTYPE html>",
+            "<html lang=\"en\"><head>",
+            "<meta charset=\"utf-8\">",
+            f"<title>{site_label} Post by {author}</title>",
+            f"<meta name=\"surf-source-site\" content=\"{escape(site_name)}\">",
+            "</head><body><article>",
+            f"<h1>{site_label} Post</h1>",
+        ]
+
+        if before_items or after_items:
+            html_parts.append("<section class='surf-thread-context'><h2>Thread Context</h2>")
+            for item in before_items:
+                html_parts.append(Fetcher._render_thread_post_block(item, "Earlier Post"))
+            for item in after_items:
+                html_parts.append(Fetcher._render_thread_post_block(item, "Later Reply"))
+            html_parts.append("</section>")
+
+        html_parts.append(Fetcher._render_thread_post_block(current, "Current Post"))
+        html_parts.append(f"<p><a href=\"{escape(page_url)}\">View on {site_label}</a></p>")
+        html_parts.append("</article></body></html>")
+        return "".join(html_parts)
+
+    @staticmethod
+    def _extract_same_author_thread_items(items, current_index, mode):
+        if not items:
+            return [], -1
+        if current_index is None or current_index < 0 or current_index >= len(items):
+            current_index = len(items) - 1
+        if not mode:
+            return [items[current_index]], 0
+
+        current = items[current_index]
+        current_author_key = current.get("author_key", "")
+        start_index = current_index
+        end_index = current_index
+
+        if mode in {"forward", "both"} and current_author_key:
+            while start_index > 0:
+                previous = items[start_index - 1]
+                if previous.get("author_key", "") != current_author_key:
+                    break
+                start_index -= 1
+        if mode in {"backward", "both"} and current_author_key:
+            while end_index + 1 < len(items):
+                following = items[end_index + 1]
+                if following.get("author_key", "") != current_author_key:
+                    break
+                end_index += 1
+
+        return items[start_index : end_index + 1], current_index - start_index
+
+    @staticmethod
+    def _fetch_social_thread_page(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        fetch_thread=None,
+    ):
+        site_name = "threads" if "threads.net" in url.lower() else "weibo"
+        thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+
+        from playwright.sync_api import sync_playwright
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        with sync_playwright() as p:
+            launch_args = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+
+            browser = p.chromium.launch(**launch_args)
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            page = context.new_page()
+
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(4000)
+
+                data = page.evaluate(
+                    """(args) => {
+                        const site = args.site;
+                        const threadMode = args.threadMode || '';
+                        const currentUrl = window.location.href;
+                        const urlMatch = currentUrl.match(site === 'threads'
+                            ? /\\/post\\/([^/?#]+)/
+                            : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)\\?/);
+                        const targetId = urlMatch ? (urlMatch[2] || urlMatch[3] || urlMatch[1] || '') : '';
+
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const textFrom = (node, selectors) => {
+                            for (const selector of selectors) {
+                                const found = node.querySelector(selector);
+                                if (found && clean(found.innerText)) return clean(found.innerText);
+                            }
+                            return '';
+                        };
+
+                        const allNodes = Array.from(document.querySelectorAll('article, [role="article"]'));
+                        const items = allNodes.map((node, index) => {
+                            const links = Array.from(node.querySelectorAll('a[href]')).map(a => a.href);
+                            const permalink = links.find(href => {
+                                if (site === 'threads') return /\\/post\\//.test(href);
+                                return /m\\.weibo\\.cn|weibo\\.com/.test(href);
+                            }) || '';
+
+                            let author = '';
+                            let handle = '';
+                            let timestamp = textFrom(node, ['time', 'a time']);
+                            let text = '';
+
+                            if (site === 'threads') {
+                                author = textFrom(node, ['h1', 'h2', 'h3', '[data-pressable-container="true"] span']);
+                                handle = links.find(href => /threads\\.net\\/@/.test(href)) || '';
+                                const textNode = Array.from(node.querySelectorAll('span, div')).find(el => {
+                                    const textValue = clean(el.innerText);
+                                    return textValue && textValue.length > 20;
+                                });
+                                text = textNode ? clean(textNode.innerText) : '';
+                            } else {
+                                author = textFrom(node, ['header span', 'h1', 'h2', '.m-text-cut', '.wbpro-screen-box span']);
+                                handle = links.find(href => /\\/(u|n)\\//.test(href)) || '';
+                                const textNode = node.querySelector('[data-testid="post-content"], .detail_wbtext_4CRf9, .wbpro-feed-content, .weibo-text');
+                                text = textNode ? clean(textNode.innerText) : clean(node.innerText);
+                            }
+
+                            const authorKey = clean(author).toLowerCase();
+                            const permalinkIdMatch = permalink.match(site === 'threads'
+                                ? /\\/post\\/([^/?#]+)/
+                                : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)$/);
+                            const permalinkId = permalinkIdMatch ? (permalinkIdMatch[2] || permalinkIdMatch[3] || permalinkIdMatch[1] || '') : '';
+
+                            return {
+                                index,
+                                author,
+                                authorKey,
+                                handle,
+                                timestamp,
+                                text,
+                                permalink,
+                                permalinkId,
+                            };
+                        }).filter(item => item.author && item.text);
+
+                        if (!items.length) return { items: [] };
+
+                        let currentIndex = items.length - 1;
+                        if (targetId) {
+                            const matchedIndex = items.findIndex(item => item.permalinkId && item.permalinkId === targetId);
+                            if (matchedIndex >= 0) currentIndex = matchedIndex;
+                        }
+
+                        let startIndex = currentIndex;
+                        let endIndex = currentIndex;
+                        if ((threadMode === 'forward' || threadMode === 'both') && items[currentIndex].authorKey) {
+                            while (startIndex > 0 && items[startIndex - 1].authorKey === items[currentIndex].authorKey) {
+                                startIndex -= 1;
+                            }
+                        }
+                        if ((threadMode === 'backward' || threadMode === 'both') && items[currentIndex].authorKey) {
+                            while (endIndex + 1 < items.length && items[endIndex + 1].authorKey === items[currentIndex].authorKey) {
+                                endIndex += 1;
+                            }
+                        }
+
+                        return { items: items.slice(startIndex, endIndex + 1), currentIndex: currentIndex - startIndex };
+                    }""",
+                    {"site": site_name, "threadMode": thread_mode or ""},
+                )
+
+                items = []
+                for item in data.get("items", []):
+                    normalized = {
+                        "author": (item.get("author") or "").strip(),
+                        "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
+                        "handle": (item.get("handle") or "").strip(),
+                        "timestamp": (item.get("timestamp") or "").strip(),
+                        "text": (item.get("text") or "").strip(),
+                        "permalink": (item.get("permalink") or "").strip(),
+                    }
+                    if normalized["author"] and normalized["text"]:
+                        items.append(normalized)
+
+                if not items:
+                    return None
+
+                return Fetcher._render_social_thread_html(
+                    site_name, url, items, data.get("currentIndex", len(items) - 1)
+                )
+            except Exception as e:
+                logger.warning(f"{site_name} social thread handler failed: {e}")
+                return None
+            finally:
+                context.close()
+                browser.close()
+
+    @staticmethod
+    def _get_twitter_thread_items(
+        url, config, proxy_mode_override=None, custom_proxy_override=None, thread_mode="backward"
+    ):
+        try:
+            from playwright.sync_api import sync_playwright
+
+            _, pw_proxy = Fetcher._get_twitter_forced_proxies(
+                config, proxy_mode_override, custom_proxy_override
+            )
+
+            with sync_playwright() as p:
+                launch_args = {
+                    "headless": True,
+                    "args": ["--disable-blink-features=AutomationControlled"],
+                }
+                if pw_proxy:
+                    launch_args["proxy"] = pw_proxy
+
+                browser = p.chromium.launch(**launch_args)
+                context = Fetcher._create_stealth_context(
+                    browser, url, auth_site_name="twitter"
+                )
+                page = context.new_page()
+
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(5000)
+                    data = page.evaluate(
+                        """(targetStatusId) => {
+                            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                            const articles = Array.from(document.querySelectorAll("article[data-testid='tweet']"));
+                            const items = articles.map((article) => {
+                                const authorNode = article.querySelector("[data-testid='User-Name']");
+                                const textNode = article.querySelector("[data-testid='tweetText']");
+                                const links = Array.from(article.querySelectorAll("a[href*='/status/']"));
+                                const permalink = (links.find(link => /\\/status\\/\\d+/.test(link.href)) || {}).href || '';
+                                const statusMatch = permalink.match(/\\/status\\/(\\d+)/);
+                                return {
+                                    author: clean(authorNode ? authorNode.innerText.split('@')[0] : ''),
+                                    timestamp: clean((links.find(link => link.querySelector('time')) || {}).innerText || ''),
+                                    text: clean(textNode ? textNode.innerText : ''),
+                                    permalink,
+                                    statusId: statusMatch ? statusMatch[1] : '',
+                                };
+                            }).filter(item => item.author && item.text);
+
+                            return { items, currentIndex: items.findIndex(item => item.statusId === targetStatusId) };
+                        }""",
+                        Fetcher._extract_twitter_status_id(url) or "",
+                    )
+
+                    items = []
+                    for item in data.get("items", []):
+                        items.append(
+                            {
+                                "author": item.get("author", ""),
+                                "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
+                                "handle": "",
+                                "timestamp": item.get("timestamp", ""),
+                                "text": item.get("text", ""),
+                                "permalink": item.get("permalink", ""),
+                            }
+                        )
+
+                    if not items:
+                        return []
+
+                    current_index = data.get("currentIndex", -1)
+                    if current_index is None or current_index < 0:
+                        current_index = len(items) - 1
+
+                    return Fetcher._extract_same_author_thread_items(
+                        items, current_index, thread_mode
+                    )
+                finally:
+                    context.close()
+                    browser.close()
+        except Exception as e:
+            logger.warning(f"Failed to fetch Twitter/X thread items: {e}")
+            return [], -1
+
+    @staticmethod
     def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
         """
         Resolve xhslink.com short URL to full xiaohongshu.com URL.
@@ -3987,7 +4437,13 @@ class Fetcher:
                 browser.close()
 
     @staticmethod
-    def _fetch_bluesky(url, config, proxy_mode_override=None, custom_proxy_override=None):
+    def _fetch_bluesky(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        fetch_thread=None,
+    ):
         """
         Fetch Bluesky post using the official public API.
         Uses app.bsky.feed.getPostThread to get the post and its replies.
@@ -4052,122 +4508,114 @@ class Fetcher:
                 logger.warning("No post record found in Bluesky API response")
                 return None
 
-            # Extract post data
             author = post.get("author", {})
-            author_name = author.get("displayName") or author.get("handle", "Unknown")
-            author_handle = author.get("handle", "")
+            original_author_key = (
+                author.get("did")
+                or author.get("handle")
+                or author.get("displayName")
+                or "unknown"
+            )
 
-            text = record.get("text", "")
-            created_at = record.get("createdAt", "")
+            thread_items = []
 
-            # Format created date
-            formatted_date = created_at
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-            except Exception:
-                pass
+            def append_post_item(post_data):
+                if not isinstance(post_data, dict):
+                    return
+                record_data = post_data.get("record", {})
+                author_data = post_data.get("author", {})
+                author_name = author_data.get("displayName") or author_data.get("handle", "Unknown")
+                author_handle = author_data.get("handle", "")
+                created_at = record_data.get("createdAt", "")
+                thread_items.append(
+                    {
+                        "author": author_name,
+                        "author_key": Fetcher._normalize_thread_author_key(
+                            author_data.get("did") or author_handle or author_name
+                        ),
+                        "handle": f"@{author_handle}" if author_handle else "",
+                        "timestamp": created_at,
+                        "text": record_data.get("text", ""),
+                        "permalink": url if post_data is post else "",
+                    }
+                )
 
-            # Get engagement stats
-            stats = []
-            like_count = post.get("likeCount", 0)
-            repost_count = post.get("repostCount", 0)
-            reply_count = post.get("replyCount", 0)
+            thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+            if thread_mode in {"forward", "both"}:
+                parent = thread.get("parent")
+                ancestors = []
+                while isinstance(parent, dict):
+                    parent_post = parent.get("post", {})
+                    parent_author = parent_post.get("author", {})
+                    parent_author_key = (
+                        parent_author.get("did")
+                        or parent_author.get("handle")
+                        or parent_author.get("displayName")
+                        or ""
+                    )
+                    if parent_author_key != original_author_key:
+                        break
+                    ancestors.append(parent_post)
+                    parent = parent.get("parent")
+                for ancestor in reversed(ancestors):
+                    append_post_item(ancestor)
 
-            if like_count:
-                stats.append(f"{like_count} likes")
-            if repost_count:
-                stats.append(f"{repost_count} reposts")
-            if reply_count:
-                stats.append(f"{reply_count} replies")
+            append_post_item(post)
 
-            # Get embedded media
+            current_index = len(thread_items) - 1
+
+            if thread_mode in {"backward", "both"}:
+                replies = thread.get("replies", [])
+                cursor = replies[0] if replies else None
+                while isinstance(cursor, dict):
+                    reply_post = cursor.get("post", {})
+                    reply_author = reply_post.get("author", {})
+                    reply_author_key = (
+                        reply_author.get("did")
+                        or reply_author.get("handle")
+                        or reply_author.get("displayName")
+                        or ""
+                    )
+                    if reply_author_key != original_author_key:
+                        break
+                    append_post_item(reply_post)
+                    nested_replies = cursor.get("replies", [])
+                    cursor = nested_replies[0] if nested_replies else None
+
+            html_content = Fetcher._render_social_thread_html(
+                "bluesky", url, thread_items, current_index
+            )
+
             embed = record.get("embed", {})
-            embed_images = []
-            embed_external = None
-
+            extra_parts = []
             if embed.get("$type") == "app.bsky.embed.images":
                 images = embed.get("images", [])
                 for img in images:
                     img_ref = img.get("image", {}).get("ref", {}).get("$link", "")
                     if img_ref:
-                        img_url = f"https://cdn.bsky.app/img/feed_thumbnail/plain/{did}/{img_ref}@jpeg"
-                        embed_images.append(img_url)
-
+                        extra_parts.append(
+                            f'<img src="https://cdn.bsky.app/img/feed_thumbnail/plain/{did}/{img_ref}@jpeg" style="max-width: 100%; margin: 0.5em 0;"><br>'
+                        )
             elif embed.get("$type") == "app.bsky.embed.external":
                 external = embed.get("external", {})
-                embed_external = {
-                    "title": external.get("title", ""),
-                    "description": external.get("description", ""),
-                    "uri": external.get("uri", "")
-                }
+                uri = external.get("uri", "")
+                title = external.get("title", "") or uri
+                description = external.get("description", "")
+                extra_parts.append("<div style='border: 1px solid #ccc; padding: 1em; margin: 1em 0;'>")
+                extra_parts.append(f"<p><strong>Link:</strong> <a href=\"{escape(uri)}\">{escape(title)}</a></p>")
+                if description:
+                    extra_parts.append(f"<p>{escape(description)}</p>")
+                extra_parts.append("</div>")
 
-            # Build HTML
-            html_parts = [
-                "<!DOCTYPE html>",
-                "<html lang=\"en\"><head>",
-                "<meta charset=\"utf-8\">",
-                f"<title>Bluesky Post by {author_name}</title>",
-                "</head><body>",
-                "<article>",
-                f"<h1>Bluesky Post</h1>",
-                f"<p><strong>Author:</strong> {author_name} (@{author_handle})</p>",
-                f"<p><strong>Posted:</strong> {formatted_date}</p>",
-            ]
+            if extra_parts and html_content:
+                soup = BeautifulSoup(html_content, "html.parser")
+                article = soup.find("article")
+                if article:
+                    fragment = BeautifulSoup("".join(extra_parts), "html.parser")
+                    for child in fragment.contents:
+                        article.append(child)
+                html_content = str(soup)
 
-            if stats:
-                html_parts.append(f"<p>{' | '.join(stats)}</p>")
-
-            html_parts.append("<hr>")
-
-            # Post text
-            if text:
-                # Convert newlines to <br>
-                formatted_text = text.replace("\\n", "<br>")
-                html_parts.append(f"<div style='font-size: 1.1em; margin: 1em 0;'>{formatted_text}</div>")
-
-            # Embedded images
-            if embed_images:
-                html_parts.append("<div>")
-                for img_url in embed_images:
-                    html_parts.append(f'<img src="{img_url}" style="max-width: 100%; margin: 0.5em 0;"><br>')
-                html_parts.append("</div>")
-
-            # External link card
-            if embed_external:
-                html_parts.append("<div style='border: 1px solid #ccc; padding: 1em; margin: 1em 0;'>")
-                html_parts.append(f"<p><strong>Link:</strong> <a href=\"{embed_external['uri']}\">{embed_external['title'] or embed_external['uri']}</a></p>")
-                if embed_external['description']:
-                    html_parts.append(f"<p>{embed_external['description']}</p>")
-                html_parts.append("</div>")
-
-            html_parts.append(f'<p><a href="{url}">View on Bluesky</a></p>')
-            html_parts.append("</article>")
-
-            # Process replies
-            replies = thread.get("replies", [])
-            if replies:
-                html_parts.append("<h2>Replies</h2>")
-
-                for reply in replies[:20]:  # Limit to 20 replies
-                    reply_post = reply.get("post", {})
-                    reply_record = reply_post.get("record", {})
-                    reply_author = reply_post.get("author", {})
-
-                    reply_author_name = reply_author.get("displayName") or reply_author.get("handle", "Unknown")
-                    reply_text = reply_record.get("text", "")
-                    reply_date = reply_record.get("createdAt", "")
-
-                    html_parts.append("<div style='border-left: 3px solid #ccc; padding-left: 1em; margin: 1em 0;'>")
-                    html_parts.append(f"<p><strong>{reply_author_name}</strong> <small>{reply_date}</small></p>")
-                    if reply_text:
-                        html_parts.append(f"<p>{reply_text.replace(chr(10), '<br>')}</p>")
-                    html_parts.append("</div>")
-
-            html_parts.append("</body></html>")
-
-            return "".join(html_parts)
+            return html_content
 
         except Exception as e:
             logger.warning(f"Bluesky handler failed: {e}")
@@ -4196,6 +4644,7 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?x\.com/",
         ],
         "handler": Fetcher._fetch_twitter_content,
+        "default_thread": True,
     },
     "wechat": {
         "patterns": [
@@ -4257,6 +4706,22 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://bsky\.app/profile/[^/]+/post/",
         ],
         "handler": Fetcher._fetch_bluesky,
+        "default_thread": True,
+    },
+    "weibo": {
+        "patterns": [
+            r"^https?://(www\.)?weibo\.com/",
+            r"^https?://m\.weibo\.cn/",
+        ],
+        "handler": Fetcher._fetch_social_thread_page,
+        "default_thread": True,
+    },
+    "threads": {
+        "patterns": [
+            r"^https?://(www\.)?threads\.net/@[^/]+/post/",
+        ],
+        "handler": Fetcher._fetch_social_thread_page,
+        "default_thread": True,
     },
 }
 
@@ -4434,7 +4899,7 @@ class ContentProcessor:
             if source_site_tag
             else ""
         )
-        if source_site in {"xiaohongshu", "twitter"}:
+        if source_site in {"xiaohongshu", "twitter", "bluesky", "weibo", "threads"}:
             article = preprocessed_soup.find("article")
             preserved_html = str(article) if article else str(preprocessed_soup)
             img_count = preserved_html.count("<img")
@@ -6236,14 +6701,17 @@ Examples:
   surf -x win https://example.com               # Use Windows proxy
   surf -n https://example.com                   # No proxy
   surf -hrn https://example.com                 # Combined short flags
+  surf -t https://x.com/user/status/123         # Fetch same-author later replies in the thread
+  surf --thread forward https://x.com/user/status/123
 
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
                         Override with -x/--proxy and -l/--lang if needed.
   Twitter/X:           Always uses proxy settings.
-                       Defaults to the same proxy behavior as `-x win`.
-                       Default backend prefers `uvx --from twitter-cli twitter`.
-                       `auto` backend tries CLI first, then native fallback.
+                        Defaults to the same proxy behavior as `-x win`.
+                        Default backend prefers `uvx --from twitter-cli twitter`.
+                        `auto` backend tries CLI first, then native fallback.
+  Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `backward`.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -6388,6 +6856,20 @@ Twitter/X Backend:
     parser.add_argument(
         "--browser", action="store_true", help="Force use of browser (Playwright)"
     )
+    thread_group = parser.add_mutually_exclusive_group()
+    thread_group.add_argument(
+        "-t",
+        "--thread",
+        nargs="?",
+        const="backward",
+        choices=["forward", "backward", "both"],
+        help="Thread expansion mode: backward=follow same-author later replies (default), forward=earlier context, both=both directions",
+    )
+    thread_group.add_argument(
+        "--no-thread",
+        action="store_true",
+        help="Disable thread expansion for supported social sites",
+    )
     parser.add_argument("--config", help="Path to config file")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
@@ -6486,6 +6968,12 @@ Twitter/X Backend:
     # Determine custom proxy
     custom_proxy = args.set_proxy
 
+    fetch_thread = None
+    if args.thread:
+        fetch_thread = args.thread
+    elif args.no_thread:
+        fetch_thread = False
+
     # Check if URL matches special site handlers for default policies
     handler, site_name, site_config = _get_handler_for_url(args.url)
     if site_config:
@@ -6502,6 +6990,10 @@ Twitter/X Backend:
             )
             lang_mode = "raw"
 
+        if site_config.get("default_thread") and fetch_thread is None:
+            logger.info(f"{site_name}: Applying default thread expansion policy")
+            fetch_thread = "backward"
+
     # 1. Fetch
     try:
         html_content = Fetcher.fetch(
@@ -6510,6 +7002,7 @@ Twitter/X Backend:
             use_browser=args.browser,
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
+            fetch_thread=fetch_thread,
             twitter_backend=args.twitter_backend,
             twitter_cli_bin=args.twitter_cli_bin,
             twitter_browser=args.twitter_browser,
