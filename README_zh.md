@@ -64,12 +64,10 @@ uv run python surf_web.py --host 127.0.0.1 --port 18473
 如果要对外网或局域网正式部署，请改用真正的 WSGI 服务器，并让它加载 `surf_web:app`：
 
 ```bash
-# Windows 上更适合的生产服务器
-uv add waitress
+# Windows 上更适合的生产服务器（Windows 上执行 `uv sync` 后会自动安装）
 uv run waitress-serve --listen=0.0.0.0:18473 surf_web:app
 
-# Linux 上常见的生产服务器
-uv add gunicorn
+# Linux/macOS 上常见的生产服务器（Linux/macOS 上执行 `uv sync` 后会自动安装）
 uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 ```
 

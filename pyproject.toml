@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "1.1.2.77"
+version = "1.1.2.78"
 description = "A powerful Python CLI tool that converts web pages into clean Markdown or PDF files"
 readme = "README.md"
 license = {text = "MIT"}
@@ -48,7 +48,8 @@ dependencies = [
     "pillow",
     "rapidocr-onnxruntime",
     "pytesseract",
-    "waitress>=3.0.0",
+    "waitress>=3.0.0; sys_platform == 'win32'",
+    "gunicorn>=23.0.0; sys_platform != 'win32'",
 ]
 
 [project.optional-dependencies]

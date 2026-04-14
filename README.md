@@ -65,9 +65,14 @@ We recommend using `uv` for a clean environment.
     uv sync
     uv run playwright install
     ```
+    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `rapidocr-onnxruntime` for image OCR.
 
 3.  **Optional: Install OCR engine(s) for image OCR**:
-    `surf` prefers `RapidOCR` via the Python package dependency. If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
+    `surf` prefers `RapidOCR` via the Python package dependency. If you need to install it separately, run:
+    ```bash
+    uv pip install rapidocr-onnxruntime
+    ```
+    If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
 
 ## Web UI
 
@@ -82,12 +87,10 @@ uv run python surf_web.py --host 127.0.0.1 --port 18473
 For external or public deployment, use a real WSGI server and point it at `surf_web:app`:
 
 ```bash
-# Windows-friendly production server
-uv add waitress
+# Windows-friendly production server (installed by `uv sync` on Windows)
 uv run waitress-serve --listen=0.0.0.0:18473 surf_web:app
 
-# Common Linux production server
-uv add gunicorn
+# Common Linux production server (installed by `uv sync` on Linux/macOS)
 uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 ```
 
