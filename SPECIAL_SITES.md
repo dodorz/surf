@@ -218,6 +218,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - 使用 Playwright 的 `storage_state()` 保存/恢复登录状态
 - 状态文件默认存储在 Windows 的 `%LOCALLAPPDATA%\surf\auth\` 或 Linux/macOS 的 `~/.local/cache/surf/auth/`
 - 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
+- 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数
 
 **内容提取**:
 - 标题：从 `h1` 或页面标题提取

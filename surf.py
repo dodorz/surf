@@ -3672,6 +3672,28 @@ class Fetcher:
             return None, None
 
     @staticmethod
+    def _canonicalize_xiaohongshu_source_url(url):
+        """
+        Normalize Xiaohongshu source URLs to keep only the canonical path and xsec_token.
+        This strips share-tracking query params such as source/webshare/xhsshare.
+        """
+        if not url:
+            return url
+
+        parsed = urlparse(url)
+        hostname = (parsed.netloc or "").lower()
+        if "xiaohongshu.com" not in hostname:
+            return url
+
+        query_params = parse_qs(parsed.query)
+        cleaned_params = {}
+        if "xsec_token" in query_params:
+            cleaned_params["xsec_token"] = query_params["xsec_token"]
+
+        cleaned_query = urlencode(cleaned_params, doseq=True)
+        return urlunparse(parsed._replace(query=cleaned_query, fragment=""))
+
+    @staticmethod
     def _canonicalize_xiaohongshu_image_url(url):
         """Normalize Xiaohongshu CDN image URLs for stable comparison/deduplication."""
         if not url:
@@ -4164,7 +4186,7 @@ class Fetcher:
                 html_parts = [
                     "<html><head><meta charset='utf-8'>",
                     f"<title>{title}</title>",
-                    f'<meta name="source-url" content="{url}">',
+                    f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
                     '<meta name="surf-source-site" content="xiaohongshu">',
                     "</head><body><article>",
                     f"<h1>{title}</h1>",
@@ -6075,6 +6097,17 @@ class OutputHandler:
             "source": source_url,
             "translator": translator,
         }
+
+        source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
+        source_site = (
+            source_site_tag.get("content", "").strip().lower()
+            if source_site_tag
+            else ""
+        )
+        if source_site == "xiaohongshu" and metadata["source"]:
+            metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(
+                metadata["source"]
+            )
 
         # 提取title元素
         title_tag = soup.find("title")
