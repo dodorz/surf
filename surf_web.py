@@ -13,6 +13,7 @@ import argparse
 import os
 import threading
 import webbrowser
+from types import SimpleNamespace
 
 # Flask web framework
 try:
@@ -39,9 +40,11 @@ from surf import (
     Config,
     Fetcher,
     ContentProcessor,
+    OcrHandler,
     OutputHandler,
     TTSHandler,
-    __version__,
+    _get_handler_for_url,
+    _get_version,
     logger,
 )
 
@@ -656,10 +659,48 @@ def get_config():
     return Config()
 
 
+def get_runtime_version():
+    """Read the current project version at request time."""
+    return _get_version()
+
+
+def extract_source_url_from_html(html_blob, default_url):
+    if not html_blob:
+        return default_url
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html_blob, "html.parser")
+        meta_tag = soup.find("meta", attrs={"name": "source-url"})
+        if meta_tag and meta_tag.get("content"):
+            return meta_tag["content"]
+    except Exception:
+        pass
+    return default_url
+
+
+def build_web_ocr_args(data):
+    """Build an args-like object for OCR settings reused from the CLI pipeline."""
+    return SimpleNamespace(
+        ocr_images=bool(data.get("ocr_images", False)),
+        no_ocr_images=bool(data.get("no_ocr_images", False)),
+        ocr_lang=data.get("ocr_lang"),
+        ocr_engine=data.get("ocr_engine"),
+    )
+
+
+def build_output_path(title, extension, target_dir, source_url=None, html_content=None):
+    filename_title = OutputHandler._get_filename_title(
+        title, source_url=source_url, html_content=html_content
+    )
+    safe_title = OutputHandler._safe_filename_title(filename_title, max_len=100)
+    return os.path.join(target_dir, f"{safe_title}.{extension}")
+
+
 @app.route("/")
 def index():
     """Serve the main page."""
-    return render_template_string(HTML_TEMPLATE, version=__version__)
+    return render_template_string(HTML_TEMPLATE, version=get_runtime_version())
 
 
 @app.route("/api/process", methods=["POST"])
@@ -684,9 +725,8 @@ def process_url():
         # Language mode
         lang_mode = data.get("lang", "trans")
         
-        # Check special site defaults
-        from surf import _get_handler_for_url
         _, site_name, site_config = _get_handler_for_url(url)
+        fetch_thread = None
         if site_config:
             if site_config.get("default_no_proxy") and proxy_mode is None:
                 logger.info(f"Web: {site_name} using default 'no proxy'")
@@ -694,6 +734,9 @@ def process_url():
             if site_config.get("default_no_translate") and lang_mode == "trans":
                 logger.info(f"Web: {site_name} using default 'no translate'")
                 lang_mode = "raw"
+            if site_config.get("default_thread") and fetch_thread is None:
+                logger.info(f"Web: {site_name} using default thread expansion")
+                fetch_thread = "backward"
 
         html_content = Fetcher.fetch(
             url,
@@ -701,15 +744,40 @@ def process_url():
             use_browser=data.get("browser", False),
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
+            fetch_thread=fetch_thread,
         )
+        if not html_content:
+            return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
+
+        source_url = extract_source_url_from_html(html_content, url)
 
         # Extract content
         title, cleaned_html = ContentProcessor.extract_content(html_content)
         if not title:
             title = "Untitled"
 
+        try:
+            cleaned_html = OcrHandler.annotate_html_with_ocr(
+                cleaned_html,
+                source_url=source_url,
+                site_name=site_name,
+                site_config=site_config,
+                args=build_web_ocr_args(data),
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+        except Exception as e:
+            logger.warning(f"Web OCR failed and was skipped: {e}")
+
         # Convert to markdown
         md_content = ContentProcessor.to_markdown(cleaned_html)
+
+        social_title = OutputHandler._extract_social_first_sentence_title(
+            html_content, source_url=url
+        )
+        if social_title:
+            title = social_title
 
         # Handle language mode
         target_lang = config.get("Output", "target_language", fallback="zh-cn")
@@ -717,11 +785,17 @@ def process_url():
         original_md = md_content
         original_title = title
         translated_title = None
+        skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
 
         if lang_mode != "raw":
             md_content, translated_title = ContentProcessor.translate_if_needed(
-                md_content, title=title, target_lang=target_lang, config=config
+                md_content,
+                title=None if skip_title_translation else title,
+                target_lang=target_lang,
+                config=config,
             )
+            if skip_title_translation:
+                translated_title = original_title
 
             if lang_mode == "both" and translated_title != original_title:
                 title = f"{translated_title} ({original_title})"
@@ -740,19 +814,6 @@ def process_url():
             try:
                 llm_config = config.get_llm_config()
                 translator = llm_config["model"]
-            except Exception:
-                pass
-
-        # Extract source URL from HTML meta tag if present (for short link resolution)
-        source_url = url
-        if html_content:
-            try:
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html_content, "html.parser")
-                meta_tag = soup.find("meta", attrs={"name": "source-url"})
-                if meta_tag and meta_tag.get("content"):
-                    source_url = meta_tag["content"]
-                    logger.info(f"Using resolved source URL for metadata: {source_url}")
             except Exception:
                 pass
 
@@ -838,18 +899,15 @@ def save_file():
 
     try:
         title = resultData.get("title", "Untitled")
-        html_content = resultData.get("html_content", "")
         metadata = resultData.get("metadata", {})
-
-        # Sanitize title for filename
-        safe_title = "".join(
-            c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-        ).strip()
-        safe_title = safe_title[:100]
+        html_content = metadata.get("html_content", "")
+        source_url = metadata.get("source_url")
 
         if fileType == "md":
             md_content = resultData.get("markdown", "")
-            output_path = os.path.join(targetDir, f"{safe_title}.md")
+            output_path = build_output_path(
+                title, "md", targetDir, source_url=source_url, html_content=html_content
+            )
             md_path = OutputHandler.save_markdown(
                 title,
                 md_content,
@@ -865,7 +923,9 @@ def save_file():
 
         elif fileType == "html":
             cleaned_html = resultData.get("html", "")
-            output_path = os.path.join(targetDir, f"{safe_title}.html")
+            output_path = build_output_path(
+                title, "html", targetDir, source_url=source_url, html_content=html_content
+            )
             html_path = OutputHandler.save_html(
                 title,
                 cleaned_html,
@@ -877,7 +937,9 @@ def save_file():
 
         elif fileType == "pdf":
             md_content = resultData.get("markdown", "")
-            output_path = os.path.join(targetDir, f"{safe_title}.pdf")
+            output_path = build_output_path(
+                title, "pdf", targetDir, source_url=source_url, html_content=html_content
+            )
             pdf_path = OutputHandler.generate_pdf(
                 title, md_content, config, output_path=output_path
             )
@@ -885,8 +947,8 @@ def save_file():
 
         elif fileType == "audio":
             md_content = resultData.get("markdown", "")
-            output_path = os.path.join(
-                targetDir, f"{safe_title[:20].replace(' ', '_')}.mp3"
+            output_path = build_output_path(
+                title, "mp3", targetDir, source_url=source_url, html_content=html_content
             )
             TTSHandler.run_tts(
                 title, md_content, config, speak=False, save_path=output_path
@@ -908,7 +970,7 @@ def run_server(host="127.0.0.1", port=18473, debug=False):
     url = f"http://{host}:{port}"
     threading.Timer(1, lambda: webbrowser.open(url)).start()
 
-    print(f"\nSurf Web Interface v{__version__}")
+    print(f"\nSurf Web Interface v{get_runtime_version()}")
     print("=====================================")
     print(f"Server running at: {url}")
     print("Press Ctrl+C to stop\n")
