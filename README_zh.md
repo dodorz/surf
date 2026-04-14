@@ -62,6 +62,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 图片 OCR 开关、OCR 引擎、OCR 语言
 - Thread 抓取模式（`forward` / `backward` / `both` / 关闭）
 - 翻译时可选的 LLM Provider 覆盖
+- 宽松 URL 输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接
 
 本机访问时可以直接启动：
 

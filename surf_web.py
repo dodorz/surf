@@ -11,6 +11,7 @@ Example:
 
 import argparse
 import os
+import re
 import threading
 import webbrowser
 from types import SimpleNamespace
@@ -357,8 +358,9 @@ HTML_TEMPLATE = """
             <form id="surfForm">
                 <div class="form-group">
                     <label for="url">URL 地址</label>
-                    <input type="url" id="url" name="url" class="url-input" 
-                           placeholder="https://example.com" required>
+                    <input type="text" id="url" name="url" class="url-input" 
+                           placeholder="粘贴链接，前后带文字也可以自动提取 URL" required>
+                    <div class="field-hint">支持直接粘贴分享文案，Surf 会自动提取其中第一个 http/https 链接。</div>
                 </div>
                 
                 <div class="section-title">输出格式</div>
@@ -725,6 +727,21 @@ def get_runtime_version():
     return _get_version()
 
 
+def extract_url_from_text(value):
+    """Extract the first http/https URL from free-form text."""
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"https?://\S+", text, re.IGNORECASE)
+    if not match:
+        return None
+
+    candidate = match.group(0).strip()
+    candidate = candidate.rstrip('\'"<>)]}.,;!?:')
+    return candidate or None
+
+
 def extract_source_url_from_html(html_blob, default_url):
     if not html_blob:
         return default_url
@@ -783,10 +800,11 @@ def process_url():
     """Process a URL and return the result."""
 
     data = request.json
-    url = data.get("url")
+    raw_url_input = data.get("url")
+    url = extract_url_from_text(raw_url_input)
 
     if not url:
-        return jsonify({"success": False, "error": "URL is required"})
+        return jsonify({"success": False, "error": "A valid http/https URL is required"})
 
     config = get_config()
 

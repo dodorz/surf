@@ -85,6 +85,7 @@ The web form exposes the most commonly used Surf options directly, including:
 - image OCR on/off, OCR engine, and OCR language
 - same-author thread expansion (`forward` / `backward` / `both` / off)
 - optional LLM provider override for translation
+- free-form URL input: you can paste share text and Surf will extract the first `http/https` URL automatically
 
 For local access:
 
