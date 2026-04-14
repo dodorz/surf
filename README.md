@@ -7,7 +7,7 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with automatic authentication support.
+- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`.
 - **Short-Post Title Normalization**: For Twitter/X, Bluesky, Weibo, and Threads posts, Surf derives the title, front matter `title`, and default Markdown filename from the current post body as `First sentence - Author on Site`.
@@ -34,7 +34,7 @@ surf "https://example.com" -r
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
-- **Authentication Management**: Interactive login support for sites requiring authentication (e.g., Xiaohongshu).
+- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 
 ### Special Site Policies
@@ -259,13 +259,19 @@ Notes:
 - Xiaohongshu enables image OCR by default.
 - OCR failures only skip the affected image; they do not abort the article fetch.
 
-### Authentication (--login / --clear-auth)
+### Authentication (--login / --export-auth / --import-auth / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu), use interactive login:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu), prepare and reuse a saved Playwright auth state:
 
 ```bash
 # First-time login for Xiaohongshu
 surf --login xiaohongshu
+
+# Export the saved state from a desktop machine
+surf --export-auth xiaohongshu ./xiaohongshu_state.json
+
+# Import that state on a headless Linux server
+surf --import-auth xiaohongshu ./xiaohongshu_state.json
 
 # Optional: login for Twitter/X (helps with login-wall pages)
 surf --login twitter
@@ -277,7 +283,7 @@ surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/stat
 # Optional: login for Zhihu (feeds cookies to API/mirror requests and helps browser verification)
 surf --login zhihu
 
-# After login, fetch content normally
+# After login/import, fetch content normally
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
@@ -292,6 +298,7 @@ surf --clear-auth all
 ```
 
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
+On headless Linux, `surf --login ...` now fails fast instead of trying to open a browser with no display. Run the login command on a desktop machine, then move the saved state with `--export-auth` and `--import-auth`.
 For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
 
 ## Help
