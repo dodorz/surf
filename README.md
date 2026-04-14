@@ -78,6 +78,14 @@ We recommend using `uv` for a clean environment.
 
 `surf_web.py` provides a local Flask-based web interface for development and personal use. The built-in `app.run(...)` server is Flask's development server, so the warning about production deployment is expected.
 
+The web form exposes the most commonly used Surf options directly, including:
+- language mode (`trans` / `raw` / `both`)
+- proxy mode and custom proxy
+- browser rendering
+- image OCR on/off, OCR engine, and OCR language
+- same-author thread expansion (`forward` / `backward` / `both` / off)
+- optional LLM provider override for translation
+
 For local access:
 
 ```bash

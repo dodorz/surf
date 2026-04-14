@@ -55,6 +55,14 @@
 
 `surf_web.py` 提供的是一个基于 Flask 的本地 Web 界面，适合开发和个人使用。它内部调用的 `app.run(...)` 是 Flask 自带的开发服务器，所以你看到“不要用于生产部署”的提示是正常的。
 
+Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
+- 语言模式（`trans` / `raw` / `both`）
+- 代理模式和自定义代理
+- 浏览器渲染
+- 图片 OCR 开关、OCR 引擎、OCR 语言
+- Thread 抓取模式（`forward` / `backward` / `both` / 关闭）
+- 翻译时可选的 LLM Provider 覆盖
+
 本机访问时可以直接启动：
 
 ```bash
