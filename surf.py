@@ -3003,12 +3003,176 @@ class Fetcher:
         return escape(text or "").replace("\n", "<br>")
 
     @staticmethod
+    def _extract_bluesky_embed_blocks(post_data, fallback_did=""):
+        if not isinstance(post_data, dict):
+            return []
+
+        blocks = []
+        seen_image_urls = set()
+        seen_link_targets = set()
+
+        def normalize_image_key(url):
+            if not url:
+                return ""
+            normalized = str(url).strip()
+            normalized = re.sub(r"@(?:jpeg|jpg|png|webp)$", "", normalized, flags=re.IGNORECASE)
+            return normalized
+
+        def append_image(url, alt=""):
+            image_key = normalize_image_key(url)
+            if not url or not image_key or image_key in seen_image_urls:
+                return
+            seen_image_urls.add(image_key)
+            blocks.append(
+                {
+                    "type": "image",
+                    "url": url,
+                    "alt": alt or "",
+                }
+            )
+
+        def append_link(uri, title="", description="", thumb=""):
+            link_key = str(uri or "").strip()
+            if not link_key or link_key in seen_link_targets:
+                return
+            seen_link_targets.add(link_key)
+            blocks.append(
+                {
+                    "type": "external",
+                    "uri": uri,
+                    "title": title or uri,
+                    "description": description or "",
+                    "thumb": thumb or "",
+                }
+            )
+
+        def collect_from_embed(embed_data):
+            if not isinstance(embed_data, dict):
+                return
+
+            embed_type = str(embed_data.get("$type") or "").lower()
+
+            if "recordwithmedia" in embed_type:
+                collect_from_embed(embed_data.get("media"))
+                return
+
+            if "images" in embed_type:
+                for image in embed_data.get("images", []) or []:
+                    if not isinstance(image, dict):
+                        continue
+                    image_url = (
+                        image.get("fullsize")
+                        or image.get("thumb")
+                        or image.get("url")
+                        or image.get("src")
+                    )
+                    if not image_url:
+                        image_obj = image.get("image") or {}
+                        image_url = (
+                            image_obj.get("fullsize")
+                            or image_obj.get("thumb")
+                            or image_obj.get("url")
+                            or image_obj.get("src")
+                        )
+                        if not image_url:
+                            image_ref = image_obj.get("ref", {}).get("$link", "")
+                            if image_ref and fallback_did:
+                                image_url = (
+                                    "https://cdn.bsky.app/img/feed_fullsize/plain/"
+                                    f"{fallback_did}/{image_ref}@jpeg"
+                                )
+                    append_image(image_url, image.get("alt") or "")
+                return
+
+            if "external" in embed_type:
+                external = embed_data.get("external") or {}
+                append_link(
+                    external.get("uri") or external.get("url") or "",
+                    external.get("title") or "",
+                    external.get("description") or "",
+                    external.get("thumb") or "",
+                )
+                return
+
+            if "video" in embed_type:
+                playlist = embed_data.get("playlist") or embed_data.get("uri") or ""
+                if playlist:
+                    blocks.append(
+                        {
+                            "type": "video",
+                            "playlist": playlist,
+                            "thumb": embed_data.get("thumbnail") or embed_data.get("thumb") or "",
+                            "alt": embed_data.get("alt") or "",
+                        }
+                    )
+                return
+
+        collect_from_embed(post_data.get("embed"))
+        collect_from_embed(post_data.get("record", {}).get("embed"))
+        return blocks
+
+    @staticmethod
+    def _render_thread_media_blocks(media_blocks):
+        if not media_blocks:
+            return ""
+
+        html_parts = ["<div class='surf-thread-media'>"]
+        for block in media_blocks:
+            block_type = block.get("type")
+            if block_type == "image":
+                image_url = escape(block.get("url") or "")
+                if not image_url:
+                    continue
+                alt_text = escape(block.get("alt") or "")
+                html_parts.append(
+                    "<p class='surf-thread-image'>"
+                    f"<img src=\"{image_url}\" alt=\"{alt_text}\" style=\"max-width: 100%; margin: 0.5em 0;\">"
+                    "</p>"
+                )
+            elif block_type == "external":
+                uri = escape(block.get("uri") or "")
+                if not uri:
+                    continue
+                title = escape(block.get("title") or uri)
+                description = escape(block.get("description") or "")
+                thumb = escape(block.get("thumb") or "")
+                html_parts.append("<div class='surf-thread-link-card'>")
+                if thumb:
+                    html_parts.append(
+                        "<p class='surf-thread-image'>"
+                        f"<img src=\"{thumb}\" alt=\"{title}\" style=\"max-width: 100%; margin: 0.5em 0;\">"
+                        "</p>"
+                    )
+                html_parts.append(
+                    f"<p><strong>Link:</strong> <a href=\"{uri}\">{title}</a></p>"
+                )
+                if description:
+                    html_parts.append(f"<p>{description}</p>")
+                html_parts.append("</div>")
+            elif block_type == "video":
+                playlist = escape(block.get("playlist") or "")
+                thumb = escape(block.get("thumb") or "")
+                if thumb:
+                    html_parts.append(
+                        "<p class='surf-thread-image'>"
+                        f"<img src=\"{thumb}\" alt=\"{escape(block.get('alt') or 'video thumbnail')}\" style=\"max-width: 100%; margin: 0.5em 0;\">"
+                        "</p>"
+                    )
+                if playlist:
+                    html_parts.append(
+                        f"<p><a href=\"{playlist}\">View video playlist</a></p>"
+                    )
+        html_parts.append("</div>")
+        return "".join(html_parts)
+
+    @staticmethod
     def _render_thread_post_block(item, heading):
         author = escape(item.get("author") or "Unknown")
         handle = escape(item.get("handle") or "")
         timestamp = escape(item.get("timestamp") or "")
         permalink = escape(item.get("permalink") or "")
         text_html = Fetcher._escape_thread_text(item.get("text") or "")
+        media_html = Fetcher._render_thread_media_blocks(item.get("media") or [])
 
         html_parts = ["<section class='surf-thread-post'>", f"<h2>{escape(heading)}</h2>"]
         meta_parts = [f"<strong>{author}</strong>"]
@@ -3020,6 +3184,8 @@ class Fetcher:
             html_parts.append(f"<p>{' | '.join(meta_parts)}</p>")
         if text_html:
             html_parts.append(f"<p>{text_html}</p>")
+        if media_html:
+            html_parts.append(media_html)
         if permalink:
             html_parts.append(f"<p><a href=\"{permalink}\">View post</a></p>")
         html_parts.append("</section>")
@@ -3142,15 +3308,18 @@ class Fetcher:
             f"<h1>{site_label} Post</h1>",
         ]
 
-        if before_items or after_items:
-            html_parts.append("<section class='surf-thread-context'><h2>Thread Context</h2>")
+        if before_items:
+            html_parts.append("<section class='surf-thread-context'><h2>Earlier Posts</h2>")
             for item in before_items:
                 html_parts.append(Fetcher._render_thread_post_block(item, "Earlier Post"))
-            for item in after_items:
-                html_parts.append(Fetcher._render_thread_post_block(item, "Later Reply"))
             html_parts.append("</section>")
 
         html_parts.append(Fetcher._render_thread_post_block(current, "Current Post"))
+        if after_items:
+            html_parts.append("<section class='surf-thread-context'><h2>Replies</h2>")
+            for item in after_items:
+                html_parts.append(Fetcher._render_thread_post_block(item, "Later Reply"))
+            html_parts.append("</section>")
         html_parts.append(f"<p><a href=\"{escape(page_url)}\">View on {site_label}</a></p>")
         html_parts.append("</article></body></html>")
         return "".join(html_parts)
@@ -4535,6 +4704,10 @@ class Fetcher:
                         "handle": f"@{author_handle}" if author_handle else "",
                         "timestamp": created_at,
                         "text": record_data.get("text", ""),
+                        "media": Fetcher._extract_bluesky_embed_blocks(
+                            post_data,
+                            fallback_did=author_data.get("did") or did,
+                        ),
                         "permalink": url if post_data is post else "",
                     }
                 )
@@ -4584,36 +4757,6 @@ class Fetcher:
             html_content = Fetcher._render_social_thread_html(
                 "bluesky", url, thread_items, current_index
             )
-
-            embed = record.get("embed", {})
-            extra_parts = []
-            if embed.get("$type") == "app.bsky.embed.images":
-                images = embed.get("images", [])
-                for img in images:
-                    img_ref = img.get("image", {}).get("ref", {}).get("$link", "")
-                    if img_ref:
-                        extra_parts.append(
-                            f'<img src="https://cdn.bsky.app/img/feed_thumbnail/plain/{did}/{img_ref}@jpeg" style="max-width: 100%; margin: 0.5em 0;"><br>'
-                        )
-            elif embed.get("$type") == "app.bsky.embed.external":
-                external = embed.get("external", {})
-                uri = external.get("uri", "")
-                title = external.get("title", "") or uri
-                description = external.get("description", "")
-                extra_parts.append("<div style='border: 1px solid #ccc; padding: 1em; margin: 1em 0;'>")
-                extra_parts.append(f"<p><strong>Link:</strong> <a href=\"{escape(uri)}\">{escape(title)}</a></p>")
-                if description:
-                    extra_parts.append(f"<p>{escape(description)}</p>")
-                extra_parts.append("</div>")
-
-            if extra_parts and html_content:
-                soup = BeautifulSoup(html_content, "html.parser")
-                article = soup.find("article")
-                if article:
-                    fragment = BeautifulSoup("".join(extra_parts), "html.parser")
-                    for child in fragment.contents:
-                        article.append(child)
-                html_content = str(soup)
 
             return html_content
 
@@ -5577,6 +5720,33 @@ class OutputHandler:
         return bool(re.search(r"/status/\d+", source_url))
 
     @staticmethod
+    def _is_bluesky_post_url(source_url=None, html_content=None):
+        if not source_url:
+            return False
+        if not re.search(r"^https?://bsky\.app/profile/[^/]+/post/[^/]+", source_url, re.IGNORECASE):
+            return False
+        if html_content:
+            html_title = OutputHandler._extract_html_title(html_content) or ""
+            if "bluesky post" in html_title.lower():
+                return True
+        return True
+
+    @staticmethod
+    def _get_social_source_site(html_content=None):
+        if not html_content:
+            return None
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            meta = soup.find("meta", attrs={"name": "surf-source-site"})
+            if meta and meta.get("content"):
+                site_name = (meta.get("content") or "").strip().lower()
+                if site_name in {"twitter", "bluesky", "weibo", "threads"}:
+                    return site_name
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _extract_first_sentence(text):
         if not text:
             return None
@@ -5589,19 +5759,97 @@ class OutputHandler:
         return normalized
 
     @staticmethod
-    def _extract_twitter_first_sentence_title(html_content, source_url=None):
-        if not OutputHandler._is_twitter_non_article(source_url, html_content):
+    def _get_social_site_label(source_url=None, html_content=None):
+        source_site = OutputHandler._get_social_source_site(html_content)
+        if source_site == "twitter":
+            return "X"
+        if source_site == "bluesky":
+            return "Bsky"
+        if source_site == "weibo":
+            return "Weibo"
+        if source_site == "threads":
+            return "Threads"
+        if OutputHandler._is_twitter_non_article(source_url, html_content):
+            return "X"
+        if OutputHandler._is_bluesky_post_url(source_url, html_content):
+            return "Bsky"
+        if source_url and re.search(r"^https?://(www\.)?threads\.net/@[^/]+/post/[^/]+", source_url, re.IGNORECASE):
+            return "Threads"
+        if source_url and re.search(r"^https?://(m\.)?weibo\.cn/", source_url, re.IGNORECASE):
+            return "Weibo"
+        if source_url and re.search(r"^https?://(www\.)?weibo\.com/", source_url, re.IGNORECASE):
+            return "Weibo"
+        return None
+
+    @staticmethod
+    def _extract_social_first_sentence_title(html_content, source_url=None):
+        site_label = OutputHandler._get_social_site_label(source_url, html_content)
+        if not site_label:
             return None
         if not html_content:
             return None
         try:
             soup = BeautifulSoup(html_content, "html.parser")
+            author_name = None
+
+            # Prefer the rendered current-post body when Surf has already normalized
+            # a social thread page into structured sections.
+            thread_posts = soup.find_all("section", class_="surf-thread-post")
+            if thread_posts:
+                current_section = None
+                for section in thread_posts:
+                    heading = section.find(["h1", "h2", "h3"])
+                    if heading and heading.get_text(strip=True) == "Current Post":
+                        current_section = section
+                        break
+                if not current_section:
+                    current_section = thread_posts[0]
+
+                meta_paragraph = current_section.find("p", recursive=False)
+                if meta_paragraph:
+                    strong_tag = meta_paragraph.find("strong")
+                    if strong_tag:
+                        author_name = re.sub(r"\s+", " ", strong_tag.get_text(" ", strip=True)).strip() or None
+
+                for paragraph in current_section.find_all("p", recursive=False):
+                    line = re.sub(r"\s+", " ", paragraph.get_text(" ", strip=True)).strip()
+                    if not line:
+                        continue
+                    if line.lower().startswith("view "):
+                        continue
+                    if " | @" in line:
+                        continue
+                    sentence = OutputHandler._extract_first_sentence(line)
+                    if sentence:
+                        if author_name:
+                            return f"{sentence} - {author_name} on {site_label}"
+                        return sentence
+
             html_title = OutputHandler._extract_html_title(html_content) or ""
             skip_lines = set()
             if html_title:
                 skip_lines.add(html_title.strip())
                 if html_title.lower().endswith(" - x post"):
                     skip_lines.add(html_title[:-9].strip())
+            skip_lines.update(
+                {
+                    "Bluesky Post",
+                    "Current Post",
+                    "Earlier Post",
+                    "Later Reply",
+                    "Earlier Posts",
+                    "Replies",
+                    "Thread Context",
+                    "View post",
+                    "View on Bluesky",
+                    "Weibo Post",
+                    "View on Weibo",
+                    "Threads Post",
+                    "View on Threads",
+                    "X Post",
+                    "View on X",
+                }
+            )
 
             text_lines = []
             for text in soup.stripped_strings:
@@ -5616,11 +5864,15 @@ class OutputHandler:
                     continue
                 if line.lower().startswith("author:"):
                     continue
+                if not author_name and " | @" in line:
+                    author_name = line.split("|", 1)[0].strip("* ").strip() or None
                 text_lines.append(line)
 
             for line in text_lines:
                 sentence = OutputHandler._extract_first_sentence(line)
                 if sentence:
+                    if author_name:
+                        return f"{sentence} - {author_name} on {site_label}"
                     return sentence
         except Exception:
             return None
@@ -5655,7 +5907,7 @@ class OutputHandler:
         Select filename title based on source site rules.
         For GitHub URLs, prefer page <title>.
         """
-        twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+        twitter_title = OutputHandler._extract_social_first_sentence_title(
             html_content, source_url=source_url
         )
         if twitter_title:
@@ -5850,7 +6102,7 @@ class OutputHandler:
                 title_tag.get_text(strip=True)
             )
 
-        twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+        twitter_title = OutputHandler._extract_social_first_sentence_title(
             html_content, source_url=source_url
         )
         if twitter_title:
@@ -6712,6 +6964,8 @@ Special Sites:
                         Default backend prefers `uvx --from twitter-cli twitter`.
                         `auto` backend tries CLI first, then native fallback.
   Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `backward`.
+  Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
+                        use `First sentence - Author on Site`.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -7067,7 +7321,7 @@ Twitter/X Backend:
         logger.error(f"Failed to convert to markdown: {e}")
         sys.exit(1)
 
-    twitter_title = OutputHandler._extract_twitter_first_sentence_title(
+    twitter_title = OutputHandler._extract_social_first_sentence_title(
         html_content, source_url=args.url
     )
     if twitter_title:

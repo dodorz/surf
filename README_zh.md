@@ -8,8 +8,9 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、微信公众号、知乎、小红书等网站优化处理，支持自动认证。
-- **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；对非 article 的消息会直接取正文第一句作为标题；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
+- **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。
+- **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
@@ -26,6 +27,7 @@
 - **小红书**：额外默认开启插图 OCR，可用 `--no-ocr-images` 关闭
 - **Twitter/X**：默认使用等同于 `-x win` 的强制代理设置，并优先使用 `uvx --from twitter-cli twitter`；若需要保留 native 兜底可显式使用 `auto`
 - **Twitter/X、Bluesky、微博、Threads**：默认开启 `backward` 方向的 thread 追溯；可用 `--thread forward|backward|both` 调整，或用 `--no-thread` 关闭
+- **Twitter/X、Bluesky、微博、Threads**：短帖子标题和默认文件名统一使用“第一句 - 作者名 on 站点”
 - **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
 - **GitHub**：保存 Markdown 时文件名使用页面 `<title>`
 
