@@ -25,7 +25,7 @@ from html import escape
 import trafilatura
 import re
 import unicodedata
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
 def _get_version():
