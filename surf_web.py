@@ -11,6 +11,7 @@ Example:
 
 import argparse
 import os
+import re
 import threading
 import webbrowser
 from types import SimpleNamespace
@@ -330,6 +331,13 @@ HTML_TEMPLATE = """
             padding-bottom: 8px;
             border-bottom: 2px solid #e1e5e9;
         }
+
+        .field-hint {
+            margin-top: 6px;
+            font-size: 13px;
+            color: #6c757d;
+            line-height: 1.5;
+        }
         
         .version-info {
             text-align: center;
@@ -350,8 +358,9 @@ HTML_TEMPLATE = """
             <form id="surfForm">
                 <div class="form-group">
                     <label for="url">URL 地址</label>
-                    <input type="url" id="url" name="url" class="url-input" 
-                           placeholder="https://example.com" required>
+                    <input type="text" id="url" name="url" class="url-input" 
+                           placeholder="粘贴链接，前后带文字也可以自动提取 URL" required>
+                    <div class="field-hint">支持直接粘贴分享文案，Surf 会自动提取其中第一个 http/https 链接。</div>
                 </div>
                 
                 <div class="section-title">输出格式</div>
@@ -394,6 +403,51 @@ HTML_TEMPLATE = """
                 
                 <div class="section-title">高级选项</div>
                 <div class="options-grid">
+                    <div class="form-group">
+                        <label for="threadMode">线程抓取</label>
+                        <select id="threadMode" name="thread_mode">
+                            <option value="default">跟随站点默认</option>
+                            <option value="off">关闭</option>
+                            <option value="backward">向后抓取同作者后续回复</option>
+                            <option value="forward">向前抓取上下文</option>
+                            <option value="both">双向抓取</option>
+                        </select>
+                        <div class="field-hint">对应 CLI 的 `--thread/--no-thread`。仅支持的社交站点会生效。</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ocrMode">图片 OCR</label>
+                        <select id="ocrMode" name="ocr_mode">
+                            <option value="default">跟随站点默认</option>
+                            <option value="on">启用</option>
+                            <option value="off">关闭</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ocrEngine">OCR 引擎</label>
+                        <select id="ocrEngine" name="ocr_engine">
+                            <option value="">默认 (rapidocr)</option>
+                            <option value="rapidocr">RapidOCR</option>
+                            <option value="tesseract">Tesseract</option>
+                            <option value="auto">自动回退</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="ocrLang">OCR 语言</label>
+                        <input type="text" id="ocrLang" name="ocr_lang"
+                               placeholder="例如 chi_sim+eng">
+                        <div class="field-hint">仅 Tesseract 生效；RapidOCR 会忽略这个值。</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="llm">LLM Provider 覆盖</label>
+                        <input type="text" id="llm" name="llm"
+                               placeholder="例如 L1 / OpenAI / DeepSeek">
+                        <div class="field-hint">对应 CLI 的 `--llm`，仅在启用翻译时使用。</div>
+                    </div>
+
                     <div class="form-group checkbox-group">
                         <input type="checkbox" id="browser" name="browser">
                         <label for="browser">使用浏览器渲染 (JavaScript)</label>
@@ -479,6 +533,14 @@ HTML_TEMPLATE = """
 
         // Initialize format-specific options visibility on page load
         document.getElementById('format').dispatchEvent(new Event('change'));
+
+        document.getElementById('ocrMode').addEventListener('change', function() {
+            const disabled = this.value === 'off';
+            document.getElementById('ocrEngine').disabled = disabled;
+            document.getElementById('ocrLang').disabled = disabled;
+        });
+
+        document.getElementById('ocrMode').dispatchEvent(new Event('change'));
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -665,6 +727,21 @@ def get_runtime_version():
     return _get_version()
 
 
+def extract_url_from_text(value):
+    """Extract the first http/https URL from free-form text."""
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    match = re.search(r"https?://\S+", text, re.IGNORECASE)
+    if not match:
+        return None
+
+    candidate = match.group(0).strip()
+    candidate = candidate.rstrip('\'"<>)]}.,;!?:')
+    return candidate or None
+
+
 def extract_source_url_from_html(html_blob, default_url):
     if not html_blob:
         return default_url
@@ -682,11 +759,12 @@ def extract_source_url_from_html(html_blob, default_url):
 
 def build_web_ocr_args(data):
     """Build an args-like object for OCR settings reused from the CLI pipeline."""
+    ocr_mode = str(data.get("ocr_mode", "default")).strip().lower()
     return SimpleNamespace(
-        ocr_images=bool(data.get("ocr_images", False)),
-        no_ocr_images=bool(data.get("no_ocr_images", False)),
-        ocr_lang=data.get("ocr_lang"),
-        ocr_engine=data.get("ocr_engine"),
+        ocr_images=ocr_mode == "on",
+        no_ocr_images=ocr_mode == "off",
+        ocr_lang=(data.get("ocr_lang") or "").strip() or None,
+        ocr_engine=(data.get("ocr_engine") or "").strip() or None,
     )
 
 
@@ -696,6 +774,19 @@ def build_output_path(title, extension, target_dir, source_url=None, html_conten
     )
     safe_title = OutputHandler._safe_filename_title(filename_title, max_len=100)
     return os.path.join(target_dir, f"{safe_title}.{extension}")
+
+
+def resolve_web_thread_mode(data, site_name, site_config):
+    """Resolve web thread settings using the same semantics as CLI thread flags."""
+    thread_mode = str(data.get("thread_mode", "default")).strip().lower()
+    if thread_mode == "off":
+        return False
+    if thread_mode in {"forward", "backward", "both"}:
+        return thread_mode
+    if site_config and site_config.get("default_thread"):
+        logger.info(f"Web: {site_name} using default thread expansion")
+        return "backward"
+    return None
 
 
 @app.route("/")
@@ -709,10 +800,11 @@ def process_url():
     """Process a URL and return the result."""
 
     data = request.json
-    url = data.get("url")
+    raw_url_input = data.get("url")
+    url = extract_url_from_text(raw_url_input)
 
     if not url:
-        return jsonify({"success": False, "error": "URL is required"})
+        return jsonify({"success": False, "error": "A valid http/https URL is required"})
 
     config = get_config()
 
@@ -727,7 +819,7 @@ def process_url():
         lang_mode = data.get("lang", "trans")
         
         _, site_name, site_config = _get_handler_for_url(url)
-        fetch_thread = None
+        fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
         if site_config:
             if site_config.get("default_no_proxy") and proxy_mode is None:
                 logger.info(f"Web: {site_name} using default 'no proxy'")
@@ -735,9 +827,6 @@ def process_url():
             if site_config.get("default_no_translate") and lang_mode == "trans":
                 logger.info(f"Web: {site_name} using default 'no translate'")
                 lang_mode = "raw"
-            if site_config.get("default_thread") and fetch_thread is None:
-                logger.info(f"Web: {site_name} using default thread expansion")
-                fetch_thread = "backward"
 
         html_content = Fetcher.fetch(
             url,
@@ -789,11 +878,13 @@ def process_url():
         skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
 
         if lang_mode != "raw":
+            llm_provider = (data.get("llm") or "").strip() or None
             md_content, translated_title = ContentProcessor.translate_if_needed(
                 md_content,
                 title=None if skip_title_translation else title,
                 target_lang=target_lang,
                 config=config,
+                llm_provider=llm_provider,
             )
             if skip_title_translation:
                 translated_title = original_title
@@ -813,7 +904,8 @@ def process_url():
         translator = None
         if translation_performed:
             try:
-                llm_config = config.get_llm_config()
+                llm_provider = (data.get("llm") or "").strip() or None
+                llm_config = config.get_llm_config(llm_provider)
                 translator = llm_config["model"]
             except Exception:
                 pass

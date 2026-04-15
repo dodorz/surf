@@ -25,7 +25,7 @@ from html import escape
 import trafilatura
 import re
 import unicodedata
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
 def _get_version():
@@ -3727,6 +3727,28 @@ class Fetcher:
             return None, None
 
     @staticmethod
+    def _canonicalize_xiaohongshu_source_url(url):
+        """
+        Normalize Xiaohongshu source URLs to keep only the canonical path and xsec_token.
+        This strips share-tracking query params such as source/webshare/xhsshare.
+        """
+        if not url:
+            return url
+
+        parsed = urlparse(url)
+        hostname = (parsed.netloc or "").lower()
+        if "xiaohongshu.com" not in hostname:
+            return url
+
+        query_params = parse_qs(parsed.query)
+        cleaned_params = {}
+        if "xsec_token" in query_params:
+            cleaned_params["xsec_token"] = query_params["xsec_token"]
+
+        cleaned_query = urlencode(cleaned_params, doseq=True)
+        return urlunparse(parsed._replace(query=cleaned_query, fragment=""))
+
+    @staticmethod
     def _canonicalize_xiaohongshu_image_url(url):
         """Normalize Xiaohongshu CDN image URLs for stable comparison/deduplication."""
         if not url:
@@ -3793,23 +3815,16 @@ class Fetcher:
                 return None
             logger.info(f"Using resolved URL for fetching: {url}")
 
-        # Check if auth state exists before launching browser
+        # Xiaohongshu fetches require an already prepared login state.
         state = AuthHandler.load_state("xiaohongshu")
         if not state:
-            logger.warning(
-                "No saved auth state found for xiaohongshu. Starting interactive login..."
+            logger.error(
+                "No saved auth state found for xiaohongshu. Prepare it explicitly with "
+                "`surf --login xiaohongshu` on a machine with a desktop session, then "
+                "transfer it with `surf --export-auth xiaohongshu <FILE>` / "
+                "`surf --import-auth xiaohongshu <FILE>` if this server is headless."
             )
-            login_success = AuthHandler.interactive_login(
-                "xiaohongshu",
-                "https://www.xiaohongshu.com",
-                config,
-                proxy_mode_override,
-                custom_proxy_override,
-            )
-            if not login_success:
-                logger.error("Interactive login failed")
-                return None
-            logger.info("Login successful. Proceeding to fetch content...")
+            return None
 
         with sync_playwright() as p:
             browser = (
@@ -3838,22 +3853,10 @@ class Fetcher:
 
                 if "/login" in current_url or "/signin" in current_url:
                     logger.warning(
-                        "Saved auth state expired. Starting interactive login..."
+                        "Saved auth state appears expired for xiaohongshu. Refresh it with "
+                        "`surf --login xiaohongshu`, then re-run the fetch. On headless servers, "
+                        "re-export the refreshed state and import it there."
                     )
-                    browser.close()
-                    # Automatically trigger interactive login
-                    login_success = AuthHandler.interactive_login(
-                        "xiaohongshu",
-                        "https://www.xiaohongshu.com",
-                        config,
-                        proxy_mode_override,
-                        custom_proxy_override,
-                    )
-                    if login_success:
-                        # Retry fetching with new auth state
-                        return Fetcher._fetch_xiaohongshu(
-                            url, config, proxy_mode_override, custom_proxy_override
-                        )
                     return None
 
                 # Extract note content
@@ -4238,7 +4241,7 @@ class Fetcher:
                 html_parts = [
                     "<html><head><meta charset='utf-8'>",
                     f"<title>{title}</title>",
-                    f'<meta name="source-url" content="{url}">',
+                    f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
                     '<meta name="surf-source-site" content="xiaohongshu">',
                     "</head><body><article>",
                     f"<h1>{title}</h1>",
@@ -6150,6 +6153,17 @@ class OutputHandler:
             "translator": translator,
         }
 
+        source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
+        source_site = (
+            source_site_tag.get("content", "").strip().lower()
+            if source_site_tag
+            else ""
+        )
+        if source_site == "xiaohongshu" and metadata["source"]:
+            metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(
+                metadata["source"]
+            )
+
         # 提取title元素
         title_tag = soup.find("title")
         if title_tag:
@@ -6680,6 +6694,30 @@ class AuthHandler:
 
     # Directory to store authentication states
     AUTH_STATE_DIR = os.path.join(get_data_dir(), "auth")
+    LOGIN_URLS = {
+        "xiaohongshu": "https://www.xiaohongshu.com",
+        "twitter": "https://x.com/i/flow/login",
+        "x": "https://x.com/i/flow/login",
+        "zhihu": "https://www.zhihu.com/",
+    }
+
+    @staticmethod
+    def normalize_site_name(site_name):
+        """Normalize site aliases used by auth-related commands."""
+        return "twitter" if site_name.lower() in {"twitter", "x"} else site_name.lower()
+
+    @staticmethod
+    def get_login_url(site_name):
+        """Return the interactive login URL for a supported site."""
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        return AuthHandler.LOGIN_URLS.get(normalized_site_name)
+
+    @staticmethod
+    def can_launch_headed_browser():
+        """Best-effort check for whether a headed browser can be launched."""
+        if sys.platform.startswith("linux"):
+            return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+        return True
 
     @staticmethod
     def get_twitter_profile_dir():
@@ -6691,6 +6729,7 @@ class AuthHandler:
     @staticmethod
     def _get_state_file(site_name):
         """Get the path to the state file for a specific site."""
+        site_name = AuthHandler.normalize_site_name(site_name)
         if not os.path.exists(AuthHandler.AUTH_STATE_DIR):
             os.makedirs(AuthHandler.AUTH_STATE_DIR)
         return os.path.join(AuthHandler.AUTH_STATE_DIR, f"{site_name}_state.json")
@@ -6707,18 +6746,17 @@ class AuthHandler:
         Returns:
             dict: Browser state dictionary, or None if not found
         """
-        state_file = AuthHandler._get_state_file(site_name)
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        state_file = AuthHandler._get_state_file(normalized_site_name)
         if os.path.exists(state_file):
             try:
                 with open(state_file, "r", encoding="utf-8") as f:
-                    import json
-
                     state = json.load(f)
                     if log_load:
-                        logger.info(f"Loaded auth state for {site_name}")
+                        logger.info(f"Loaded auth state for {normalized_site_name}")
                     return state
             except Exception as e:
-                logger.warning(f"Failed to load auth state for {site_name}: {e}")
+                logger.warning(f"Failed to load auth state for {normalized_site_name}: {e}")
         return None
 
     @staticmethod
@@ -6753,15 +6791,44 @@ class AuthHandler:
             site_name: Identifier for the site
             state: Browser state dictionary from browser_context.storage_state()
         """
-        state_file = AuthHandler._get_state_file(site_name)
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        state_file = AuthHandler._get_state_file(normalized_site_name)
         try:
             with open(state_file, "w", encoding="utf-8") as f:
-                import json
-
                 json.dump(state, f, ensure_ascii=False, indent=2)
-            logger.info(f"Saved auth state for {site_name} to {state_file}")
+            logger.info(f"Saved auth state for {normalized_site_name} to {state_file}")
         except Exception as e:
-            logger.error(f"Failed to save auth state for {site_name}: {e}")
+            logger.error(f"Failed to save auth state for {normalized_site_name}: {e}")
+
+    @staticmethod
+    def export_state(site_name, export_path):
+        """Export a saved auth state JSON to a user-specified path."""
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        state = AuthHandler.load_state(normalized_site_name, log_load=False)
+        if not state:
+            raise FileNotFoundError(
+                f"No saved auth state found for {normalized_site_name}. Run `surf --login {normalized_site_name}` first."
+            )
+
+        export_dir = os.path.dirname(os.path.abspath(export_path))
+        if export_dir:
+            os.makedirs(export_dir, exist_ok=True)
+
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        logger.info(f"Exported auth state for {normalized_site_name} to {export_path}")
+
+    @staticmethod
+    def import_state(site_name, import_path):
+        """Import an auth state JSON from a user-specified path."""
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        with open(import_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        if not isinstance(state, dict):
+            raise ValueError("Invalid auth state file: expected a JSON object")
+
+        AuthHandler.save_state(normalized_site_name, state)
 
     @staticmethod
     def clear_state(site_name=None):
@@ -6772,6 +6839,7 @@ class AuthHandler:
             site_name: Site identifier, or None to clear all states
         """
         if site_name:
+            site_name = AuthHandler.normalize_site_name(site_name)
             state_file = AuthHandler._get_state_file(site_name)
             if os.path.exists(state_file):
                 os.remove(state_file)
@@ -6814,7 +6882,19 @@ class AuthHandler:
         """
         from playwright.sync_api import sync_playwright
 
-        normalized_site_name = "twitter" if site_name.lower() in {"twitter", "x"} else site_name.lower()
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        if not AuthHandler.can_launch_headed_browser():
+            login_url = AuthHandler.get_login_url(normalized_site_name) or login_url
+            logger.error(
+                "Interactive login requires a graphical desktop session. No DISPLAY/WAYLAND_DISPLAY was detected."
+            )
+            print(f"Login URL: {login_url}")
+            print("Recommended workflow:")
+            print(f"1. Run `surf --login {normalized_site_name}` on a desktop machine with a browser.")
+            print(f"2. Export the saved state with `surf --export-auth {normalized_site_name} <FILE>`.")
+            print(f"3. Copy the file to this server and import it with `surf --import-auth {normalized_site_name} <FILE>`.")
+            return False
+
         if normalized_site_name == "twitter":
             _, pw_proxy = Fetcher._get_twitter_forced_proxies(
                 config, proxy_mode_override, custom_proxy_override
@@ -7024,6 +7104,8 @@ Special Sites:
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
+  surf --export-auth xiaohongshu STATE.json  # Export saved auth state
+  surf --import-auth xiaohongshu STATE.json  # Import auth state on another machine
   surf --login twitter                       # Login to Twitter/X
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
   surf --clear-auth twitter                  # Clear auth for Twitter/X
@@ -7045,7 +7127,7 @@ Twitter/X Backend:
     parser.add_argument(
         "url",
         nargs="?",
-        help="URL to process (not required for --login or --clear-auth)",
+        help="URL to process (not required for auth-management commands such as --login, --export-auth, --import-auth, or --clear-auth)",
     )
 
     # Output format
@@ -7095,12 +7177,24 @@ Twitter/X Backend:
     parser.add_argument(
         "--login",
         metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu, twitter/x). Opens browser for manual login.",
+        help="Interactive login for a site (e.g., xiaohongshu, twitter/x). Opens a browser for manual login on machines with a desktop session.",
     )
     parser.add_argument(
         "--clear-auth",
         metavar="SITE",
         help="Clear saved authentication for a site (use 'all' to clear all)",
+    )
+    parser.add_argument(
+        "--export-auth",
+        nargs=2,
+        metavar=("SITE", "FILE"),
+        help="Export saved authentication state to a JSON file for transfer to another machine",
+    )
+    parser.add_argument(
+        "--import-auth",
+        nargs=2,
+        metavar=("SITE", "FILE"),
+        help="Import authentication state from a JSON file exported on another machine",
     )
     parser.add_argument(
         "--twitter-backend",
@@ -7212,22 +7306,45 @@ Twitter/X Backend:
             AuthHandler.clear_state(clear_site)
         return
 
+    if args.export_auth:
+        site_name, export_path = args.export_auth
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu"}:
+            parser.error(
+                "Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu"
+            )
+        try:
+            AuthHandler.export_state(normalized_site_name, export_path)
+        except Exception as e:
+            logger.error(f"Failed to export auth state: {e}")
+            sys.exit(1)
+        print(f"Exported auth state for {normalized_site_name} to {export_path}")
+        return
+
+    if args.import_auth:
+        site_name, import_path = args.import_auth
+        normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu"}:
+            parser.error(
+                "Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu"
+            )
+        try:
+            AuthHandler.import_state(normalized_site_name, import_path)
+        except Exception as e:
+            logger.error(f"Failed to import auth state: {e}")
+            sys.exit(1)
+        print(f"Imported auth state for {normalized_site_name} from {import_path}")
+        return
+
     # Handle --login
     if args.login:
         site_name = args.login.lower()
-        # Define login URLs for supported sites
-        login_urls = {
-            "xiaohongshu": "https://www.xiaohongshu.com",
-            "twitter": "https://x.com/i/flow/login",
-            "x": "https://x.com/i/flow/login",
-            "zhihu": "https://www.zhihu.com/",
-        }
-        if site_name not in login_urls:
+        login_url = AuthHandler.get_login_url(site_name)
+        if not login_url:
             parser.error(
-                f"Unsupported site: {site_name}. Supported: {', '.join(login_urls.keys())}"
+                f"Unsupported site: {site_name}. Supported: {', '.join(AuthHandler.LOGIN_URLS.keys())}"
             )
-        login_url = login_urls[site_name]
-        login_site = "twitter" if site_name == "x" else site_name
+        login_site = AuthHandler.normalize_site_name(site_name)
         success = AuthHandler.interactive_login(
             login_site, login_url, config, args.proxy, args.set_proxy
         )

@@ -191,14 +191,24 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
    - 手动登录小红书账号
    - 完成任何验证码验证
    - 登录成功后按回车保存会话
+   - 如果目标机器是无 GUI 的 Linux 服务器，请在有桌面的机器完成此步骤
 
-2. **正常使用**:
+2. **迁移到无 GUI Linux（可选）**:
+   ```bash
+   # 在桌面机器导出登录态
+   surf --export-auth xiaohongshu ./xiaohongshu_state.json
+
+   # 在 Linux 服务器导入登录态
+   surf --import-auth xiaohongshu ./xiaohongshu_state.json
+   ```
+
+3. **正常使用**:
    ```bash
    surf "https://www.xiaohongshu.com/explore/NOTE_ID"
    ```
    系统会自动使用保存的登录状态
 
-3. **清除登录状态**:
+4. **清除登录状态**:
    ```bash
    surf --clear-auth xiaohongshu
    # 或清除所有网站的登录状态
@@ -207,8 +217,9 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 
 **技术实现**:
 - 使用 Playwright 的 `storage_state()` 保存/恢复登录状态
-- 状态文件存储在 `~/.surf/auth/xiaohongshu_state.json`
-- 如果检测到登录页面，提示用户使用 `--login` 参数
+- 状态文件默认存储在 Windows 的 `%LOCALLAPPDATA%\surf\auth\` 或 Linux/macOS 的 `~/.local/cache/surf/auth/`
+- 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
+- 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数
 
 **内容提取**:
 - 标题：从 `h1` 或页面标题提取

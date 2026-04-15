@@ -7,7 +7,7 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
-- **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、微信公众号、知乎、小红书等网站优化处理，支持自动认证。
+- **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、微信公众号、知乎、小红书等网站优化处理，支持复用已保存的登录态。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。
 - **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”。
@@ -16,7 +16,7 @@
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
-- **认证管理**：支持需要登录的网站（如小红书）的交互式登录功能。
+- **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用。
 - **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
 
 ### 特殊网站策略
@@ -55,6 +55,15 @@
 
 `surf_web.py` 提供的是一个基于 Flask 的本地 Web 界面，适合开发和个人使用。它内部调用的 `app.run(...)` 是 Flask 自带的开发服务器，所以你看到“不要用于生产部署”的提示是正常的。
 
+Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
+- 语言模式（`trans` / `raw` / `both`）
+- 代理模式和自定义代理
+- 浏览器渲染
+- 图片 OCR 开关、OCR 引擎、OCR 语言
+- Thread 抓取模式（`forward` / `backward` / `both` / 关闭）
+- 翻译时可选的 LLM Provider 覆盖
+- 宽松 URL 输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接
+
 本机访问时可以直接启动：
 
 ```bash
@@ -64,12 +73,10 @@ uv run python surf_web.py --host 127.0.0.1 --port 18473
 如果要对外网或局域网正式部署，请改用真正的 WSGI 服务器，并让它加载 `surf_web:app`：
 
 ```bash
-# Windows 上更适合的生产服务器
-uv add waitress
+# Windows 上更适合的生产服务器（Windows 上执行 `uv sync` 后会自动安装）
 uv run waitress-serve --listen=0.0.0.0:18473 surf_web:app
 
-# Linux 上常见的生产服务器
-uv add gunicorn
+# Linux/macOS 上常见的生产服务器（Linux/macOS 上执行 `uv sync` 后会自动安装）
 uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 ```
 
@@ -239,13 +246,19 @@ surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lan
 - 小红书默认开启插图 OCR。
 - OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。
 
-### 认证功能 (--login / --clear-auth)
+### 认证功能 (--login / --export-auth / --import-auth / --clear-auth)
 
-对于需要登录的网站（如小红书、Twitter/X、知乎），使用交互式登录功能：
+对于需要登录的网站（如小红书、Twitter/X、知乎），可以先准备并复用 Playwright 登录态：
 
 ```bash
 # 首次登录小红书
 surf --login xiaohongshu
+
+# 在有桌面的机器上导出登录态
+surf --export-auth xiaohongshu ./xiaohongshu_state.json
+
+# 在无 GUI 的 Linux 服务器上导入登录态
+surf --import-auth xiaohongshu ./xiaohongshu_state.json
 
 # 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
 surf --login twitter
@@ -257,7 +270,7 @@ surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/stat
 # 可选：登录知乎（Cookie 会用于 API/镜像页请求，并提高浏览器验证页成功率）
 surf --login zhihu
 
-# 登录后正常获取内容
+# 登录或导入后正常获取内容
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
@@ -272,7 +285,8 @@ surf --clear-auth all
 ```
 
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
-对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。默认情况下 Surf 会先尝试系统已检测到的代理设置；如果代理链路失败，会自动回退到直连。若要强制指定模式，可显式使用 `-x win`、`-x custom` 或 `-n`。
+在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
+对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
 
 ## 单字符参数连写
 
