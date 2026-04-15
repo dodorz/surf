@@ -1976,12 +1976,12 @@ class Fetcher:
         config, proxy_mode_override=None, custom_proxy_override=None
     ):
         """
-        Get proxies for Twitter/X with forced proxy usage.
-        Priority: command-line args > WinINET > env vars > config custom_proxy
-        Twitter/X must always use proxy regardless of INI configuration.
+        Get preferred proxies for Twitter/X.
+        Priority: command-line args > WinINET > env vars > config custom_proxy.
+        If no explicit proxy is requested, callers may still retry without proxy.
 
         Returns:
-            tuple: (req_proxies, pw_proxy) - always returns valid proxy config for Twitter
+            tuple: (req_proxies, pw_proxy)
         """
         # If command-line proxy args provided, respect them first
         if proxy_mode_override:
@@ -2003,7 +2003,7 @@ class Fetcher:
                 logger.info("Twitter: Command-line specified Windows proxy")
             else:
                 logger.info(
-                    "Twitter: Defaulting forced proxy handling to Windows proxy (same as -x win)"
+                    "Twitter: No explicit proxy mode provided; trying detected proxy settings first"
                 )
 
         # Priority 1: WinINET (same default behavior as `surf -x win`)
@@ -2077,9 +2077,38 @@ class Fetcher:
 
         # Last resort: no proxy (should not happen for Twitter, but need to handle)
         logger.warning(
-            "Twitter: No proxy configured! Twitter/X may block requests without proxy."
+            "Twitter: No proxy configured; falling back to direct connection."
         )
         return None, None
+
+    @staticmethod
+    def _is_proxy_related_error(error):
+        """Return True when an error likely comes from proxy negotiation or routing."""
+        message = str(error).lower()
+        proxy_markers = [
+            "err_proxy_connection_failed",
+            "proxyerror",
+            "proxy error",
+            "proxy connection",
+            "cannot connect to proxy",
+            "failed to establish a new connection",
+            "407 proxy",
+            "tunnel error",
+            "socks",
+        ]
+        return any(marker in message for marker in proxy_markers)
+
+    @staticmethod
+    def _should_retry_twitter_without_proxy(proxy_mode_override, proxy_value, error):
+        """
+        Allow automatic direct-connection fallback only for implicit Twitter proxy usage.
+        Explicit `-x win` / `-x custom` should still be treated as user intent.
+        """
+        if proxy_mode_override is not None:
+            return False
+        if not proxy_value:
+            return False
+        return Fetcher._is_proxy_related_error(error)
 
     @staticmethod
     def _clean_twitter_article_content(html_content):
@@ -2576,7 +2605,7 @@ class Fetcher:
 
         logger.info(f"Fetching Twitter content via oEmbed API: {oembed_url}")
 
-        # Use forced proxy for Twitter (always use proxy regardless of INI config)
+        # Prefer configured proxy for Twitter/X, but callers may still fall back to direct access.
         req_proxies, _ = Fetcher._get_twitter_forced_proxies(
             config, proxy_mode_override, custom_proxy_override
         )
@@ -2663,6 +2692,18 @@ class Fetcher:
 
             return html_content
         except requests.exceptions.RequestException as e:
+            if Fetcher._should_retry_twitter_without_proxy(
+                proxy_mode_override, req_proxies, e
+            ):
+                logger.warning(
+                    f"oEmbed proxy request failed; retrying Twitter/X without proxy: {e}"
+                )
+                return Fetcher._fetch_twitter_oembed(
+                    url,
+                    config,
+                    proxy_mode_override="no",
+                    custom_proxy_override=None,
+                )
             logger.warning(f"oEmbed API failed ({e}), trying status-id fallbacks")
             fallback_html = Fetcher._fetch_twitter_status_fallbacks(
                 url, proxies=req_proxies
@@ -2826,13 +2867,13 @@ class Fetcher:
             re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
         )
 
-        # For Twitter/X URLs, always use forced proxy regardless of INI config
+        # For Twitter/X URLs, prefer detected proxy settings first and retry direct if needed.
         is_twitter_url = Fetcher._is_twitter_url(url)
         if is_twitter_url:
             _, pw_proxy = Fetcher._get_twitter_forced_proxies(
                 config, proxy_mode_override, custom_proxy_override
             )
-            logger.info("Twitter/X URL detected - using forced proxy settings")
+            logger.info("Twitter/X URL detected - using preferred proxy settings")
         else:
             _, pw_proxy = Fetcher._get_proxies(
                 config, proxy_mode_override, custom_proxy_override
@@ -2967,6 +3008,20 @@ class Fetcher:
                 return content
             except Exception as e:
                 if is_twitter_url:
+                    if Fetcher._should_retry_twitter_without_proxy(
+                        proxy_mode_override, pw_proxy, e
+                    ):
+                        logger.warning(
+                            "Browser fetch failed through Twitter/X proxy; retrying without proxy: %s",
+                            e,
+                        )
+                        return Fetcher.fetch_with_browser(
+                            url,
+                            config,
+                            proxy_mode_override="no",
+                            custom_proxy_override=None,
+                            is_twitter_article=is_twitter_article,
+                        )
                     logger.warning(
                         f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}"
                     )
@@ -3570,7 +3625,7 @@ class Fetcher:
                         )
 
                     if not items:
-                        return []
+                        return [], -1
 
                     current_index = data.get("currentIndex", -1)
                     if current_index is None or current_index < 0:
@@ -6959,8 +7014,8 @@ Examples:
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
                         Override with -x/--proxy and -l/--lang if needed.
-  Twitter/X:           Always uses proxy settings.
-                        Defaults to the same proxy behavior as `-x win`.
+  Twitter/X:           Prefers detected proxy settings when available.
+                        If the proxy path fails, Surf retries direct access automatically.
                         Default backend prefers `uvx --from twitter-cli twitter`.
                         `auto` backend tries CLI first, then native fallback.
   Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `backward`.

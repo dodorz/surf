@@ -43,7 +43,7 @@ Some sites have default policies that can be overridden with command-line argume
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
 - **Xiaohongshu**: Also enables local image OCR by default unless you pass `--no-ocr-images`
-- **Twitter/X**: Uses forced proxy settings equivalent to `-x win` by default and prefers `uvx --from twitter-cli twitter`; `auto` keeps native fallback available
+- **Twitter/X**: Prefers detected proxy settings by default, automatically retries without proxy if the proxy path fails, and prefers `uvx --from twitter-cli twitter`; `auto` keeps native fallback available
 - **Twitter/X, Bluesky, Weibo, Threads**: Thread expansion defaults to `backward` (later same-author replies); use `--thread forward`, `--thread backward`, `--thread both`, or `--no-thread`
 - **Twitter/X, Bluesky, Weibo, Threads**: For short posts, titles and default filenames use `First sentence - Author on Site`
 - **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
@@ -292,7 +292,7 @@ surf --clear-auth all
 ```
 
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
-For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
+For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. By default Surf first tries detected proxy settings for X, and if that proxy path fails it automatically retries the request without proxy. Use `-x win`, `-x custom`, or `-n` to force a specific mode.
 
 ## Help
 

@@ -25,7 +25,7 @@
 
 - **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
 - **小红书**：额外默认开启插图 OCR，可用 `--no-ocr-images` 关闭
-- **Twitter/X**：默认使用等同于 `-x win` 的强制代理设置，并优先使用 `uvx --from twitter-cli twitter`；若需要保留 native 兜底可显式使用 `auto`
+- **Twitter/X**：默认优先使用检测到的代理设置；若代理链路失败会自动回退到直连，并优先使用 `uvx --from twitter-cli twitter`；`auto` 仍会保留 native 兜底
 - **Twitter/X、Bluesky、微博、Threads**：默认开启 `backward` 方向的 thread 追溯；可用 `--thread forward|backward|both` 调整，或用 `--no-thread` 关闭
 - **Twitter/X、Bluesky、微博、Threads**：短帖子标题和默认文件名统一使用“第一句 - 作者名 on 站点”
 - **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
@@ -272,7 +272,7 @@ surf --clear-auth all
 ```
 
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
-对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
+对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。默认情况下 Surf 会先尝试系统已检测到的代理设置；如果代理链路失败，会自动回退到直连。若要强制指定模式，可显式使用 `-x win`、`-x custom` 或 `-n`。
 
 ## 单字符参数连写
 
