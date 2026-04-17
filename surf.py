@@ -5725,9 +5725,42 @@ class OutputHandler:
 
     @staticmethod
     def _safe_filename_title(title, max_len=None):
-        safe_title = "".join(
-            c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-        ).strip()
+        raw_title = str(title or "")
+        # Keep all filename-safe punctuation (including CJK punctuation);
+        # remove only characters that are invalid on Windows filesystems.
+        safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "", raw_title)
+        # Windows does not allow trailing space/dot in path segments.
+        safe_title = safe_title.strip().rstrip(". ")
+        # Normalize whitespace while preserving punctuation.
+        safe_title = re.sub(r"\s+", " ", safe_title)
+
+        # Avoid reserved DOS device names.
+        reserved = {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "COM2",
+            "COM3",
+            "COM4",
+            "COM5",
+            "COM6",
+            "COM7",
+            "COM8",
+            "COM9",
+            "LPT1",
+            "LPT2",
+            "LPT3",
+            "LPT4",
+            "LPT5",
+            "LPT6",
+            "LPT7",
+            "LPT8",
+            "LPT9",
+        }
+        if safe_title.upper() in reserved:
+            safe_title = f"{safe_title}_"
         if max_len:
             safe_title = safe_title[:max_len]
         return safe_title or "Untitled"
@@ -6399,9 +6432,7 @@ class OutputHandler:
             if filepath_dir and not os.path.exists(filepath_dir):
                 os.makedirs(filepath_dir)
         else:
-            safe_title = "".join(
-                c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-            ).strip()
+            safe_title = OutputHandler._safe_filename_title(title)
             pdf_dir = config.get("Output", "pdf_dir", fallback=".")
             if not os.path.exists(pdf_dir):
                 os.makedirs(pdf_dir)
@@ -6436,10 +6467,7 @@ class OutputHandler:
             os.makedirs(html_dir)
 
         # Sanitize filename
-        safe_title = "".join(
-            c for c in title if c.isalnum() or c in (" ", ".", "_", "-")
-        ).strip()
-        safe_title = safe_title[:100]
+        safe_title = OutputHandler._safe_filename_title(title, max_len=100)
 
         if inline:
             html_content = OutputHandler._inline_resources(html_content)
