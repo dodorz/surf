@@ -33,7 +33,7 @@ surf "https://example.com" -r
 - **PDF Generation**: Generate PDF files using Playwright.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
-- **Flexible Proxy**: Configurable proxy settings via `config.ini` or `-x/--proxy` option (auto/win/no/set).
+- **Flexible Proxy**: Unified proxy modes: `env` (environment variables), `win` (Windows Internet Settings), `custom`, and `no`.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 
@@ -43,7 +43,7 @@ Some sites have default policies that can be overridden with command-line argume
 
 - **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
 - **Xiaohongshu**: Also enables local image OCR by default unless you pass `--no-ocr-images`
-- **Twitter/X**: Prefers detected proxy settings by default, automatically retries without proxy if the proxy path fails, and prefers `uvx --from twitter-cli twitter`; `auto` keeps native fallback available
+- **Twitter/X**: Uses the same proxy mode pipeline as Surf, automatically retries direct access when implicit proxy paths fail, and prefers `uvx --from twitter-cli twitter`
 - **Twitter/X, Bluesky, Weibo, Threads**: Thread expansion defaults to `backward` (later same-author replies); use `--thread forward`, `--thread backward`, `--thread both`, or `--no-thread`
 - **Twitter/X, Bluesky, Weibo, Threads**: For short posts, titles and default filenames use `First sentence - Author on Site`
 - **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
@@ -80,12 +80,15 @@ We recommend using `uv` for a clean environment.
 
 The web form exposes the most commonly used Surf options directly, including:
 - language mode (`trans` / `raw` / `both`)
-- proxy mode and custom proxy
+- proxy mode and custom proxy (`win/env/custom/no` on Windows, `env/custom/no` on non-Windows)
 - browser rendering
 - image OCR on/off, OCR engine, and OCR language
 - same-author thread expansion (`forward` / `backward` / `both` / off)
 - optional LLM provider override for translation
 - free-form URL input: you can paste share text and Surf will extract the first `http/https` URL automatically
+
+Web proxy default selection is deterministic:
+- site default policy -> `config.ini` (`[Network].proxy_mode`) -> `env`
 
 For local access:
 
@@ -147,8 +150,8 @@ rate = +0%
 volume = +0%
 
 [Network]
-; Proxy mode: auto (env vars), no (no proxy), win (Windows registry), custom (custom_proxy)
-proxy_mode = auto
+; Proxy mode: env (environment vars), win (Windows Internet Settings), custom (custom_proxy), no (no proxy)
+proxy_mode = env
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
 
@@ -184,6 +187,23 @@ Convert a URL and print Markdown to console.
 
 ```bash
 uv run surf.py "https://example.com"
+```
+
+### Proxy Modes (-x / -c / -n)
+
+```bash
+# Use environment variables (http_proxy / https_proxy / no_proxy)
+uv run surf.py "https://example.com" -x env
+
+# Windows only: use Windows Internet Settings proxy (WinINET)
+uv run surf.py "https://example.com" -x win
+
+# Custom proxy (two equivalent forms)
+uv run surf.py "https://example.com" -x custom --set-proxy http://127.0.0.1:7890
+uv run surf.py "https://example.com" -c http://127.0.0.1:7890
+
+# Disable proxy
+uv run surf.py "https://example.com" -n
 ```
 
 ### Save Note (-n)

@@ -28,10 +28,11 @@
 - **一致性**：短参数与长参数保持语义一致
 
 **代理参数示例**：
-- `-x/--proxy auto`：使用环境变量代理（默认）
+- `-x/--proxy env`：使用环境变量代理
 - `-x/--proxy win`：使用 Windows 系统代理（WinINET）
 - `-x/--proxy no`：不使用代理
-- `-x/--proxy set`：使用自定义代理（配合 `--set-proxy` 或配置文件）
+- `-x/--proxy custom --set-proxy URL`：使用自定义代理
+- `-c URL`：`--proxy custom --set-proxy URL` 的简写
 
 ## 文档同步
 

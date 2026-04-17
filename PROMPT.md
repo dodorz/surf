@@ -26,8 +26,9 @@ surf.py <url> [选项]
 - `-o`: 等同于 `--trans-mode original`
 - `-b`: 等同于 `--trans-mode both`
 - `-O`: 简写参数，等同于 `--output -`（输出到控制台）
-- `-x`, `--proxy`: 代理模式 (auto/win/no/set，默认 auto)
-- `--set-proxy`: 自定义代理地址（配合 -x set 使用）
+- `-x`, `--proxy`: 代理模式 (env/win/custom/no)
+- `--set-proxy`: 自定义代理地址（配合 `-x custom` 使用）
+- `-c <PROXY>`: `-x custom --set-proxy <PROXY>` 简写
 
 ## 配置文件
 

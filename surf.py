@@ -203,8 +203,8 @@ class Fetcher:
     @staticmethod
     def _get_system_proxy_win():
         """
-        Get Windows system proxy from WinINET (registry or IE settings).
-        Returns dict or None.
+        Get Windows system proxy from WinINET (registry / Internet Settings).
+        Returns (req_proxies, pw_proxy) or (None, None).
         """
         try:
             import winreg
@@ -218,112 +218,31 @@ class Fetcher:
             if enable:
                 proxy = winreg.QueryValueEx(key, "ProxyServer")[0]
                 if proxy:
-                    # Check for override (per-protocol)
-                    winreg.QueryValueEx(key, "ProxyOverride")[0] if False else None
-                    return {"http": proxy, "https": proxy}
-            return None
+                    return Fetcher._parse_proxy_server_config(proxy)
+            return None, None
         except Exception as e:
             logger.warning(f"Failed to get Windows proxy: {e}")
-            return None
-
-    @staticmethod
-    def _get_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
-        """
-        Returns a dictionary of proxies based on configuration.
-        For requests: {'http': '...', 'https': '...'} or None
-        For playwright: {'server': '...'} or None
-
-        Args:
-            config: Config object
-            proxy_mode_override: Override proxy_mode from command line (auto/no/win/custom)
-            custom_proxy_override: Override custom_proxy from command line
-        """
-        # Use command line override if provided, otherwise use config
-        mode = (
-            proxy_mode_override.lower()
-            if proxy_mode_override
-            else config.get("Network", "proxy_mode", fallback="auto").lower()
-        )
-
-        if mode == "no":
             return None, None
 
-        if mode == "custom":
-            # Use command line override if provided, otherwise use config
-            custom = (
-                custom_proxy_override
-                if custom_proxy_override
-                else config.get("Network", "custom_proxy")
-            )
-            if custom:
-                req_proxies = {"http": custom, "https": custom}
-                pw_proxy = {"server": custom}
-                return req_proxies, pw_proxy
-            else:
-                logger.warning(
-                    "Custom proxy mode selected but no custom_proxy defined. Falling back to auto."
-                )
-                mode = "auto"
+    @staticmethod
+    def _is_windows():
+        return os.name == "nt"
 
-        if mode == "win":
-            # Use WinINet API from Windows registry
-            try:
-                import winreg
+    @staticmethod
+    def _normalize_proxy_mode(mode):
+        if mode is None:
+            return None
+        normalized = str(mode).strip().lower()
+        if not normalized:
+            return None
+        aliases = {
+            "auto": "env",
+            "set": "custom",
+        }
+        return aliases.get(normalized, normalized)
 
-                proxy_config = None
-                try:
-                    # Try to read proxy settings from Internet Explorer/Edge
-                    key = winreg.OpenKey(
-                        winreg.HKEY_CURRENT_USER,
-                        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                    )
-                    proxy_enable = winreg.QueryValueEx(key, "ProxyEnable")[0]
-                    if proxy_enable:
-                        proxy_config = winreg.QueryValueEx(key, "ProxyServer")[0]
-                    key.Close()
-                except Exception as e:
-                    logger.debug(f"Could not read Windows proxy registry: {e}")
-
-                if proxy_config:
-                    # Parse proxy config (can be "http=proxy:8080;https=proxy:8080" format)
-                    proxies = {}
-                    pw_proxy_server = None
-                    for part in proxy_config.split(";"):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            proxies[k.strip()] = v.strip()
-                            if k.strip() == "http":
-                                pw_proxy_server = v.strip()
-                        else:
-                            # Single proxy for all protocols
-                            proxies["http"] = part.strip()
-                            proxies["https"] = part.strip()
-                            pw_proxy_server = part.strip()
-
-                    # Build requests proxies dict
-                    req_proxies = {}
-                    if "http" in proxies:
-                        req_proxies["http"] = proxies["http"]
-                    if "https" in proxies:
-                        req_proxies["https"] = proxies["https"]
-                    if not req_proxies:
-                        req_proxies = None
-
-                    # Playwright proxy
-                    pw_proxy = None
-                    if pw_proxy_server:
-                        pw_proxy = {"server": pw_proxy_server}
-
-                    logger.info(f"Using Windows proxy: {proxy_config}")
-                    return req_proxies, pw_proxy
-                else:
-                    logger.info("Windows proxy not enabled. Falling back to auto.")
-                    mode = "auto"
-            except ImportError:
-                logger.warning("winreg not available. Falling back to auto.")
-                mode = "auto"
-
-        # mode == 'auto' (Check env vars, fallback to no proxy if not set)
+    @staticmethod
+    def _read_env_proxies():
         http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
         https_proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
         no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
@@ -336,7 +255,6 @@ class Fetcher:
         if not req_proxies:
             req_proxies = None
 
-        # Playwright prefers HTTPS, fallback HTTP
         server = https_proxy or http_proxy
         pw_proxy = None
         if server:
@@ -345,6 +263,164 @@ class Fetcher:
                 pw_proxy["bypass"] = no_proxy
 
         return req_proxies, pw_proxy
+
+    @staticmethod
+    def _parse_proxy_server_config(proxy_config):
+        """
+        Parse proxy config strings like:
+        - host:port
+        - http=host:port;https=host:port
+        """
+        if not proxy_config:
+            return None, None
+
+        proxies = {}
+        pw_proxy_server = None
+        for part in str(proxy_config).split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip()
+                if not v:
+                    continue
+                proxies[k] = v
+                if k == "https" and not pw_proxy_server:
+                    pw_proxy_server = v
+                elif k == "http" and not pw_proxy_server:
+                    pw_proxy_server = v
+            else:
+                proxies["http"] = part
+                proxies["https"] = part
+                pw_proxy_server = part
+
+        req_proxies = {}
+        if "http" in proxies:
+            req_proxies["http"] = proxies["http"]
+        if "https" in proxies:
+            req_proxies["https"] = proxies["https"]
+        if not req_proxies:
+            req_proxies = None
+
+        pw_proxy = {"server": pw_proxy_server} if pw_proxy_server else None
+        return req_proxies, pw_proxy
+
+    @staticmethod
+    def _read_winhttp_proxies():
+        """
+        Read WinHTTP proxy (`netsh winhttp show proxy`) as the last fallback.
+        Returns (req_proxies, pw_proxy) or (None, None).
+        """
+        if not Fetcher._is_windows():
+            return None, None
+
+        try:
+            result = subprocess.run(
+                ["netsh", "winhttp", "show", "proxy"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            output = (result.stdout or "") + "\n" + (result.stderr or "")
+            lower = output.lower()
+            if "direct access (no proxy server)" in lower:
+                return None, None
+
+            match = re.search(r"Proxy Server\(s\)\s*:\s*(.+)", output, re.IGNORECASE)
+            if not match:
+                return None, None
+
+            proxy_config = match.group(1).strip()
+            if not proxy_config:
+                return None, None
+
+            req_proxies, pw_proxy = Fetcher._parse_proxy_server_config(proxy_config)
+            if req_proxies or pw_proxy:
+                logger.info(f"Using WinHTTP proxy: {proxy_config}")
+            return req_proxies, pw_proxy
+        except Exception as e:
+            logger.debug(f"Could not read WinHTTP proxy: {e}")
+            return None, None
+
+    @staticmethod
+    def _get_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Returns a dictionary of proxies based on configuration.
+        For requests: {'http': '...', 'https': '...'} or None
+        For playwright: {'server': '...'} or None
+
+        Args:
+            config: Config object
+            proxy_mode_override: Override proxy_mode (env/no/win/custom)
+            custom_proxy_override: Override custom_proxy from command line
+        """
+        mode_override = Fetcher._normalize_proxy_mode(proxy_mode_override)
+        config_mode = Fetcher._normalize_proxy_mode(
+            config.get("Network", "proxy_mode", fallback="env")
+        )
+        config_custom = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+        custom_override = (custom_proxy_override or "").strip()
+
+        # 1) Explicit mode from CLI/Web request
+        if mode_override:
+            if mode_override == "no":
+                return None, None
+            if mode_override == "env":
+                return Fetcher._read_env_proxies()
+            if mode_override == "custom":
+                custom = custom_override or config_custom
+                if custom:
+                    return {"http": custom, "https": custom}, {"server": custom}
+                logger.warning(
+                    "Custom proxy mode selected but no proxy URL provided. Falling back to direct connection."
+                )
+                return None, None
+            if mode_override == "win":
+                if not Fetcher._is_windows():
+                    logger.warning("Proxy mode 'win' is only available on Windows.")
+                    return None, None
+                req_proxies, pw_proxy = Fetcher._get_system_proxy_win()
+                if req_proxies or pw_proxy:
+                    return req_proxies, pw_proxy
+                logger.info("Windows Internet Settings proxy is not enabled.")
+                return None, None
+
+            logger.warning(f"Unknown proxy mode '{mode_override}', falling back to direct connection.")
+            return None, None
+
+        # 2) Environment variables (implicit default path)
+        req_proxies, pw_proxy = Fetcher._read_env_proxies()
+        if req_proxies or pw_proxy:
+            return req_proxies, pw_proxy
+
+        # 3) INI configuration
+        if config_mode == "no":
+            return None, None
+        if config_mode == "custom":
+            if config_custom:
+                return {"http": config_custom, "https": config_custom}, {"server": config_custom}
+        elif config_mode == "win":
+            if Fetcher._is_windows():
+                req_proxies, pw_proxy = Fetcher._get_system_proxy_win()
+                if req_proxies or pw_proxy:
+                    return req_proxies, pw_proxy
+            else:
+                logger.warning("Ignoring INI proxy_mode=win on non-Windows platform.")
+        elif config_mode == "env":
+            # Already tried environment above.
+            pass
+        elif config_mode:
+            logger.warning(f"Unknown INI proxy_mode '{config_mode}', ignoring.")
+
+        # 4) WinHTTP fallback
+        req_proxies, pw_proxy = Fetcher._read_winhttp_proxies()
+        if req_proxies or pw_proxy:
+            return req_proxies, pw_proxy
+
+        return None, None
 
     @staticmethod
     def fetch(
@@ -381,6 +457,7 @@ class Fetcher:
             site_config
             and site_config.get("default_no_proxy")
             and proxy_mode_override is None
+            and not Fetcher._is_windows()
         ):
             logger.info(f"{site_name}: Using site default 'no proxy'")
             proxy_mode_override = "no"
@@ -1977,108 +2054,19 @@ class Fetcher:
     ):
         """
         Get preferred proxies for Twitter/X.
-        Priority: command-line args > WinINET > env vars > config custom_proxy.
+        Priority: explicit mode > env vars > INI > WinHTTP.
         If no explicit proxy is requested, callers may still retry without proxy.
 
         Returns:
             tuple: (req_proxies, pw_proxy)
         """
-        # If command-line proxy args provided, respect them first
-        if proxy_mode_override:
-            mode = proxy_mode_override.lower()
-            if mode == "no":
-                logger.info("Twitter: Command-line specified no proxy")
-                return None, None
-            elif mode == "custom" and custom_proxy_override:
-                logger.info(
-                    f"Twitter: Using command-line custom proxy: {custom_proxy_override}"
-                )
-                req_proxies = {
-                    "http": custom_proxy_override,
-                    "https": custom_proxy_override,
-                }
-                pw_proxy = {"server": custom_proxy_override}
-                return req_proxies, pw_proxy
-            elif mode == "win":
-                logger.info("Twitter: Command-line specified Windows proxy")
-            else:
-                logger.info(
-                    "Twitter: No explicit proxy mode provided; trying detected proxy settings first"
-                )
-
-        # Priority 1: WinINET (same default behavior as `surf -x win`)
-        try:
-            import winreg
-
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-            )
-            proxy_enable = winreg.QueryValueEx(key, "ProxyEnable")[0]
-            if proxy_enable:
-                proxy_config = winreg.QueryValueEx(key, "ProxyServer")[0]
-                key.Close()
-                if proxy_config:
-                    # Parse proxy config
-                    proxies = {}
-                    pw_proxy_server = None
-                    for part in proxy_config.split(";"):
-                        if "=" in part:
-                            k, v = part.split("=", 1)
-                            proxies[k.strip()] = v.strip()
-                            if k.strip() == "http":
-                                pw_proxy_server = v.strip()
-                        else:
-                            proxies["http"] = part.strip()
-                            proxies["https"] = part.strip()
-                            pw_proxy_server = part.strip()
-
-                    req_proxies = {}
-                    if "http" in proxies:
-                        req_proxies["http"] = proxies["http"]
-                    if "https" in proxies:
-                        req_proxies["https"] = proxies["https"]
-
-                    pw_proxy = None
-                    if pw_proxy_server:
-                        pw_proxy = {"server": pw_proxy_server}
-
-                    logger.info(f"Twitter: Using WinINET proxy: {proxy_config}")
-                    return req_proxies, pw_proxy
-            key.Close()
-        except Exception as e:
-            logger.debug(f"Could not read WinINET proxy for Twitter: {e}")
-
-        # Priority 2: Environment variables
-        http_proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
-        https_proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
-        no_proxy = os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
-
-        if http_proxy or https_proxy:
-            server = https_proxy or http_proxy
-            req_proxies = {}
-            if http_proxy:
-                req_proxies["http"] = http_proxy
-            if https_proxy:
-                req_proxies["https"] = https_proxy
-            pw_proxy = {"server": server}
-            if no_proxy:
-                pw_proxy["bypass"] = no_proxy
-            logger.info(f"Twitter: Using environment proxy fallback: {server}")
-            return req_proxies, pw_proxy
-
-        # Priority 3: Config custom_proxy
-        custom_proxy = config.get("Network", "custom_proxy")
-        if custom_proxy:
-            logger.info(f"Twitter: Using config custom_proxy: {custom_proxy}")
-            req_proxies = {"http": custom_proxy, "https": custom_proxy}
-            pw_proxy = {"server": custom_proxy}
-            return req_proxies, pw_proxy
-
-        # Last resort: no proxy (should not happen for Twitter, but need to handle)
-        logger.warning(
-            "Twitter: No proxy configured; falling back to direct connection."
+        req_proxies, pw_proxy = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
         )
+        if req_proxies or pw_proxy:
+            return req_proxies, pw_proxy
+
+        logger.info("Twitter: No proxy resolved; using direct connection.")
         return None, None
 
     @staticmethod
@@ -7086,6 +7074,8 @@ Examples:
   surf -r https://example.com                   # Keep original language
   surf -b https://example.com                   # Bilingual output
   surf -x win https://example.com               # Use Windows proxy
+  surf -x env https://example.com               # Use proxy from environment variables
+  surf -c http://127.0.0.1:7890 https://example.com
   surf -n https://example.com                   # No proxy
   surf -hrn https://example.com                 # Combined short flags
   surf -t https://x.com/user/status/123         # Fetch same-author later replies in the thread
@@ -7094,7 +7084,7 @@ Examples:
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
                         Override with -x/--proxy and -l/--lang if needed.
-  Twitter/X:           Prefers detected proxy settings when available.
+  Twitter/X:           Uses the same proxy order as Surf.
                         If the proxy path fails, Surf retries direct access automatically.
                         Default backend prefers `uvx --from twitter-cli twitter`.
                         `auto` backend tries CLI first, then native fallback.
@@ -7242,15 +7232,23 @@ Twitter/X Backend:
     )
 
     # Network
+    proxy_choices = ["env", "custom", "no"]
+    if Fetcher._is_windows():
+        proxy_choices.insert(1, "win")
     parser.add_argument(
         "-x",
         "--proxy",
-        choices=["win", "custom", "no"],
-        help="Proxy mode: win=Windows, custom=use --set-proxy, no=no proxy (default: auto)",
+        choices=proxy_choices,
+        help="Proxy mode: env=environment vars, custom=use --set-proxy, no=no proxy"
+        + (", win=Windows Internet Settings" if Fetcher._is_windows() else ""),
     )
-    parser.add_argument("-c", action="store_true", help="Shorthand for --proxy custom")
+    parser.add_argument(
+        "-c",
+        metavar="PROXY",
+        help="Shorthand for --proxy custom --set-proxy PROXY",
+    )
     parser.add_argument("-n", action="store_true", help="Shorthand for --proxy no")
-    parser.add_argument("--set-proxy", help="Custom proxy URL (requires -x custom)")
+    parser.add_argument("--set-proxy", help="Custom proxy URL (requires --proxy custom)")
 
     # LLM
     parser.add_argument("--llm", help="Override the default LLM provider")
@@ -7336,6 +7334,30 @@ Twitter/X Backend:
         print(f"Imported auth state for {normalized_site_name} from {import_path}")
         return
 
+    # Resolve proxy args (shared by normal fetch and --login)
+    proxy_mode = args.proxy
+    custom_proxy = args.set_proxy
+    if args.c:
+        if args.proxy and args.proxy != "custom":
+            parser.error("-c cannot be combined with --proxy except --proxy custom")
+        if args.set_proxy:
+            parser.error("-c cannot be combined with --set-proxy")
+        proxy_mode = "custom"
+        custom_proxy = args.c
+    if args.n:
+        if args.proxy and args.proxy != "no":
+            parser.error("-n cannot be combined with --proxy except --proxy no")
+        if args.c or args.set_proxy:
+            parser.error("-n cannot be combined with custom proxy arguments")
+        proxy_mode = "no"
+        custom_proxy = None
+
+    # Validate proxy arguments
+    if custom_proxy and proxy_mode != "custom":
+        parser.error("--set-proxy requires --proxy custom")
+    if proxy_mode == "custom" and not custom_proxy:
+        parser.error("--proxy custom requires --set-proxy PROXY (or use -c PROXY)")
+
     # Handle --login
     if args.login:
         site_name = args.login.lower()
@@ -7346,15 +7368,9 @@ Twitter/X Backend:
             )
         login_site = AuthHandler.normalize_site_name(site_name)
         success = AuthHandler.interactive_login(
-            login_site, login_url, config, args.proxy, args.set_proxy
+            login_site, login_url, config, proxy_mode, custom_proxy
         )
         sys.exit(0 if success else 1)
-
-    # Validate proxy arguments
-    if args.set_proxy and args.proxy != "custom":
-        parser.error("--set-proxy requires -x custom")
-    if args.proxy == "custom" and not args.set_proxy:
-        parser.error("-x custom requires --set-proxy")
 
     # Check if url is required but not provided
     if not args.url:
@@ -7383,16 +7399,7 @@ Twitter/X Backend:
         lang_mode = "both"
 
     # Determine proxy mode override
-    proxy_mode = None  # use config default (auto)
-    if args.proxy:
-        proxy_mode = args.proxy
-    elif args.c:
-        proxy_mode = "custom"
-    elif args.n:
-        proxy_mode = "no"
-
-    # Determine custom proxy
-    custom_proxy = args.set_proxy
+    # None means implicit resolution (env -> INI -> WinHTTP).
 
     fetch_thread = None
     if args.thread:
@@ -7404,7 +7411,7 @@ Twitter/X Backend:
     handler, site_name, site_config = _get_handler_for_url(args.url)
     if site_config:
         # Apply special site defaults (can be overridden by command line)
-        if site_config.get("default_no_proxy") and proxy_mode is None:
+        if site_config.get("default_no_proxy") and proxy_mode is None and not Fetcher._is_windows():
             logger.info(
                 f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)"
             )

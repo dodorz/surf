@@ -14,7 +14,7 @@
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
-- **灵活代理**：通过 `config.ini` 配置代理设置（系统默认、自定义或不使用代理）。
+- **灵活代理**：统一代理模式：`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
 - **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用。
 - **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
@@ -25,7 +25,7 @@
 
 - **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
 - **小红书**：额外默认开启插图 OCR，可用 `--no-ocr-images` 关闭
-- **Twitter/X**：默认优先使用检测到的代理设置；若代理链路失败会自动回退到直连，并优先使用 `uvx --from twitter-cli twitter`；`auto` 仍会保留 native 兜底
+- **Twitter/X**：代理策略与 Surf 主流程一致；隐式代理链路失败时会自动回退到直连，并优先使用 `uvx --from twitter-cli twitter`
 - **Twitter/X、Bluesky、微博、Threads**：默认开启 `backward` 方向的 thread 追溯；可用 `--thread forward|backward|both` 调整，或用 `--no-thread` 关闭
 - **Twitter/X、Bluesky、微博、Threads**：短帖子标题和默认文件名统一使用“第一句 - 作者名 on 站点”
 - **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
@@ -57,12 +57,15 @@
 
 Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 语言模式（`trans` / `raw` / `both`）
-- 代理模式和自定义代理
+- 代理模式和自定义代理（Windows: `win/env/custom/no`；非 Windows: `env/custom/no`）
 - 浏览器渲染
 - 图片 OCR 开关、OCR 引擎、OCR 语言
 - Thread 抓取模式（`forward` / `backward` / `both` / 关闭）
 - 翻译时可选的 LLM Provider 覆盖
 - 宽松 URL 输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接
+
+Web 界面的代理默认值规则：
+- 站点策略 -> `config.ini`（`[Network].proxy_mode`）-> `env`
 
 本机访问时可以直接启动：
 
@@ -126,8 +129,8 @@ rate = +0%
 volume = +0%
 
 [Network]
-; 代理模式: auto (环境变量), no (不使用), win (Windows注册表), custom (自定义地址)
-proxy_mode = auto
+; 代理模式: env (环境变量), win (Windows Internet Settings), custom (自定义地址), no (不使用)
+proxy_mode = env
 ; 自定义代理地址 (例如 http://127.0.0.1:7890)
 custom_proxy =
 
@@ -208,8 +211,10 @@ surf "https://example.com" -h --html-inline  # 保存 HTML 并内联 CSS/JS
 使用 `-x` 或快捷方式设置代理模式：
 
 ```bash
+surf "https://example.com" -x env      # 使用环境变量代理
 surf "https://example.com" -x win      # 使用 Windows 代理
-surf "https://example.com" -c --set-proxy http://127.0.0.1:7890  # 自定义代理
+surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890  # 自定义代理
+surf "https://example.com" -c http://127.0.0.1:7890  # 自定义代理简写
 surf "https://example.com" -n          # 不使用代理
 ```
 

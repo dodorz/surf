@@ -387,10 +387,17 @@ HTML_TEMPLATE = """
                     <div class="form-group">
                         <label for="proxy">代理模式</label>
                         <select id="proxy" name="proxy">
-                            <option value="auto">自动 (环境变量)</option>
-                            <option value="no">不使用代理</option>
-                            <option value="win">Windows 系统代理</option>
-                            <option value="custom">自定义代理</option>
+                            {% if is_windows %}
+                            <option value="win" {% if default_proxy_mode == 'win' %}selected{% endif %}>Windows 系统代理</option>
+                            <option value="env" {% if default_proxy_mode == 'env' %}selected{% endif %}>环境变量</option>
+                            <option value="custom" {% if default_proxy_mode == 'custom' %}selected{% endif %}>自定义代理</option>
+                            <option value="no" {% if default_proxy_mode == 'no' %}selected{% endif %}>不使用代理</option>
+                            {% endif %}
+                            {% if not is_windows %}
+                            <option value="env" {% if default_proxy_mode == 'env' %}selected{% endif %}>环境变量</option>
+                            <option value="custom" {% if default_proxy_mode == 'custom' %}selected{% endif %}>自定义代理</option>
+                            <option value="no" {% if default_proxy_mode == 'no' %}selected{% endif %}>不使用代理</option>
+                            {% endif %}
                         </select>
                     </div>
                     
@@ -508,11 +515,48 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        let proxyModeTouched = false;
+        let proxyModeProgrammaticUpdate = false;
+        const proxySelect = document.getElementById('proxy');
+        const urlInput = document.getElementById('url');
+
         // Show/hide custom proxy input
-        document.getElementById('proxy').addEventListener('change', function() {
+        proxySelect.addEventListener('change', function() {
             const customGroup = document.getElementById('customProxyGroup');
             customGroup.style.display = this.value === 'custom' ? 'block' : 'none';
+            if (!proxyModeProgrammaticUpdate) {
+                proxyModeTouched = true;
+            }
         });
+        proxyModeProgrammaticUpdate = true;
+        proxySelect.dispatchEvent(new Event('change'));
+        proxyModeProgrammaticUpdate = false;
+
+        async function refreshProxyDefault(force = false) {
+            if (!force && proxyModeTouched) {
+                return;
+            }
+            try {
+                const url = (urlInput?.value || '').trim();
+                const query = url ? ('?url=' + encodeURIComponent(url)) : '';
+                const response = await fetch('/api/proxy-default' + query);
+                const result = await response.json();
+                if (result.success && result.proxy_mode) {
+                    proxyModeProgrammaticUpdate = true;
+                    proxySelect.value = result.proxy_mode;
+                    proxySelect.dispatchEvent(new Event('change'));
+                    proxyModeProgrammaticUpdate = false;
+                }
+            } catch (error) {
+                // Ignore default-proxy refresh errors and keep current selection.
+                proxyModeProgrammaticUpdate = false;
+            }
+        }
+
+        if (urlInput) {
+            urlInput.addEventListener('blur', () => refreshProxyDefault(false));
+        }
+        refreshProxyDefault(true);
 
         // Show/hide format-specific options
         document.getElementById('format').addEventListener('change', function() {
@@ -567,6 +611,9 @@ HTML_TEMPLATE = """
             
             const formData = new FormData(this);
             const data = Object.fromEntries(formData.entries());
+            if (!data.proxy) {
+                data.proxy = proxySelect.value || 'env';
+            }
             
             // Convert checkboxes to booleans
             data.browser = data.browser === 'on';
@@ -722,6 +769,34 @@ def get_config():
     return Config()
 
 
+def normalize_web_proxy_mode(mode):
+    normalized = Fetcher._normalize_proxy_mode(mode)
+    if normalized == "win" and not Fetcher._is_windows():
+        return "env"
+    if normalized in {"env", "win", "custom", "no"}:
+        return normalized
+    return "env"
+
+
+def resolve_web_proxy_mode_default(config, url=None):
+    """
+    Resolve Web UI default proxy mode with precedence:
+    special-site policy -> INI -> env.
+    """
+    if url:
+        _, _, site_config = _get_handler_for_url(url)
+        if site_config and site_config.get("default_no_proxy"):
+            return "no"
+
+    ini_mode = normalize_web_proxy_mode(config.get("Network", "proxy_mode", fallback="env"))
+    if ini_mode == "custom":
+        custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+        if custom_proxy:
+            return "custom"
+        return "env"
+    return ini_mode if ini_mode else "env"
+
+
 def get_runtime_version():
     """Read the current project version at request time."""
     return _get_version()
@@ -792,7 +867,22 @@ def resolve_web_thread_mode(data, site_name, site_config):
 @app.route("/")
 def index():
     """Serve the main page."""
-    return render_template_string(HTML_TEMPLATE, version=get_runtime_version())
+    config = get_config()
+    return render_template_string(
+        HTML_TEMPLATE,
+        version=get_runtime_version(),
+        is_windows=Fetcher._is_windows(),
+        default_proxy_mode=resolve_web_proxy_mode_default(config),
+    )
+
+
+@app.route("/api/proxy-default", methods=["GET"])
+def proxy_default():
+    """Resolve the default proxy mode for current URL/context."""
+    config = get_config()
+    url = extract_url_from_text(request.args.get("url"))
+    mode = resolve_web_proxy_mode_default(config, url=url)
+    return jsonify({"success": True, "proxy_mode": mode})
 
 
 @app.route("/api/process", methods=["POST"])
@@ -810,10 +900,10 @@ def process_url():
 
     try:
         # Fetch content
-        proxy_mode = data.get("proxy", "auto")
-        if proxy_mode == "auto":
-            proxy_mode = None
-        custom_proxy = data.get("custom_proxy")
+        proxy_mode = normalize_web_proxy_mode(data.get("proxy", "env"))
+        custom_proxy = (data.get("custom_proxy") or "").strip() or None
+        if proxy_mode == "custom" and not custom_proxy:
+            return jsonify({"success": False, "error": "custom 代理模式需要填写自定义代理地址"})
         
         # Language mode
         lang_mode = data.get("lang", "trans")
@@ -821,9 +911,6 @@ def process_url():
         _, site_name, site_config = _get_handler_for_url(url)
         fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
         if site_config:
-            if site_config.get("default_no_proxy") and proxy_mode is None:
-                logger.info(f"Web: {site_name} using default 'no proxy'")
-                proxy_mode = "no"
             if site_config.get("default_no_translate") and lang_mode == "trans":
                 logger.info(f"Web: {site_name} using default 'no translate'")
                 lang_mode = "raw"
