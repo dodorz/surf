@@ -64,8 +64,31 @@ def setup_verbose_logging():
         )
 
 
+def resolve_user_path(path):
+    """
+    Normalize user-supplied filesystem paths.
+
+    On Windows, Unix-style separators are accepted and `~` resolves to the
+    current user's profile directory (`%USERPROFILE%`).
+    """
+    if path is None:
+        return None
+
+    raw_path = str(path).strip()
+    if not raw_path or raw_path == "-":
+        return raw_path
+
+    if os.name == "nt":
+        normalized = raw_path.replace("/", "\\")
+        normalized = os.path.expanduser(normalized)
+        return os.path.normpath(normalized)
+
+    return os.path.expanduser(raw_path)
+
+
 class Config:
     def __init__(self, config_path="config.ini"):
+        config_path = resolve_user_path(config_path)
         # Disable interpolation to allow '%' in values (e.g. for TTS rate/voltage)
         self.config = configparser.ConfigParser(interpolation=None)
         if not os.path.exists(config_path):
@@ -77,6 +100,10 @@ class Config:
 
     def get(self, section, key, fallback=None):
         return self.config.get(section, key, fallback=fallback)
+
+    def get_path(self, section, key, fallback=None):
+        value = self.get(section, key, fallback=fallback)
+        return resolve_user_path(value)
 
     def get_llm_config(self, provider_override=None):
         """Get LLM configuration for the specified provider or the default one.
@@ -4367,7 +4394,11 @@ class Fetcher:
                     preferred = OutputHandler._safe_filename_title(preferred_basename) if preferred_basename else None
                     safe_name = f"{(preferred or derived_stem)}.pdf"
 
-                    resolved_output = os.path.expanduser(output_path) if output_path else None
+                    resolved_output = (
+                        resolve_user_path(output_path)
+                        if output_path
+                        else None
+                    )
                     if resolved_output == "-":
                         logger.warning(
                             "NCPSSD direct PDF download does not support stdout output. "
@@ -4392,7 +4423,7 @@ class Fetcher:
                             filepath = f"{filepath}.pdf"
                         return filepath
 
-                    pdf_dir = config.get("Output", "pdf_dir", fallback=".")
+                    pdf_dir = config.get_path("Output", "pdf_dir", fallback=".")
                     if not os.path.exists(pdf_dir):
                         os.makedirs(pdf_dir)
                     return os.path.join(pdf_dir, safe_name)
@@ -5933,7 +5964,7 @@ class OcrHandler:
         except Exception as e:
             raise RuntimeError(f"pytesseract is unavailable: {e}") from e
 
-        tesseract_cmd = config.get("OCR", "tesseract_cmd", fallback="").strip()
+        tesseract_cmd = config.get_path("OCR", "tesseract_cmd", fallback="").strip()
         if tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
@@ -6800,7 +6831,7 @@ class OutputHandler:
             source_url: Source URL to include in YAML front matter (default: None)
             translator: Translation model name to include in YAML front matter (default: None)
         """
-        md_dir = config.get("Output", "md_dir", fallback="./notes")
+        md_dir = config.get_path("Output", "md_dir", fallback="./notes")
         if not os.path.exists(md_dir):
             os.makedirs(md_dir)
 
@@ -6811,7 +6842,7 @@ class OutputHandler:
         # Determine filepath
         if output_path:
             # Expand user home directory (~) if present
-            filepath = os.path.expanduser(output_path)
+            filepath = resolve_user_path(output_path)
             # Handle special cases: "." or "./" (current directory)
             if filepath == "." or filepath == "./":
                 # Use current directory + default filename
@@ -6906,14 +6937,14 @@ class OutputHandler:
         # Determine filepath
         if output_path:
             # Expand user home directory (~) if present
-            filepath = os.path.expanduser(output_path)
+            filepath = resolve_user_path(output_path)
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
             if filepath_dir and not os.path.exists(filepath_dir):
                 os.makedirs(filepath_dir)
         else:
             safe_title = OutputHandler._safe_filename_title(title)
-            pdf_dir = config.get("Output", "pdf_dir", fallback=".")
+            pdf_dir = config.get_path("Output", "pdf_dir", fallback=".")
             if not os.path.exists(pdf_dir):
                 os.makedirs(pdf_dir)
             filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
@@ -6942,7 +6973,7 @@ class OutputHandler:
             output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs (used when inline=False)
         """
-        html_dir = config.get("Output", "html_dir", fallback=".")
+        html_dir = config.get_path("Output", "html_dir", fallback=".")
         if not os.path.exists(html_dir):
             os.makedirs(html_dir)
 
@@ -6984,7 +7015,7 @@ class OutputHandler:
             return None
         elif output_path:
             # Expand user home directory (~) if present
-            filepath = os.path.expanduser(output_path)
+            filepath = resolve_user_path(output_path)
             # Ensure directory exists
             filepath_dir = os.path.dirname(filepath)
             if filepath_dir and not os.path.exists(filepath_dir):
@@ -7327,6 +7358,7 @@ class AuthHandler:
                 f"No saved auth state found for {normalized_site_name}. Run `surf --login {normalized_site_name}` first."
             )
 
+        export_path = resolve_user_path(export_path)
         export_dir = os.path.dirname(os.path.abspath(export_path))
         if export_dir:
             os.makedirs(export_dir, exist_ok=True)
@@ -7339,6 +7371,7 @@ class AuthHandler:
     def import_state(site_name, import_path):
         """Import an auth state JSON from a user-specified path."""
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
+        import_path = resolve_user_path(import_path)
         with open(import_path, "r", encoding="utf-8") as f:
             state = json.load(f)
 
@@ -7572,7 +7605,11 @@ class TTSHandler:
 
         # If output file not specified but speak is needed, use temp
         temp_file = "tts_temp.mp3"
-        filename = save_path if save_path else temp_file
+        filename = (
+            resolve_user_path(save_path)
+            if save_path
+            else temp_file
+        )
 
         try:
             asyncio.run(TTSHandler.generate_speech(clean_text, filename, config))
@@ -7674,7 +7711,9 @@ Twitter/X Backend:
 
     # Output path
     parser.add_argument(
-        "-o", "--output", help="Output file path (use '-' for stdout, overrides config)"
+        "-o",
+        "--output",
+        help="Output file path (use '-' for stdout, overrides config; on Windows, accepts '~/Note' and '/' and maps '~' to %%USERPROFILE%%)",
     )
     parser.add_argument(
         "-O", action="store_true", help="Shorthand for --output - (output to stdout)"
@@ -7802,7 +7841,10 @@ Twitter/X Backend:
         action="store_true",
         help="Disable thread expansion for supported social sites",
     )
-    parser.add_argument("--config", help="Path to config file")
+    parser.add_argument(
+        "--config",
+        help="Path to config file (on Windows, accepts '~/Note' and '/' and maps '~' to %%USERPROFILE%%)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
         "--no-front-matter",
@@ -7821,7 +7863,11 @@ Twitter/X Backend:
         setup_verbose_logging()
 
     # Determine config path
-    config_path = args.config if args.config else "config.ini"
+    config_path = (
+        resolve_user_path(args.config)
+        if args.config
+        else "config.ini"
+    )
     config = Config(config_path)
 
     # Handle --clear-auth
@@ -7837,6 +7883,7 @@ Twitter/X Backend:
 
     if args.export_auth:
         site_name, export_path = args.export_auth
+        export_path = resolve_user_path(export_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
             parser.error(
@@ -7852,6 +7899,7 @@ Twitter/X Backend:
 
     if args.import_auth:
         site_name, import_path = args.import_auth
+        import_path = resolve_user_path(import_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
             parser.error(
@@ -7972,7 +8020,11 @@ Twitter/X Backend:
         logger.info("ncpssd: Applying default output format 'pdf' for secure article page")
 
     # Determine output path
-    output_path = args.output if args.output else None
+    output_path = (
+        resolve_user_path(args.output)
+        if args.output
+        else None
+    )
     if args.O:
         output_path = "-"
 

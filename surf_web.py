@@ -47,6 +47,7 @@ from surf import (
     _get_handler_for_url,
     _get_version,
     logger,
+    resolve_user_path,
 )
 
 app = Flask(__name__)
@@ -763,7 +764,7 @@ HTML_TEMPLATE = """
 
 def get_config():
     """Get config object."""
-    config_path = "config.ini"
+    config_path = resolve_user_path("config.ini")
     if os.path.exists(config_path):
         return Config(config_path)
     return Config()
@@ -848,7 +849,10 @@ def build_output_path(title, extension, target_dir, source_url=None, html_conten
         title, source_url=source_url, html_content=html_content
     )
     safe_title = OutputHandler._safe_filename_title(filename_title, max_len=100)
-    return os.path.join(target_dir, f"{safe_title}.{extension}")
+    return os.path.join(
+        resolve_user_path(target_dir),
+        f"{safe_title}.{extension}",
+    )
 
 
 def resolve_web_thread_mode(data, site_name, site_config):
@@ -999,10 +1003,10 @@ def process_url():
 
         # Get default directories for frontend
         defaultDirs = {
-            "md": config.get("Output", "md_dir", fallback="notes"),
-            "html": config.get("Output", "html_dir", fallback="web"),
-            "pdf": config.get("Output", "pdf_dir", fallback="pdf"),
-            "audio": config.get("Output", "audio_dir", fallback="audio"),
+            "md": config.get_path("Output", "md_dir", fallback="notes"),
+            "html": config.get_path("Output", "html_dir", fallback="web"),
+            "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
+            "audio": config.get_path("Output", "audio_dir", fallback="audio"),
         }
 
         return jsonify(
@@ -1062,15 +1066,15 @@ def save_file():
 
     # Determine default directories based on config
     defaultDirs = {
-        "md": config.get("Output", "md_dir", fallback="notes"),
-        "html": config.get("Output", "html_dir", fallback="web"),
-        "pdf": config.get("Output", "pdf_dir", fallback="pdf"),
-        "audio": config.get("Output", "audio_dir", fallback="audio"),
+        "md": config.get_path("Output", "md_dir", fallback="notes"),
+        "html": config.get_path("Output", "html_dir", fallback="web"),
+        "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
+        "audio": config.get_path("Output", "audio_dir", fallback="audio"),
     }
 
     # Use user-specified directory or default
     if saveDir:
-        targetDir = os.path.expanduser(saveDir)
+        targetDir = resolve_user_path(saveDir)
     else:
         targetDir = defaultDirs.get(fileType, ".")
 

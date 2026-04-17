@@ -109,6 +109,8 @@ If you expose it to the internet, put it behind a reverse proxy with HTTPS and o
 
 Copy `config.ini.example` to `config.ini` and edit it to set your API keys and paths.
 
+On Windows, Surf accepts Unix-style path input in config values and CLI path arguments. For example, `~/Note/article.md` is resolved under `%USERPROFILE%`, and `/` is normalized to `\`.
+
 ```bash
 cp config.ini.example config.ini
 ```
@@ -186,6 +188,8 @@ Convert a URL and print Markdown to console.
 uv run surf.py "https://example.com"
 ```
 
+On Windows, path-style arguments such as `--config`, `-o/--output`, `--export-auth`, and `--import-auth` also accept Unix-style input. For example, `~/Note/out.md` resolves under `%USERPROFILE%`.
+
 ### Proxy Modes (-x / -c / -n)
 
 ```bash
@@ -219,6 +223,7 @@ Generate a PDF file using Playwright (the default and only engine):
 
 ```bash
 uv run surf.py "https://example.com" -p
+uv run surf.py "https://example.com" -p -o ~/Note/example.pdf
 ```
 
 ### Save HTML (--html / --html-inline)
@@ -298,9 +303,11 @@ surf --login xiaohongshu
 
 # Export the saved state from a desktop machine
 surf --export-auth xiaohongshu ./xiaohongshu_state.json
+surf --export-auth xiaohongshu ~/Note/xiaohongshu_state.json
 
 # Import that state on a headless Linux server
 surf --import-auth xiaohongshu ./xiaohongshu_state.json
+surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
 
 # Optional: login for Twitter/X (helps with login-wall pages)
 surf --login twitter

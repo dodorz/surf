@@ -86,6 +86,8 @@ uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 
 复制 `config.ini.example` 为 `config.ini` 并编辑以设置您的 API 密钥和路径。
 
+在 Windows 上，Surf 支持在配置项和命令行路径参数里直接使用 Unix 风格路径。例如 `~/Note/article.md` 会解析到当前用户的 `%USERPROFILE%` 目录下，同时会自动把 `/` 规范化为 `\`。
+
 ```bash
 cp config.ini.example config.ini
 ```
@@ -165,6 +167,8 @@ max_images = 8
 surf "https://example.com"
 ```
 
+在 Windows 上，`--config`、`-o/--output`、`--export-auth`、`--import-auth` 等路径参数都支持这种写法，例如 `~/Note/out.md`。
+
 ### 输出路径 (-o / -O)
 
 使用 `-o` 或 `--output` 指定输出文件路径，或使用 `-O` 直接输出到控制台：
@@ -174,6 +178,7 @@ surf "https://example.com" -o output.md     # 保存为 output.md
 surf "https://example.com" -o -              # 输出到 stdout
 surf "https://example.com" -O               # 输出到 stdout (简写)
 surf -p "https://example.com" -o out.pdf     # PDF 保存为 out.pdf
+surf -p "https://example.com" -o ~/Note/out.pdf  # Windows: 保存到 %USERPROFILE%\Note\out.pdf
 ```
 
 ### 语言模式 (-l)
@@ -258,9 +263,11 @@ surf --login xiaohongshu
 
 # 在有桌面的机器上导出登录态
 surf --export-auth xiaohongshu ./xiaohongshu_state.json
+surf --export-auth xiaohongshu ~/Note/xiaohongshu_state.json
 
 # 在无 GUI 的 Linux 服务器上导入登录态
 surf --import-auth xiaohongshu ./xiaohongshu_state.json
+surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
 
 # 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
 surf --login twitter
