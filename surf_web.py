@@ -951,7 +951,7 @@ def process_url():
         md_content = ContentProcessor.to_markdown(cleaned_html)
 
         social_title = OutputHandler._extract_social_first_sentence_title(
-            html_content, source_url=url
+            html_content, source_url=source_url
         )
         if social_title:
             title = social_title

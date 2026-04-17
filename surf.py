@@ -5748,6 +5748,19 @@ class OutputHandler:
 
     @staticmethod
     def _is_twitter_non_article(source_url=None, html_content=None):
+        if html_content:
+            try:
+                soup = BeautifulSoup(html_content, "html.parser")
+                meta = soup.find("meta", attrs={"name": "surf-twitter-kind"})
+                if meta:
+                    kind = (meta.get("content") or "").strip().lower()
+                    if kind == "tweet":
+                        return True
+                    if kind == "article":
+                        return False
+            except Exception:
+                pass
+
         if not source_url or not Fetcher._is_twitter_url(source_url):
             return False
         if Fetcher._is_twitter_article_url(source_url):
@@ -5808,7 +5821,9 @@ class OutputHandler:
     def _get_social_site_label(source_url=None, html_content=None):
         source_site = OutputHandler._get_social_source_site(html_content)
         if source_site == "twitter":
-            return "X"
+            if OutputHandler._is_twitter_non_article(source_url, html_content):
+                return "X"
+            return None
         if source_site == "bluesky":
             return "Bsky"
         if source_site == "weibo":
@@ -7501,7 +7516,7 @@ Twitter/X Backend:
         sys.exit(1)
 
     twitter_title = OutputHandler._extract_social_first_sentence_title(
-        html_content, source_url=args.url
+        html_content, source_url=source_url
     )
     if twitter_title:
         title = twitter_title

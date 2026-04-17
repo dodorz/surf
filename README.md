@@ -10,7 +10,7 @@
 - **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`.
-- **Short-Post Title Normalization**: For Twitter/X, Bluesky, Weibo, and Threads posts, Surf derives the title, front matter `title`, and default Markdown filename from the current post body as `First sentence - Author on Site`.
+- **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
 - **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
 
@@ -46,6 +46,7 @@ Some sites have default policies that can be overridden with command-line argume
 - **Twitter/X**: Uses the same proxy mode pipeline as Surf, automatically retries direct access when implicit proxy paths fail, and prefers `uvx --from twitter-cli twitter`
 - **Twitter/X, Bluesky, Weibo, Threads**: Thread expansion defaults to `backward` (later same-author replies); use `--thread forward`, `--thread backward`, `--thread both`, or `--no-thread`
 - **Twitter/X, Bluesky, Weibo, Threads**: For short posts, titles and default filenames use `First sentence - Author on Site`
+- **Long-form social articles**: Keep the page/article title as title and default filename
 - **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
 - **GitHub**: Saved Markdown filename uses the page `<title>`
 
