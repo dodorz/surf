@@ -4261,6 +4261,486 @@ class Fetcher:
                 browser.close()
 
     @staticmethod
+    def _is_ncpssd_secure_article_url(url):
+        """Whether URL is an NCPSSD secure article detail page."""
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower()
+            path = parsed.path or ""
+            return host in {
+                "ncpssd.cn",
+                "www.ncpssd.cn",
+                "ncpssd.org",
+                "www.ncpssd.org",
+            } and path.startswith("/Literature/secure/articleinfo")
+        except Exception:
+            return False
+
+    @staticmethod
+    def download_ncpssd_pdf(
+        url,
+        config,
+        output_path=None,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+    ):
+        """
+        Download the original NCPSSD full-text PDF by clicking the page's `全文下载` button.
+        Returns the saved local PDF path on success, otherwise None.
+        """
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+
+        if not Fetcher._is_ncpssd_secure_article_url(url):
+            logger.info("NCPSSD direct PDF download skipped: URL is not a secure article detail page")
+            return None
+
+        parsed_input = urlparse(url)
+        host = (parsed_input.netloc or "").lower()
+        effective_url = url
+        if host in {"ncpssd.cn", "ncpssd.org"}:
+            effective_url = urlunparse(parsed_input._replace(netloc=f"www.{host}"))
+            logger.info(f"NCPSSD: normalized download host to {urlparse(effective_url).netloc}")
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        with sync_playwright() as p:
+            launch_args = {
+                "headless": True,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+
+            browser = p.chromium.launch(**launch_args)
+            context = AuthHandler.create_context_with_auth(
+                browser,
+                "ncpssd",
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                accept_downloads=True,
+            )
+            page = context.new_page()
+
+            try:
+                def _normalize_ncpssd_text(raw):
+                    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+                    text = re.sub(r"^(作\s*者\s*[：:])", "", text)
+                    text = re.sub(r"^(出\s*版\s*物\s*[：:])", "", text)
+                    text = re.sub(
+                        r"(中文期刊文章|外文期刊文章|中文图书章节|外文图书章节|古籍文献|学位论文)$",
+                        "",
+                        text,
+                    ).strip()
+                    return text.strip()
+
+                def _normalize_ncpssd_author(raw):
+                    author = _normalize_ncpssd_text(raw)
+                    # Remove common footnotes and transliteration annotations, e.g.:
+                    # "田力[1] [Tian Li]" -> "田力"
+                    author = re.sub(r"\[\s*\d+(?:\s*[,;，；]\s*\d+)*\s*\]", "", author)
+                    author = re.sub(r"\[[^\]]*\]", "", author)
+                    author = re.sub(r"\([^)]*\)", "", author)
+                    author = re.sub(r"\s*([,;，；])\s*", r"\1", author)
+                    author = re.sub(r"\s+", " ", author).strip(" ,;，；")
+                    return author
+
+                def _build_ncpssd_pdf_basename(meta):
+                    if not isinstance(meta, dict):
+                        return None
+                    title = _normalize_ncpssd_text(meta.get("title"))
+                    creator = _normalize_ncpssd_author(meta.get("creator"))
+                    media = _normalize_ncpssd_text(meta.get("media"))
+                    parts = [p for p in [title, creator, media] if p]
+                    if not parts:
+                        return None
+                    return OutputHandler._safe_filename_title("-".join(parts), max_len=180)
+
+                page_pdf_basename = None
+
+                def _resolve_output_pdf_path(suggested_filename, preferred_basename=None):
+                    suggested = os.path.basename(suggested_filename or "NCPSSD-fulltext.pdf")
+                    stem, _ = os.path.splitext(suggested)
+                    derived_stem = OutputHandler._safe_filename_title(stem)
+                    preferred = OutputHandler._safe_filename_title(preferred_basename) if preferred_basename else None
+                    safe_name = f"{(preferred or derived_stem)}.pdf"
+
+                    resolved_output = os.path.expanduser(output_path) if output_path else None
+                    if resolved_output == "-":
+                        logger.warning(
+                            "NCPSSD direct PDF download does not support stdout output. "
+                            "Falling back to default pdf_dir."
+                        )
+                        resolved_output = None
+
+                    if resolved_output:
+                        is_dir_target = (
+                            resolved_output.endswith(("/", "\\"))
+                            or os.path.isdir(resolved_output)
+                        )
+                        if is_dir_target:
+                            os.makedirs(resolved_output, exist_ok=True)
+                            return os.path.join(resolved_output, safe_name)
+
+                        filepath = resolved_output
+                        filepath_dir = os.path.dirname(filepath)
+                        if filepath_dir and not os.path.exists(filepath_dir):
+                            os.makedirs(filepath_dir)
+                        if not filepath.lower().endswith(".pdf"):
+                            filepath = f"{filepath}.pdf"
+                        return filepath
+
+                    pdf_dir = config.get("Output", "pdf_dir", fallback=".")
+                    if not os.path.exists(pdf_dir):
+                        os.makedirs(pdf_dir)
+                    return os.path.join(pdf_dir, safe_name)
+
+                logger.info("NCPSSD: Opening article page for direct PDF download")
+                page.goto(effective_url, wait_until="networkidle", timeout=60000)
+                page.wait_for_timeout(2000)
+                try:
+                    page_meta = page.evaluate(
+                        """() => ({
+                            title: (document.querySelector('#h2_title_c') || document.querySelector('h1') || {}).innerText || '',
+                            creator: (document.querySelector('#p_creator') || {}).innerText || '',
+                            media: (document.querySelector('#p_media') || {}).innerText || '',
+                            typeName: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
+                            lngid: (document.querySelector('#ftl_urlId') || {}).value || '',
+                            pageType: window.pageType || 2,
+                        })"""
+                    )
+                    if not any((page_meta or {}).get(k) for k in ("title", "creator", "media")):
+                        page.wait_for_timeout(1200)
+                        page_meta = page.evaluate(
+                            """() => ({
+                                title: (document.querySelector('#h2_title_c') || document.querySelector('h1') || {}).innerText || '',
+                                creator: (document.querySelector('#p_creator') || {}).innerText || '',
+                                media: (document.querySelector('#p_media') || {}).innerText || '',
+                                typeName: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
+                                lngid: (document.querySelector('#ftl_urlId') || {}).value || '',
+                                pageType: window.pageType || 2,
+                            })"""
+                        )
+                    # Some article pages populate metadata via async API only; fallback to that endpoint.
+                    if not any((page_meta or {}).get(k) for k in ("title", "creator", "media")):
+                        try:
+                            lngid = str((page_meta or {}).get("lngid") or "").strip()
+                            if lngid:
+                                table_endpoint = (
+                                    f"https://{urlparse(effective_url).netloc}/articleinfoHandler/getjournalarticletable"
+                                )
+                                table_payload = {
+                                    "lngid": lngid,
+                                    "type": (page_meta.get("typeName") or "中文期刊文章"),
+                                    "pageType": page_meta.get("pageType") or 2,
+                                }
+                                table_resp = context.request.post(
+                                    table_endpoint,
+                                    data=json.dumps(table_payload, ensure_ascii=False),
+                                    headers={
+                                        "Content-Type": "application/json; charset=utf-8",
+                                        "Referer": effective_url,
+                                    },
+                                    timeout=30000,
+                                )
+                                table_text = table_resp.text()
+                                table_json = json.loads(table_text) if table_text.strip().startswith("{") else {}
+                                table_data = table_json.get("data") if isinstance(table_json, dict) else None
+                                if isinstance(table_data, dict):
+                                    page_meta = {
+                                        **page_meta,
+                                        "title": table_data.get("titlec") or page_meta.get("title") or "",
+                                        "creator": table_data.get("showwriter") or page_meta.get("creator") or "",
+                                        "media": table_data.get("mediac") or page_meta.get("media") or "",
+                                    }
+                        except Exception:
+                            pass
+                    page_pdf_basename = _build_ncpssd_pdf_basename(page_meta)
+                except Exception:
+                    page_pdf_basename = None
+                try:
+                    page.wait_for_function(
+                        """() => {
+                            const btn = document.querySelector('#a_down');
+                            if (!btn || !window.$) return false;
+                            const events = window.$._data(btn, 'events');
+                            return !!(events && events.click && events.click.length);
+                        }""",
+                        timeout=15000,
+                    )
+                except Exception:
+                    logger.info("NCPSSD: a_down click handler not observed before timeout; continuing with best effort click")
+
+                # The site binds a click handler to the visible "全文下载" control.
+                button = page.locator("a:has-text('全文下载'), button:has-text('全文下载')").first
+                if button.count() == 0:
+                    button = page.get_by_text("全文下载", exact=False).first
+                if button.count() == 0:
+                    logger.warning(
+                        "NCPSSD: '全文下载' button was not found. If login is required, run `surf --login ncpssd` first."
+                    )
+                    return None
+
+                captured_read_download_pdf_url = None
+
+                def _capture_download_chain_response(resp):
+                    nonlocal captured_read_download_pdf_url
+                    if "/Literature/readDownloadUrl" not in resp.url:
+                        return
+                    try:
+                        payload = resp.json()
+                    except Exception:
+                        return
+                    if not isinstance(payload, dict):
+                        return
+                    data_field = payload.get("data")
+                    candidate = None
+                    if isinstance(data_field, dict):
+                        candidate = data_field.get("url")
+                    elif isinstance(data_field, str):
+                        candidate = data_field
+                    if not candidate:
+                        candidate = payload.get("url")
+                    if candidate and str(candidate).strip():
+                        captured_read_download_pdf_url = str(candidate).strip()
+
+                page.on("response", _capture_download_chain_response)
+
+                # Path A: browser-native download event (works on some pages/versions)
+                try:
+                    with page.expect_download(timeout=10000) as download_info:
+                        button.click(force=True)
+                    download = download_info.value
+                    filepath = _resolve_output_pdf_path(
+                        download.suggested_filename or "NCPSSD-fulltext.pdf",
+                        preferred_basename=page_pdf_basename,
+                    )
+                    download.save_as(filepath)
+                    logger.info(f"NCPSSD original PDF saved to {filepath}")
+                    return filepath
+                except PlaywrightTimeoutError:
+                    logger.info(
+                        "NCPSSD: No direct download event after clicking '全文下载'; "
+                        "trying the site's readurl API path used by the same button."
+                    )
+
+                page.wait_for_timeout(1200)
+                pdf_url = captured_read_download_pdf_url
+                if pdf_url:
+                    logger.info("NCPSSD: Captured signed URL from readDownloadUrl response")
+                    logger.info(f"NCPSSD: readDownloadUrl url = {pdf_url}")
+
+                # Path B2: reproduce the site's official download chain:
+                # /Literature/readDownloadUrl -> ms.util.getMinioSign() -> GET data.url with sign/site/dotype headers
+                if not pdf_url:
+                    try:
+                        download_meta = page.evaluate(
+                            """() => ({
+                                type: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
+                                articleid: (document.querySelector('#ftl_urlId') || {}).value || '',
+                                titleC: (document.querySelector('#h2_title_c') || {}).innerText || '',
+                                showWriter: (((document.querySelector('#p_creator') || {}).innerText || '')
+                                    .replace('作　　者：', '').trim()),
+                                periodname: (((document.querySelector('#p_media') || {}).innerText || '')
+                                    .replace('出 版 物：', '').trim()),
+                                pageType: window.pageType || 2,
+                            })"""
+                        )
+                        articleid = str((download_meta or {}).get("articleid") or "").strip()
+                        if articleid:
+                            rd_payload = {
+                                "type": (download_meta.get("type") or "中文期刊文章"),
+                                "articleid": articleid,
+                                "id": articleid,
+                                "periodname": download_meta.get("periodname") or "",
+                                "downcount": 1,
+                                "readcount": -1,
+                                "gch": "",
+                                "class": "",
+                                "titleC": download_meta.get("titleC") or "",
+                                "showWriter": download_meta.get("showWriter") or "",
+                                "pageType": download_meta.get("pageType") or 2,
+                            }
+                            rd_endpoint = (
+                                f"https://{urlparse(effective_url).netloc}/Literature/readDownloadUrl"
+                            )
+                            rd_resp = context.request.post(
+                                rd_endpoint,
+                                data=json.dumps(rd_payload, ensure_ascii=False),
+                                headers={
+                                    "Content-Type": "application/json; charset=utf-8",
+                                    "Referer": effective_url,
+                                },
+                                timeout=30000,
+                            )
+                            rd_text = rd_resp.text()
+                            rd_json = json.loads(rd_text) if rd_text.strip().startswith("{") else {}
+                            candidate = None
+                            if isinstance(rd_json, dict):
+                                data_field = rd_json.get("data")
+                                if isinstance(data_field, dict):
+                                    candidate = data_field.get("url")
+                                elif isinstance(data_field, str):
+                                    candidate = data_field
+                                if not candidate:
+                                    candidate = rd_json.get("url")
+                            if candidate:
+                                pdf_url = str(candidate).strip()
+                                logger.info(f"NCPSSD: readDownloadUrl (explicit) url = {pdf_url}")
+
+                                sign = page.evaluate(
+                                    """() => new Promise((resolve) => {
+                                        try {
+                                            if (window.ms && ms.util && typeof ms.util.getMinioSign === 'function') {
+                                                ms.util.getMinioSign(function (s) { resolve(s || ''); });
+                                            } else {
+                                                resolve('');
+                                            }
+                                        } catch (e) {
+                                            resolve('');
+                                        }
+                                    })"""
+                                )
+                                if sign:
+                                    pdf_resp = context.request.get(
+                                        pdf_url,
+                                        timeout=60000,
+                                        headers={
+                                            "sign": str(sign),
+                                            "site": "npssd",
+                                            "dotype": "down",
+                                            "Referer": effective_url,
+                                        },
+                                    )
+                                    pdf_body = pdf_resp.body()
+                                    final_ct = (pdf_resp.headers.get("content-type") or "").lower()
+                                    if "application/pdf" in final_ct or pdf_body.startswith(b"%PDF"):
+                                        parsed_pdf_url = urlparse(pdf_url)
+                                        suggested_name = os.path.basename(parsed_pdf_url.path) or f"{articleid}.pdf"
+                                        filepath = _resolve_output_pdf_path(
+                                            suggested_name,
+                                            preferred_basename=page_pdf_basename,
+                                        )
+                                        with open(filepath, "wb") as f:
+                                            f.write(pdf_body)
+                                        logger.info(f"NCPSSD original PDF saved to {filepath}")
+                                        return filepath
+                    except Exception as explicit_chain_error:
+                        logger.info(f"NCPSSD: explicit readDownloadUrl/sign chain failed: {explicit_chain_error}")
+
+                # Path B3: fallback path -> /Literature/readurl?id=... -> final PDF URL.
+                article_id = (
+                    page.locator("#ftl_urlId").input_value().strip()
+                    if page.locator("#ftl_urlId").count() > 0
+                    else ""
+                )
+                logger.info(f"NCPSSD: article id = {article_id or '<empty>'}")
+                if not article_id:
+                    logger.warning("NCPSSD: Failed to resolve article id (`#ftl_urlId`) for readurl API")
+                    return None
+
+                parsed_effective = urlparse(effective_url)
+                preferred_www = parsed_effective.netloc or "www.ncpssd.cn"
+                preferred_bare = preferred_www[4:] if preferred_www.startswith("www.") else preferred_www
+                readurl_endpoints = [
+                    f"https://{preferred_www}/Literature/readurl?id={article_id}",
+                    f"https://{preferred_bare}/Literature/readurl?id={article_id}",
+                    "https://www.ncpssd.cn/Literature/readurl?id=" + article_id,
+                    "https://ncpssd.cn/Literature/readurl?id=" + article_id,
+                    "https://www.ncpssd.org/Literature/readurl?id=" + article_id,
+                    "https://ncpssd.org/Literature/readurl?id=" + article_id,
+                ]
+
+                if not pdf_url:
+                    for endpoint in readurl_endpoints:
+                        try:
+                            resp = context.request.get(
+                                endpoint,
+                                timeout=30000,
+                                headers={"Referer": effective_url},
+                            )
+                            if resp.status >= 400:
+                                logger.info(f"NCPSSD: readurl endpoint HTTP {resp.status}: {endpoint}")
+                                continue
+                            ct = (resp.headers.get("content-type") or "").lower()
+                            body = resp.body()
+                            logger.info(f"NCPSSD: readurl endpoint ok ct={ct} url={endpoint}")
+
+                            if "application/json" in ct or body[:1] == b"{":
+                                try:
+                                    payload = json.loads(body.decode("utf-8", errors="ignore"))
+                                    candidate = payload.get("url") if isinstance(payload, dict) else None
+                                    if candidate:
+                                        pdf_url = str(candidate).strip()
+                                        logger.info(f"NCPSSD: readurl payload url = {pdf_url}")
+                                        break
+                                except Exception:
+                                    pass
+
+                            if "application/pdf" in ct and body:
+                                filepath = _resolve_output_pdf_path(
+                                    f"{article_id}.pdf",
+                                    preferred_basename=page_pdf_basename,
+                                )
+                                with open(filepath, "wb") as f:
+                                    f.write(body)
+                                logger.info(f"NCPSSD original PDF saved to {filepath}")
+                                return filepath
+                        except Exception as endpoint_error:
+                            logger.debug(f"NCPSSD readurl endpoint attempt failed ({endpoint}): {endpoint_error}")
+
+                if not pdf_url:
+                    logger.warning("NCPSSD: readurl API did not return a downloadable PDF URL")
+                    return None
+
+                pdf_resp = context.request.get(
+                    pdf_url,
+                    timeout=60000,
+                    headers={"Referer": effective_url},
+                )
+                if pdf_resp.status >= 400:
+                    logger.warning(f"NCPSSD: final PDF URL request failed with HTTP {pdf_resp.status}")
+                    return None
+
+                pdf_body = pdf_resp.body()
+                final_ct = (pdf_resp.headers.get("content-type") or "").lower()
+                if "application/pdf" not in final_ct and not pdf_body.startswith(b"%PDF"):
+                    logger.warning(
+                        "NCPSSD: final URL did not return PDF bytes "
+                        "(likely permission denied for this account/article)."
+                    )
+                    return None
+
+                parsed_pdf_url = urlparse(pdf_url)
+                suggested_name = os.path.basename(parsed_pdf_url.path) or f"{article_id}.pdf"
+                filepath = _resolve_output_pdf_path(
+                    suggested_name,
+                    preferred_basename=page_pdf_basename,
+                )
+                with open(filepath, "wb") as f:
+                    f.write(pdf_body)
+                logger.info(f"NCPSSD original PDF saved to {filepath}")
+                return filepath
+
+            except PlaywrightTimeoutError:
+                logger.warning(
+                    "NCPSSD: Timed out waiting for download after clicking '全文下载'. "
+                    "If the page requires login, run `surf --login ncpssd`."
+                )
+                return None
+            except Exception as e:
+                logger.warning(f"NCPSSD direct PDF download failed: {e}")
+                return None
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                browser.close()
+
+    @staticmethod
     def _fetch_ncpssd_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch NCPSSD (国家哲学社会科学文献中心) literature pages.
@@ -6730,12 +7210,18 @@ class AuthHandler:
         "twitter": "https://x.com/i/flow/login",
         "x": "https://x.com/i/flow/login",
         "zhihu": "https://www.zhihu.com/",
+        "ncpssd": "https://www.ncpssd.cn/",
     }
 
     @staticmethod
     def normalize_site_name(site_name):
         """Normalize site aliases used by auth-related commands."""
-        return "twitter" if site_name.lower() in {"twitter", "x"} else site_name.lower()
+        normalized = site_name.lower()
+        if normalized in {"twitter", "x"}:
+            return "twitter"
+        if normalized in {"ncp", "ncpssd"}:
+            return "ncpssd"
+        return normalized
 
     @staticmethod
     def get_login_url(site_name):
@@ -7139,8 +7625,10 @@ Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
   surf --export-auth xiaohongshu STATE.json  # Export saved auth state
   surf --import-auth xiaohongshu STATE.json  # Import auth state on another machine
+  surf --login ncpssd                        # Login to NCPSSD (for full-text PDF download)
   surf --login twitter                       # Login to Twitter/X
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
+  surf --clear-auth ncpssd                   # Clear auth for NCPSSD
   surf --clear-auth twitter                  # Clear auth for Twitter/X
 
 OCR:
@@ -7210,7 +7698,7 @@ Twitter/X Backend:
     parser.add_argument(
         "--login",
         metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu, twitter/x). Opens a browser for manual login on machines with a desktop session.",
+        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, zhihu, ncpssd). Opens a browser for manual login on machines with a desktop session.",
     )
     parser.add_argument(
         "--clear-auth",
@@ -7350,9 +7838,9 @@ Twitter/X Backend:
     if args.export_auth:
         site_name, export_path = args.export_auth
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu"}:
+        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
             parser.error(
-                "Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu"
+                "Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd"
             )
         try:
             AuthHandler.export_state(normalized_site_name, export_path)
@@ -7365,9 +7853,9 @@ Twitter/X Backend:
     if args.import_auth:
         site_name, import_path = args.import_auth
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu"}:
+        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
             parser.error(
-                "Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu"
+                "Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd"
             )
         try:
             AuthHandler.import_state(normalized_site_name, import_path)
@@ -7452,6 +7940,9 @@ Twitter/X Backend:
 
     # Check if URL matches special site handlers for default policies
     handler, site_name, site_config = _get_handler_for_url(args.url)
+    explicit_output_format_selected = bool(
+        args.format or args.h or args.p or args.a or args.P
+    )
     if site_config:
         # Apply special site defaults (can be overridden by command line)
         if site_config.get("default_no_proxy") and proxy_mode is None and not Fetcher._is_windows():
@@ -7469,6 +7960,42 @@ Twitter/X Backend:
         if site_config.get("default_thread") and fetch_thread is None:
             logger.info(f"{site_name}: Applying default thread expansion policy")
             fetch_thread = "backward"
+
+    # NCPSSD secure article pages default to PDF output (same as implicit `-p`).
+    # This only applies when user did not explicitly choose an output format.
+    if (
+        not explicit_output_format_selected
+        and site_name == "ncpssd"
+        and Fetcher._is_ncpssd_secure_article_url(args.url)
+    ):
+        output_format = "pdf"
+        logger.info("ncpssd: Applying default output format 'pdf' for secure article page")
+
+    # Determine output path
+    output_path = args.output if args.output else None
+    if args.O:
+        output_path = "-"
+
+    # For NCPSSD secure article pages, PDF mode should download the original full-text PDF
+    # by simulating a click on the page's "全文下载" button.
+    if (
+        output_format == "pdf"
+        and site_name == "ncpssd"
+        and Fetcher._is_ncpssd_secure_article_url(args.url)
+    ):
+        downloaded_pdf = Fetcher.download_ncpssd_pdf(
+            args.url,
+            config=config,
+            output_path=output_path,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+        if downloaded_pdf:
+            print(downloaded_pdf)
+            return
+        logger.warning(
+            "NCPSSD original PDF download was unavailable. Falling back to generated PDF from extracted content."
+        )
 
     # 1. Fetch
     try:
@@ -7609,11 +8136,6 @@ Twitter/X Backend:
     # Use the source URL from meta tag if available (for xhslink resolution)
     if source_url != args.url:
         logger.info(f"Using resolved source URL for metadata: {source_url}")
-
-    # Determine output path
-    output_path = args.output if args.output else None
-    if args.O:
-        output_path = "-"
 
     # Handle output based on format
     if output_format == "pdf":

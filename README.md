@@ -7,7 +7,7 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, and Xiaohongshu (RED) with reusable saved authentication support.
+- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`.
 - **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
@@ -35,21 +35,16 @@ surf "https://example.com" -r
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: `env` (environment variables), `win` (Windows Internet Settings), `custom`, and `no`.
-- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu).
+- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 
 ### Special Site Policies
 
-Some sites have default policies that can be overridden with command-line arguments:
+Surf includes site-specific handlers for platforms such as Twitter/X, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, NCPSSD, GitHub, and Wikipedia.
 
-- **WeChat & Xiaohongshu**: Default to no proxy and no translation (can be overridden with `-x` and `-l`)
-- **Xiaohongshu**: Also enables local image OCR by default unless you pass `--no-ocr-images`
-- **Twitter/X**: Uses the same proxy mode pipeline as Surf, automatically retries direct access when implicit proxy paths fail, and prefers `uvx --from twitter-cli twitter`
-- **Twitter/X, Bluesky, Weibo, Threads**: Thread expansion defaults to `backward` (later same-author replies); use `--thread forward`, `--thread backward`, `--thread both`, or `--no-thread`
-- **Twitter/X, Bluesky, Weibo, Threads**: For short posts, titles and default filenames use `First sentence - Author on Site`
-- **Long-form social articles**: Keep the page/article title as title and default filename
-- **Zhihu**: Defaults to no proxy and no translation; tries Zhihu-specific extraction first; reuses cookies from `surf --login zhihu` for API/mirror `requests` when saved; avoids the generic fallback chain
-- **GitHub**: Saved Markdown filename uses the page `<title>`
+Detailed matching rules, handler behavior, default policy overrides, and maintenance notes are documented in:
+- `SPECIAL_SITES.md` (English)
+- `SPECIAL_SITES_zh.md` (Chinese)
 
 ## Installation
 
@@ -295,7 +290,7 @@ Notes:
 
 ### Authentication (--login / --export-auth / --import-auth / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu), prepare and reuse a saved Playwright auth state:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu, NCPSSD), prepare and reuse a saved Playwright auth state:
 
 ```bash
 # First-time login for Xiaohongshu
@@ -317,16 +312,21 @@ surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/stat
 # Optional: login for Zhihu (feeds cookies to API/mirror requests and helps browser verification)
 surf --login zhihu
 
+# Optional: login for NCPSSD (required by some secure full-text downloads)
+surf --login ncpssd
+
 # After login/import, fetch content normally
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
 surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
+surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
 
 # Clear saved authentication
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
 surf --clear-auth zhihu
+surf --clear-auth ncpssd
 # Or clear all sites
 surf --clear-auth all
 ```
@@ -334,6 +334,7 @@ surf --clear-auth all
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
 On headless Linux, `surf --login ...` now fails fast instead of trying to open a browser with no display. Run the login command on a desktop machine, then move the saved state with `--export-auth` and `--import-auth`.
 For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
+For site-specific behavior details (including NCPSSD download rules), refer to `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md`.
 
 ## Help
 

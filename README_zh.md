@@ -7,7 +7,7 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
-- **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、微信公众号、知乎、小红书等网站优化处理，支持复用已保存的登录态。
+- **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、微信公众号、知乎、小红书、NCPSSD 等网站优化处理，支持复用已保存的登录态。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。
 - **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”；长文（例如 X 的 `/article/...`）会保留文章自身标题。
@@ -22,16 +22,11 @@
 
 ### 特殊网站策略
 
-部分网站有默认策略，可通过命令行参数覆盖：
+Surf 内置了多个特殊网站处理器（如 Twitter/X、微信、知乎、小红书、Bluesky、微博、Threads、NCPSSD、GitHub、Wikipedia）。
 
-- **微信公众号 & 小红书**：默认不使用代理，不翻译（可用 `-x` 和 `-l` 覆盖）
-- **小红书**：额外默认开启插图 OCR，可用 `--no-ocr-images` 关闭
-- **Twitter/X**：代理策略与 Surf 主流程一致；隐式代理链路失败时会自动回退到直连，并优先使用 `uvx --from twitter-cli twitter`
-- **Twitter/X、Bluesky、微博、Threads**：默认开启 `backward` 方向的 thread 追溯；可用 `--thread forward|backward|both` 调整，或用 `--no-thread` 关闭
-- **Twitter/X、Bluesky、微博、Threads**：短帖子标题和默认文件名统一使用“第一句 - 作者名 on 站点”
-- **社交长文页面**：标题和默认文件名保持页面/文章原始标题
-- **知乎**：默认不使用代理、默认不翻译；优先走知乎专用提取；若已执行 `surf --login zhihu`，保存的 Cookie 会用于 API/镜像页的 `requests`；避免再掉回通用抓取链路
-- **GitHub**：保存 Markdown 时文件名使用页面 `<title>`
+完整的匹配规则、处理流程、默认策略和维护要求统一维护在：
+- `SPECIAL_SITES_zh.md`（中文）
+- `SPECIAL_SITES.md`（English）
 
 ## 安装
 
@@ -255,7 +250,7 @@ surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lan
 
 ### 认证功能 (--login / --export-auth / --import-auth / --clear-auth)
 
-对于需要登录的网站（如小红书、Twitter/X、知乎），可以先准备并复用 Playwright 登录态：
+对于需要登录的网站（如小红书、Twitter/X、知乎、NCPSSD），可以先准备并复用 Playwright 登录态：
 
 ```bash
 # 首次登录小红书
@@ -277,16 +272,21 @@ surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/stat
 # 可选：登录知乎（Cookie 会用于 API/镜像页请求，并提高浏览器验证页成功率）
 surf --login zhihu
 
+# 可选：登录 NCPSSD（部分受保护全文下载需要）
+surf --login ncpssd
+
 # 登录或导入后正常获取内容
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
 surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
+surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
 
 # 清除保存的认证
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
 surf --clear-auth zhihu
+surf --clear-auth ncpssd
 # 或清除所有网站的认证
 surf --clear-auth all
 ```
@@ -294,6 +294,7 @@ surf --clear-auth all
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
 在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
 对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
+涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
 
 ## 单字符参数连写
 
