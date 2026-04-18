@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import io
 import requests  # type: ignore
+import threading
+import queue
 from requests.utils import get_encoding_from_headers
 from readability import Document
 import markdownify
@@ -25,6 +27,7 @@ from html import escape
 import trafilatura
 import re
 import unicodedata
+import signal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
@@ -52,6 +55,130 @@ warnings.filterwarnings("ignore")
 # Configure logging (default: WARNING level, no timestamps)
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+_INTERRUPTED = False
+
+
+def _handle_sigint(signum, frame):
+    """Record Ctrl+C and raise KeyboardInterrupt in the main thread promptly."""
+    global _INTERRUPTED
+    _INTERRUPTED = True
+    raise KeyboardInterrupt
+
+
+def _install_interrupt_handler():
+    """Install a consistent Ctrl+C handler when the runtime supports it."""
+    try:
+        signal.signal(signal.SIGINT, _handle_sigint)
+    except Exception:
+        # Keep the default behavior on runtimes that reject custom handlers.
+        pass
+
+
+def _raise_if_interrupted():
+    """Abort the current workflow after a previously received Ctrl+C."""
+    if _INTERRUPTED:
+        raise KeyboardInterrupt
+
+
+def _run_subprocess_interruptibly(command, **kwargs):
+    """
+    Run a subprocess while ensuring Ctrl+C stops both Surf and the child process.
+
+    This is mainly used for helpers that may block for a while, such as twitter-cli.
+    """
+    kwargs = dict(kwargs)
+    timeout = kwargs.pop("timeout", None)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=kwargs.pop("text", False),
+        encoding=kwargs.pop("encoding", None),
+        errors=kwargs.pop("errors", None),
+        env=kwargs.pop("env", None),
+        cwd=kwargs.pop("cwd", None),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except KeyboardInterrupt:
+        logger.warning("Interrupted while waiting for subprocess: %s", " ".join(command))
+        try:
+            process.terminate()
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        raise
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise
+
+    if kwargs.pop("check", False) and process.returncode != 0:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            command,
+            output=stdout,
+            stderr=stderr,
+        )
+
+    class _CompletedProcess:
+        def __init__(self, args, returncode, stdout, stderr):
+            self.args = args
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    return _CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _call_interruptibly(func, *args, poll_interval=0.2, **kwargs):
+    """
+    Run a blocking callable in a daemon thread so Ctrl+C can interrupt promptly.
+
+    This is especially helpful on Windows, where some network operations may not
+    reliably stop when the main thread receives Ctrl+C.
+    """
+    result_queue = queue.Queue(maxsize=1)
+
+    def _worker():
+        try:
+            result_queue.put(("result", func(*args, **kwargs)))
+        except BaseException as exc:
+            result_queue.put(("error", exc))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    while True:
+        _raise_if_interrupted()
+        try:
+            kind, payload = result_queue.get(timeout=poll_interval)
+        except queue.Empty:
+            continue
+        if kind == "error":
+            raise payload
+        return payload
+
+
+def _requests_get_interruptibly(*args, **kwargs):
+    """Wrapper around requests.get that remains responsive to Ctrl+C."""
+    return _call_interruptibly(requests.get, *args, **kwargs)
+
+
+def _requests_post_interruptibly(*args, **kwargs):
+    """Wrapper around requests.post that remains responsive to Ctrl+C."""
+    return _call_interruptibly(requests.post, *args, **kwargs)
+
+
+def _session_get_interruptibly(session, *args, **kwargs):
+    """Wrapper around requests.Session.get that remains responsive to Ctrl+C."""
+    return _call_interruptibly(session.get, *args, **kwargs)
 
 
 def setup_verbose_logging():
@@ -344,10 +471,9 @@ class Fetcher:
             return None, None
 
         try:
-            result = subprocess.run(
+            result = _run_subprocess_interruptibly(
                 ["netsh", "winhttp", "show", "proxy"],
                 check=False,
-                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -531,7 +657,7 @@ class Fetcher:
                 logger.info(
                     f"Requests Proxies: {req_proxies if req_proxies else 'None'}"
                 )
-                response = requests.get(
+                response = _requests_get_interruptibly(
                     url, headers=headers, proxies=req_proxies, timeout=10
                 )
                 response.raise_for_status()
@@ -1644,9 +1770,8 @@ class Fetcher:
                     tmp_path = tmp_file.name
                 command_with_output = command + ["--output", tmp_path]
                 logger.info("Trying twitter-cli backend: %s", " ".join(command))
-                completed = subprocess.run(
+                completed = _run_subprocess_interruptibly(
                     command_with_output,
-                    capture_output=True,
                     text=True,
                     encoding="utf-8",
                     errors="replace",
@@ -1902,7 +2027,7 @@ class Fetcher:
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
             }
-            response = requests.get(
+            response = _requests_get_interruptibly(
                 url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
             )
             return response.url or url
@@ -1946,7 +2071,7 @@ class Fetcher:
         }
 
         try:
-            response = requests.get(api_url, headers=headers, proxies=proxies, timeout=30)
+            response = _requests_get_interruptibly(api_url, headers=headers, proxies=proxies, timeout=30)
             response.raise_for_status()
             data = response.json()
         except Exception as e:
@@ -2003,7 +2128,7 @@ class Fetcher:
             )
         }
         try:
-            response = requests.get(api_url, headers=headers, proxies=proxies, timeout=30)
+            response = _requests_get_interruptibly(api_url, headers=headers, proxies=proxies, timeout=30)
             response.raise_for_status()
             payload = response.json()
         except Exception as e:
@@ -2540,7 +2665,7 @@ class Fetcher:
 
         for candidate_url in candidate_urls:
             try:
-                response = requests.get(
+                response = _requests_get_interruptibly(
                     candidate_url, headers=headers, proxies=proxies, timeout=20
                 )
                 response.raise_for_status()
@@ -2587,7 +2712,7 @@ class Fetcher:
                     f"{answer_id}?include=content,comment_count,voteup_count,"
                     "created_time,updated_time,author.headline,question.title"
                 )
-                response = requests.get(
+                response = _requests_get_interruptibly(
                     api_url, headers=headers, proxies=req_proxies, timeout=30
                 )
                 response.raise_for_status()
@@ -2612,7 +2737,7 @@ class Fetcher:
                     f"{article_id}?include=title,content,comment_count,voteup_count,"
                     "created,updated,author.name"
                 )
-                response = requests.get(
+                response = _requests_get_interruptibly(
                     api_url, headers=headers, proxies=req_proxies, timeout=30
                 )
                 response.raise_for_status()
@@ -2725,7 +2850,7 @@ class Fetcher:
         }
 
         try:
-            response = requests.get(
+            response = _requests_get_interruptibly(
                 oembed_url, headers=headers, proxies=req_proxies, timeout=30
             )
             response.raise_for_status()
@@ -3804,7 +3929,8 @@ class Fetcher:
             # First, make a HEAD request to check the redirect chain
             session = requests.Session()
             # Don't use allow_redirects=True initially to see the redirect chain
-            response = session.get(
+            response = _session_get_interruptibly(
+                session,
                 url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
             )
             final_url = response.url
@@ -5317,7 +5443,7 @@ class Fetcher:
 
             # Resolve handle to DID
             resolve_url = f"https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={handle}"
-            resolve_resp = requests.get(resolve_url, headers=headers, proxies=req_proxies, timeout=30)
+            resolve_resp = _requests_get_interruptibly(resolve_url, headers=headers, proxies=req_proxies, timeout=30)
 
             if resolve_resp.status_code != 200:
                 logger.warning(f"Failed to resolve Bluesky handle: {resolve_resp.text}")
@@ -5333,7 +5459,7 @@ class Fetcher:
 
             # Fetch post thread
             api_url = f"https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri={at_uri}"
-            resp = requests.get(api_url, headers=headers, proxies=req_proxies, timeout=30)
+            resp = _requests_get_interruptibly(api_url, headers=headers, proxies=req_proxies, timeout=30)
 
             if resp.status_code != 200:
                 logger.warning(f"Bluesky API request failed: {resp.status_code} - {resp.text}")
@@ -6164,7 +6290,7 @@ class OcrHandler:
             headers["Referer"] = source_url
             if parsed.scheme and parsed.netloc:
                 headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
-        response = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
+        response = _requests_get_interruptibly(url, headers=headers, proxies=proxies, timeout=timeout)
         response.raise_for_status()
         return response.content
 
@@ -7165,7 +7291,7 @@ class OutputHandler:
                         logger.warning(f"Skipping relative CSS: {href}")
                         continue
 
-                    response = requests.get(href, timeout=10)
+                    response = _requests_get_interruptibly(href, timeout=10)
                     if response.status_code == 200:
                         style = soup.new_tag("style")
                         style.string = response.text
@@ -7183,7 +7309,7 @@ class OutputHandler:
                         logger.warning(f"Skipping relative JS: {src}")
                         continue
 
-                    response = requests.get(src, timeout=10)
+                    response = _requests_get_interruptibly(src, timeout=10)
                     if response.status_code == 200:
                         new_script = soup.new_tag("script")
                         new_script.string = response.text
@@ -7271,7 +7397,7 @@ class PublishHandler:
                 logger.debug(f"  {key}: {value}")
 
         try:
-            response = requests.post(
+            response = _requests_post_interruptibly(
                 "https://pastebin.com/api/api_post.php",
                 data=data,
                 proxies=req_proxies,
@@ -7740,6 +7866,7 @@ class TTSHandler:
 
 
 def main():
+    _install_interrupt_handler()
     parser = argparse.ArgumentParser(
         prog="uv run surf",
         description="Surf - Convert URL to Markdown/PDF/HTML/Audio",
@@ -7971,10 +8098,12 @@ Twitter/X Backend:
     parser.add_argument("--help", action="help", help="Show this help message")
 
     args = parser.parse_args()
+    _raise_if_interrupted()
 
     # Enable verbose logging if requested
     if args.verbose:
         setup_verbose_logging()
+    _raise_if_interrupted()
 
     # Determine config path
     config_path = (
@@ -8164,6 +8293,7 @@ Twitter/X Backend:
         )
 
     # 1. Fetch
+    _raise_if_interrupted()
     try:
         html_content = Fetcher.fetch(
             args.url,
@@ -8205,6 +8335,7 @@ Twitter/X Backend:
     source_url = _extract_source_url_from_html(html_content, args.url)
 
     # 2. Extract
+    _raise_if_interrupted()
     try:
         title, cleaned_html = ContentProcessor.extract_content(html_content)
         if not title:
@@ -8215,6 +8346,7 @@ Twitter/X Backend:
         sys.exit(1)
 
     # 2.5 OCR images
+    _raise_if_interrupted()
     try:
         cleaned_html = OcrHandler.annotate_html_with_ocr(
             cleaned_html,
@@ -8230,6 +8362,7 @@ Twitter/X Backend:
         logger.warning(f"Image OCR failed and was skipped: {e}")
 
     # 3. Convert
+    _raise_if_interrupted()
     try:
         md_content = ContentProcessor.to_markdown(cleaned_html)
     except Exception as e:
@@ -8253,6 +8386,7 @@ Twitter/X Backend:
     if lang_mode == "raw":
         logger.info("Language mode set to 'raw'. Skipping translation.")
     else:
+        _raise_if_interrupted()
         original_md = md_content
         original_title = title
 
@@ -8304,6 +8438,7 @@ Twitter/X Backend:
         logger.info(f"Using resolved source URL for metadata: {source_url}")
 
     # Handle output based on format
+    _raise_if_interrupted()
     if output_format == "pdf":
         if output_path:
             OutputHandler.generate_pdf(title, md_content, config, output_path)
@@ -8401,5 +8536,14 @@ Twitter/X Backend:
             )
 
 
+def run_cli():
+    """Run the CLI entrypoint with consistent Ctrl+C exit behavior."""
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user.")
+        sys.exit(130)
+
+
 if __name__ == "__main__":
-    main()
+    run_cli()
