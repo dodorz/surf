@@ -2604,13 +2604,25 @@ class Fetcher:
             logger.info(
                 "Direct Twitter Article URL detected; skipping oEmbed and fetching canonical article URL"
             )
-            article_html = Fetcher.fetch_with_browser(
-                article_url,
-                config,
-                proxy_mode_override,
-                custom_proxy_override,
-                is_twitter_article=True,
-            )
+            try:
+                article_html = Fetcher.fetch_with_browser(
+                    article_url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    is_twitter_article=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Twitter Article browser fetch failed, trying status-id fallbacks: %s",
+                    e,
+                )
+                req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+                    config, proxy_mode_override, custom_proxy_override
+                )
+                return Fetcher._fetch_twitter_status_fallbacks(
+                    url, proxies=req_proxies, article_target_url=article_url
+                )
             if article_html and not Fetcher._is_twitter_placeholder_content(article_html):
                 return Fetcher._tag_twitter_html_content(article_html, "article")
             return article_html
@@ -2660,17 +2672,29 @@ class Fetcher:
                 logger.info(
                     "Syndication fallback unavailable, falling back to browser fetch"
                 )
-                browser_html = Fetcher.fetch_with_browser(
-                    url,
-                    config,
-                    proxy_mode_override,
-                    custom_proxy_override,
-                    is_twitter_article=True,
-                )
+                try:
+                    browser_html = Fetcher.fetch_with_browser(
+                        url,
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
+                        is_twitter_article=True,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Twitter/X browser fallback failed after placeholder oEmbed response: %s",
+                        e,
+                    )
+                    browser_html = None
                 if browser_html and not Fetcher._is_twitter_placeholder_content(
                     browser_html
                 ):
                     return Fetcher._tag_twitter_html_content(browser_html, "article")
+                fallback_html = Fetcher._fetch_twitter_status_fallbacks(
+                    url, proxies=req_proxies
+                )
+                if fallback_html:
+                    return fallback_html
                 logger.warning(
                     "Browser fallback still returned placeholder/empty content for Twitter/X"
                 )
@@ -2685,13 +2709,20 @@ class Fetcher:
                     url, html_content, proxies=req_proxies
                 )
                 # Fetch directly with browser and clean content
-                article_html = Fetcher.fetch_with_browser(
-                    article_target_url,
-                    config,
-                    proxy_mode_override,
-                    custom_proxy_override,
-                    is_twitter_article=True,
-                )
+                try:
+                    article_html = Fetcher.fetch_with_browser(
+                        article_target_url,
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
+                        is_twitter_article=True,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Twitter Article browser fetch failed, trying status-id fallbacks: %s",
+                        e,
+                    )
+                    article_html = None
                 if article_html and not Fetcher._is_twitter_placeholder_content(
                     article_html
                 ):

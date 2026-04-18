@@ -25,6 +25,7 @@ try:
         jsonify,
         send_file,
     )
+    from werkzeug.exceptions import HTTPException
 except ImportError:
     print("Flask not installed. Installing...")
     os.system("pip install flask")
@@ -35,6 +36,7 @@ except ImportError:
         jsonify,
         send_file,
     )
+    from werkzeug.exceptions import HTTPException
 
 # Import surf modules
 from surf import (
@@ -51,6 +53,20 @@ from surf import (
 )
 
 app = Flask(__name__)
+
+
+@app.errorhandler(Exception)
+def handle_api_error(error):
+    """Return JSON errors for API routes instead of Flask HTML error pages."""
+    if not request.path.startswith("/api/"):
+        raise error
+
+    if isinstance(error, HTTPException):
+        logger.error(f"API request failed: {error}")
+        return jsonify({"success": False, "error": error.description}), error.code
+
+    logger.exception("Unhandled API error")
+    return jsonify({"success": False, "error": str(error)}), 500
 
 # HTML Template
 HTML_TEMPLATE = """
@@ -541,7 +557,7 @@ HTML_TEMPLATE = """
                 const url = (urlInput?.value || '').trim();
                 const query = url ? ('?url=' + encodeURIComponent(url)) : '';
                 const response = await fetch('/api/proxy-default' + query);
-                const result = await response.json();
+                const result = await parseJsonResponse(response);
                 if (result.success && result.proxy_mode) {
                     proxyModeProgrammaticUpdate = true;
                     proxySelect.value = result.proxy_mode;
@@ -597,6 +613,25 @@ HTML_TEMPLATE = """
                 document.getElementById('tab-' + this.dataset.tab).classList.add('active');
             });
         });
+
+        async function parseJsonResponse(response) {
+            const text = await response.text();
+            let result = null;
+
+            try {
+                result = text ? JSON.parse(text) : {};
+            } catch (error) {
+                const snippet = text.trim().slice(0, 240) || ('HTTP ' + response.status);
+                throw new Error(`HTTP ${response.status}: ${snippet}`);
+            }
+
+            if (!response.ok) {
+                const message = result?.error || result?.message || (`HTTP ${response.status}`);
+                throw new Error(message);
+            }
+
+            return result;
+        }
         
         // Form submission
         document.getElementById('surfForm').addEventListener('submit', async function(e) {
@@ -631,7 +666,7 @@ HTML_TEMPLATE = """
                     body: JSON.stringify(data)
                 });
                 
-                const result = await response.json();
+                const result = await parseJsonResponse(response);
                 
                 if (result.success) {
                     showStatus('success', '转换完成！');
@@ -745,7 +780,7 @@ HTML_TEMPLATE = """
                     })
                 });
 
-                const result = await response.json();
+                const result = await parseJsonResponse(response);
 
                 if (result.success) {
                     showStatus('success', `${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
@@ -893,7 +928,7 @@ def proxy_default():
 def process_url():
     """Process a URL and return the result."""
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     raw_url_input = data.get("url")
     url = extract_url_from_text(raw_url_input)
 
@@ -1054,7 +1089,7 @@ def download_file(filename):
 @app.route("/api/save", methods=["POST"])
 def save_file():
     """Generate and save a file to specified directory."""
-    data = request.json
+    data = request.get_json(silent=True) or {}
     fileType = data.get("fileType")
     saveDir = data.get("saveDir", "").strip()
     resultData = data.get("data", {})
