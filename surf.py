@@ -1266,11 +1266,90 @@ class Fetcher:
         return False
 
     @staticmethod
-    def _normalize_twitter_markup_fragment(node):
+    def _twitter_pre_looks_like_code(text):
+        if not text:
+            return False
+
+        raw = str(text).strip("\n")
+        if not raw:
+            return False
+
+        lines = [line.rstrip() for line in raw.splitlines()]
+        non_empty = [line for line in lines if line.strip()]
+        if not non_empty:
+            return False
+
+        joined = "\n".join(non_empty)
+        lowered = joined.lower()
+        code_markers = [
+            "{",
+            "}",
+            ";",
+            "=>",
+            "::",
+            "```",
+            "<?",
+            "</",
+            "def ",
+            "class ",
+            "function ",
+            "return ",
+            "const ",
+            "let ",
+            "var ",
+            "import ",
+            "#include",
+            "SELECT ",
+        ]
+        if any(marker in joined for marker in code_markers):
+            return True
+        if any(lowered.startswith(prefix) for prefix in ("def ", "class ", "function ", "import ", "from ")):
+            return True
+
+        indented = sum(1 for line in non_empty if re.match(r"^(?:\t| {4,})\S", line))
+        if indented >= 2:
+            return True
+
+        punctuated = sum(
+            1
+            for line in non_empty
+            if re.search(r"[{}();=<>\[\]]", line) and len(line.strip()) <= 160
+        )
+        if punctuated >= max(2, len(non_empty) // 2):
+            return True
+
+        return False
+
+    @staticmethod
+    def _normalize_twitter_markup_fragment(node, normalize_pre_blocks=False):
         fragment = BeautifulSoup(str(node), "html.parser")
         root = fragment.find()
         if not root:
             return ""
+
+        if normalize_pre_blocks:
+            pre_nodes = []
+            if root.name == "pre":
+                pre_nodes.append(root)
+            pre_nodes.extend(root.find_all("pre"))
+
+            for pre in pre_nodes:
+                if Fetcher._twitter_pre_looks_like_code(pre.get_text("\n", strip=False)):
+                    continue
+                for code in pre.find_all("code"):
+                    code.unwrap()
+                pre.name = "p"
+
+            code_nodes = []
+            if root.name == "code":
+                code_nodes.append(root)
+            code_nodes.extend(root.find_all("code"))
+
+            for code in code_nodes:
+                if code.find_parent("pre"):
+                    continue
+                if not Fetcher._twitter_pre_looks_like_code(code.get_text("\n", strip=False)):
+                    code.unwrap()
 
         for img in root.find_all("img"):
             img.decompose()
@@ -1319,7 +1398,7 @@ class Fetcher:
         return html.strip()
 
     @staticmethod
-    def _extract_twitter_dom_sequence(best_article):
+    def _extract_twitter_dom_sequence(best_article, normalize_pre_blocks=False):
         blocks = []
         seen_text = set()
         seen_images = set()
@@ -1359,7 +1438,9 @@ class Fetcher:
             if text.lower() in seen_text:
                 continue
 
-            html = Fetcher._normalize_twitter_markup_fragment(node)
+            html = Fetcher._normalize_twitter_markup_fragment(
+                node, normalize_pre_blocks=normalize_pre_blocks
+            )
             if not html:
                 continue
 
@@ -1413,7 +1494,9 @@ class Fetcher:
         if not best_article:
             return None
 
-        blocks = Fetcher._extract_twitter_dom_sequence(best_article)
+        blocks = Fetcher._extract_twitter_dom_sequence(
+            best_article, normalize_pre_blocks=(kind == "article")
+        )
         if not blocks:
             return None
         text_length = sum(len(re.sub(r"<[^>]+>", "", value)) for kind, value in blocks if kind == "html")
