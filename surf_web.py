@@ -159,10 +159,54 @@ HTML_TEMPLATE = """
             align-items: center;
             gap: 8px;
         }
-        
+
+        .checkbox-group label {
+            margin-bottom: 0;
+        }
+
         .checkbox-group input[type="checkbox"] {
             width: 18px;
             height: 18px;
+        }
+
+        .radio-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .radio-option {
+            position: relative;
+        }
+
+        .radio-option input[type="radio"] {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .radio-option label {
+            display: inline-flex;
+            align-items: center;
+            min-height: 44px;
+            padding: 10px 14px;
+            margin-bottom: 0;
+            border: 2px solid #e1e5e9;
+            border-radius: 999px;
+            background: #fff;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .radio-option input[type="radio"]:checked + label {
+            border-color: #667eea;
+            background: #eef2ff;
+            color: #4c63d2;
+        }
+
+        .radio-option input[type="radio"]:disabled + label {
+            opacity: 0.5;
+            cursor: not-allowed;
         }
         
         .btn {
@@ -225,6 +269,31 @@ HTML_TEMPLATE = """
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
+        }
+
+        .save-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .save-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border: 2px solid #e1e5e9;
+            border-radius: 999px;
+            color: #333;
+            font-weight: 500;
+            background: #fff;
+        }
+
+        .save-toggle input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
         }
 
         .save-btn {
@@ -362,6 +431,18 @@ HTML_TEMPLATE = """
             font-size: 12px;
             margin-top: 20px;
         }
+
+        @media (max-width: 768px) {
+            .result-header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 12px;
+            }
+
+            .save-actions {
+                justify-content: flex-start;
+            }
+        }
     </style>
 </head>
 <body>
@@ -383,44 +464,73 @@ HTML_TEMPLATE = """
                 <div class="section-title">输出格式</div>
                 <div class="options-grid">
                     <div class="form-group">
-                        <label for="format">格式</label>
-                        <select id="format" name="format">
-                            <option value="md">Markdown (.md)</option>
-                            <option value="html">HTML (.html)</option>
-                            <option value="pdf">PDF (.pdf)</option>
-                            <option value="audio">Audio (.mp3)</option>
-                        </select>
+                        <label>格式</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="format-md" name="format" value="md" checked>
+                                <label for="format-md">Markdown (.md)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-html" name="format" value="html">
+                                <label for="format-html">HTML (.html)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-pdf" name="format" value="pdf">
+                                <label for="format-pdf">PDF (.pdf)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-audio" name="format" value="audio">
+                                <label for="format-audio">Audio (.mp3)</label>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="form-group">
-                        <label for="lang">语言模式</label>
-                        <select id="lang" name="lang">
-                            <option value="trans">翻译为中文</option>
-                            <option value="raw">保留原文</option>
-                            <option value="both">双语对照</option>
-                        </select>
+                        <label>语言模式</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="lang-trans" name="lang" value="trans" checked>
+                                <label for="lang-trans">翻译为中文</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="lang-raw" name="lang" value="raw">
+                                <label for="lang-raw">保留原文</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="lang-both" name="lang" value="both">
+                                <label for="lang-both">双语对照</label>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="form-group">
-                        <label for="proxy">代理模式</label>
-                        <select id="proxy" name="proxy">
+                        <label>代理模式</label>
+                        <div class="radio-group" id="proxyGroup">
                             {% if is_windows %}
-                            <option value="win" {% if default_proxy_mode == 'win' %}selected{% endif %}>Windows 系统代理</option>
-                            <option value="env" {% if default_proxy_mode == 'env' %}selected{% endif %}>环境变量</option>
-                            <option value="custom" {% if default_proxy_mode == 'custom' %}selected{% endif %}>自定义代理</option>
-                            <option value="no" {% if default_proxy_mode == 'no' %}selected{% endif %}>不使用代理</option>
+                            <div class="radio-option">
+                                <input type="radio" id="proxy-win" name="proxy" value="win" {% if default_proxy_mode == 'win' %}checked{% endif %}>
+                                <label for="proxy-win">Windows 系统代理</label>
+                            </div>
                             {% endif %}
-                            {% if not is_windows %}
-                            <option value="env" {% if default_proxy_mode == 'env' %}selected{% endif %}>环境变量</option>
-                            <option value="custom" {% if default_proxy_mode == 'custom' %}selected{% endif %}>自定义代理</option>
-                            <option value="no" {% if default_proxy_mode == 'no' %}selected{% endif %}>不使用代理</option>
-                            {% endif %}
-                        </select>
+                            <div class="radio-option">
+                                <input type="radio" id="proxy-env" name="proxy" value="env" {% if default_proxy_mode == 'env' %}checked{% endif %}>
+                                <label for="proxy-env">环境变量</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="proxy-custom" name="proxy" value="custom" {% if default_proxy_mode == 'custom' %}checked{% endif %}>
+                                <label for="proxy-custom">自定义代理</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="proxy-no" name="proxy" value="no" {% if default_proxy_mode == 'no' %}checked{% endif %}>
+                                <label for="proxy-no">不使用代理</label>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="form-group" id="customProxyGroup" style="display: none;">
                         <label for="customProxy">自定义代理地址</label>
                         <input type="text" id="customProxy" name="custom_proxy" 
+                               value="{{ default_custom_proxy }}"
                                placeholder="http://127.0.0.1:7890">
                     </div>
                 </div>
@@ -428,58 +538,95 @@ HTML_TEMPLATE = """
                 <div class="section-title">高级选项</div>
                 <div class="options-grid">
                     <div class="form-group">
-                        <label for="threadMode">线程抓取</label>
-                        <select id="threadMode" name="thread_mode">
-                            <option value="default">跟随站点默认</option>
-                            <option value="off">关闭</option>
-                            <option value="backward">向后抓取同作者后续回复</option>
-                            <option value="forward">向前抓取上下文</option>
-                            <option value="both">双向抓取</option>
-                        </select>
+                        <label>线程抓取</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="thread-default" name="thread_mode" value="default" checked>
+                                <label for="thread-default">跟随站点默认</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-off" name="thread_mode" value="off">
+                                <label for="thread-off">关闭</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-backward" name="thread_mode" value="backward">
+                                <label for="thread-backward">向后抓取同作者后续回复</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-forward" name="thread_mode" value="forward">
+                                <label for="thread-forward">向前抓取上下文</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-both" name="thread_mode" value="both">
+                                <label for="thread-both">双向抓取</label>
+                            </div>
+                        </div>
                         <div class="field-hint">对应 CLI 的 `--thread/--no-thread`。仅支持的社交站点会生效。</div>
                     </div>
 
                     <div class="form-group">
-                        <label for="ocrMode">图片 OCR</label>
-                        <select id="ocrMode" name="ocr_mode">
-                            <option value="default">跟随站点默认</option>
-                            <option value="on">启用</option>
-                            <option value="off">关闭</option>
-                        </select>
+                        <label>图片 OCR</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-mode-default" name="ocr_mode" value="default" checked>
+                                <label for="ocr-mode-default">跟随站点默认</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-mode-on" name="ocr_mode" value="on">
+                                <label for="ocr-mode-on">启用</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-mode-off" name="ocr_mode" value="off">
+                                <label for="ocr-mode-off">关闭</label>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="form-group">
-                        <label for="ocrEngine">OCR 引擎</label>
-                        <select id="ocrEngine" name="ocr_engine">
-                            <option value="">默认 (rapidocr)</option>
-                            <option value="rapidocr">RapidOCR</option>
-                            <option value="tesseract">Tesseract</option>
-                            <option value="auto">自动回退</option>
-                        </select>
+                        <label>OCR 引擎</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-rapidocr" name="ocr_engine" value="rapidocr" {% if default_ocr_engine == 'rapidocr' %}checked{% endif %}>
+                                <label for="ocr-engine-rapidocr">RapidOCR</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-tesseract" name="ocr_engine" value="tesseract" {% if default_ocr_engine == 'tesseract' %}checked{% endif %}>
+                                <label for="ocr-engine-tesseract">Tesseract</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-auto" name="ocr_engine" value="auto" {% if default_ocr_engine == 'auto' %}checked{% endif %}>
+                                <label for="ocr-engine-auto">自动回退</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="ocrLangGroup" style="display: none;">
+                        <label>OCR 语言</label>
+                        <div class="radio-group">
+                            {% for option in ocr_lang_options %}
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-lang-{{ loop.index }}" name="ocr_lang" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+                                <label for="ocr-lang-{{ loop.index }}">{{ option.label }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
                     </div>
 
                     <div class="form-group">
-                        <label for="ocrLang">OCR 语言</label>
-                        <input type="text" id="ocrLang" name="ocr_lang"
-                               placeholder="例如 chi_sim+eng">
-                        <div class="field-hint">仅 Tesseract 生效；RapidOCR 会忽略这个值。</div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="llm">LLM Provider 覆盖</label>
-                        <input type="text" id="llm" name="llm"
-                               placeholder="例如 L1 / OpenAI / DeepSeek">
-                        <div class="field-hint">对应 CLI 的 `--llm`，仅在启用翻译时使用。</div>
+                        <label>LLM Provider</label>
+                        <div class="radio-group">
+                            {% for provider in llm_providers %}
+                            <div class="radio-option">
+                                <input type="radio" id="llm-{{ loop.index }}" name="llm" value="{{ provider }}" {% if provider == default_llm_provider %}checked{% endif %}>
+                                <label for="llm-{{ loop.index }}">{{ provider }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
                     </div>
 
                     <div class="form-group checkbox-group">
                         <input type="checkbox" id="browser" name="browser">
                         <label for="browser">使用浏览器渲染 (JavaScript)</label>
-                    </div>
-                    
-                    <div class="form-group checkbox-group">
-                        <input type="checkbox" id="speak" name="speak">
-                        <label for="speak">播放语音 (TTS)</label>
                     </div>
                     
                     <div class="form-group checkbox-group" id="htmlInlineGroup" style="display: none;">
@@ -504,8 +651,14 @@ HTML_TEMPLATE = """
         <div class="card result-card" id="resultCard">
             <div class="result-header">
                 <h2 class="result-title" id="resultTitle">转换结果</h2>
-                <div class="save-links" id="saveLinks">
-                    <!-- Save buttons will be added here -->
+                <div class="save-actions">
+                    <div class="save-links" id="saveLinks">
+                        <!-- Save buttons will be added here -->
+                    </div>
+                    <label class="save-toggle" for="speak">
+                        <input type="checkbox" id="speak" name="speak">
+                        <span>播放语音 (TTS)</span>
+                    </label>
                 </div>
             </div>
             
@@ -534,19 +687,39 @@ HTML_TEMPLATE = """
     <script>
         let proxyModeTouched = false;
         let proxyModeProgrammaticUpdate = false;
-        const proxySelect = document.getElementById('proxy');
         const urlInput = document.getElementById('url');
+        const speakCheckbox = document.getElementById('speak');
+
+        function getCheckedRadioValue(name) {
+            const checked = document.querySelector(`input[name="${name}"]:checked`);
+            return checked ? checked.value : '';
+        }
+
+        function setCheckedRadioValue(name, value) {
+            const radio = Array.from(document.querySelectorAll(`input[name="${name}"]`))
+                .find((input) => input.value === value);
+            if (radio) {
+                radio.checked = true;
+            }
+            return radio;
+        }
 
         // Show/hide custom proxy input
-        proxySelect.addEventListener('change', function() {
+        function updateCustomProxyVisibility() {
             const customGroup = document.getElementById('customProxyGroup');
-            customGroup.style.display = this.value === 'custom' ? 'block' : 'none';
-            if (!proxyModeProgrammaticUpdate) {
-                proxyModeTouched = true;
-            }
+            customGroup.style.display = getCheckedRadioValue('proxy') === 'custom' ? 'block' : 'none';
+        }
+
+        document.querySelectorAll('input[name="proxy"]').forEach((input) => {
+            input.addEventListener('change', function() {
+                updateCustomProxyVisibility();
+                if (!proxyModeProgrammaticUpdate) {
+                    proxyModeTouched = true;
+                }
+            });
         });
         proxyModeProgrammaticUpdate = true;
-        proxySelect.dispatchEvent(new Event('change'));
+        updateCustomProxyVisibility();
         proxyModeProgrammaticUpdate = false;
 
         async function refreshProxyDefault(force = false) {
@@ -560,8 +733,8 @@ HTML_TEMPLATE = """
                 const result = await parseJsonResponse(response);
                 if (result.success && result.proxy_mode) {
                     proxyModeProgrammaticUpdate = true;
-                    proxySelect.value = result.proxy_mode;
-                    proxySelect.dispatchEvent(new Event('change'));
+                    setCheckedRadioValue('proxy', result.proxy_mode);
+                    updateCustomProxyVisibility();
                     proxyModeProgrammaticUpdate = false;
                 }
             } catch (error) {
@@ -576,8 +749,8 @@ HTML_TEMPLATE = """
         refreshProxyDefault(true);
 
         // Show/hide format-specific options
-        document.getElementById('format').addEventListener('change', function() {
-            const format = this.value;
+        function updateFormatSpecificOptions() {
+            const format = getCheckedRadioValue('format');
 
             // YAML Front Matter option - only for markdown
             const noFrontMatterGroup = document.getElementById('noFrontMatterGroup');
@@ -590,18 +763,36 @@ HTML_TEMPLATE = """
             if (htmlInlineGroup) {
                 htmlInlineGroup.style.display = format === 'html' ? 'flex' : 'none';
             }
+        }
+
+        document.querySelectorAll('input[name="format"]').forEach((input) => {
+            input.addEventListener('change', updateFormatSpecificOptions);
         });
 
         // Initialize format-specific options visibility on page load
-        document.getElementById('format').dispatchEvent(new Event('change'));
+        updateFormatSpecificOptions();
 
-        document.getElementById('ocrMode').addEventListener('change', function() {
-            const disabled = this.value === 'off';
-            document.getElementById('ocrEngine').disabled = disabled;
-            document.getElementById('ocrLang').disabled = disabled;
+        function updateOcrControls() {
+            const disabled = getCheckedRadioValue('ocr_mode') === 'off';
+            const useTesseract = getCheckedRadioValue('ocr_engine') === 'tesseract';
+            document.querySelectorAll('input[name="ocr_engine"]').forEach((input) => {
+                input.disabled = disabled;
+            });
+            const ocrLangGroup = document.getElementById('ocrLangGroup');
+            const showOcrLang = !disabled && useTesseract;
+            if (ocrLangGroup) {
+                ocrLangGroup.style.display = showOcrLang ? 'block' : 'none';
+            }
+            document.querySelectorAll('input[name="ocr_lang"]').forEach((input) => {
+                input.disabled = !showOcrLang;
+            });
+        }
+
+        document.querySelectorAll('input[name="ocr_mode"], input[name="ocr_engine"]').forEach((input) => {
+            input.addEventListener('change', updateOcrControls);
         });
 
-        document.getElementById('ocrMode').dispatchEvent(new Event('change'));
+        updateOcrControls();
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -648,12 +839,12 @@ HTML_TEMPLATE = """
             const formData = new FormData(this);
             const data = Object.fromEntries(formData.entries());
             if (!data.proxy) {
-                data.proxy = proxySelect.value || 'env';
+                data.proxy = getCheckedRadioValue('proxy') || 'env';
             }
-            
+             
             // Convert checkboxes to booleans
             data.browser = data.browser === 'on';
-            data.speak = data.speak === 'on';
+            data.speak = !!speakCheckbox?.checked;
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             
@@ -776,7 +967,8 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({
                         fileType,
                         saveDir: saveDir.trim(),
-                        data: currentResult
+                        data: currentResult,
+                        speak: !!speakCheckbox?.checked
                     })
                 });
 
@@ -879,6 +1071,46 @@ def build_web_ocr_args(data):
     )
 
 
+def get_web_ui_context(config):
+    default_custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+    default_llm_provider = config.llm_provider
+    llm_providers = config._get_available_llm_providers()
+    if default_llm_provider and default_llm_provider not in llm_providers:
+        llm_providers.insert(0, default_llm_provider)
+
+    default_ocr_engine = (
+        config.get("OCR", "engine", fallback="rapidocr").strip().lower() or "rapidocr"
+    )
+    if default_ocr_engine not in {"rapidocr", "tesseract", "auto"}:
+        default_ocr_engine = "rapidocr"
+
+    default_ocr_lang = (config.get("OCR", "lang", fallback="chi_sim+eng") or "").strip()
+    if not default_ocr_lang:
+        default_ocr_lang = "chi_sim+eng"
+
+    ocr_lang_values = [default_ocr_lang, "chi_sim+eng", "eng", "jpn+eng"]
+    seen = set()
+    ocr_lang_options = []
+    for value in ocr_lang_values:
+        if value in seen:
+            continue
+        seen.add(value)
+        label = value
+        if value == default_ocr_lang:
+            label = f"默认 ({value})"
+        ocr_lang_options.append(
+            {"value": value, "label": label, "checked": value == default_ocr_lang}
+        )
+
+    return {
+        "default_custom_proxy": default_custom_proxy,
+        "default_llm_provider": default_llm_provider,
+        "llm_providers": llm_providers,
+        "default_ocr_engine": default_ocr_engine,
+        "ocr_lang_options": ocr_lang_options,
+    }
+
+
 def build_output_path(title, extension, target_dir, source_url=None, html_content=None):
     filename_title = OutputHandler._get_filename_title(
         title, source_url=source_url, html_content=html_content
@@ -907,11 +1139,13 @@ def resolve_web_thread_mode(data, site_name, site_config):
 def index():
     """Serve the main page."""
     config = get_config()
+    ui_context = get_web_ui_context(config)
     return render_template_string(
         HTML_TEMPLATE,
         version=get_runtime_version(),
         is_windows=Fetcher._is_windows(),
         default_proxy_mode=resolve_web_proxy_mode_default(config),
+        **ui_context,
     )
 
 
@@ -1093,6 +1327,7 @@ def save_file():
     fileType = data.get("fileType")
     saveDir = data.get("saveDir", "").strip()
     resultData = data.get("data", {})
+    speak = bool(data.get("speak"))
 
     if not fileType:
         return jsonify({"success": False, "error": "File type is required"})
@@ -1170,7 +1405,7 @@ def save_file():
                 title, "mp3", targetDir, source_url=source_url, html_content=html_content
             )
             TTSHandler.run_tts(
-                title, md_content, config, speak=False, save_path=output_path
+                title, md_content, config, speak=speak, save_path=output_path
             )
 
             return jsonify({"success": True, "savePath": output_path})
