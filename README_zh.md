@@ -12,6 +12,7 @@
 - **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。
 - **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”；长文（例如 X 的 `/article/...`）会保留文章自身标题。
 - **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。
+- **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
@@ -59,7 +60,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 图片 OCR 开关、OCR 引擎、OCR 语言
 - Thread 抓取模式（`forward` / `backward` / `both` / 关闭）
 - 翻译时可选的 LLM Provider 覆盖
-- 宽松 URL 输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接
+- 宽松 URL / 文本输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接；如果没有 URL，则会把这段文字直接当作帖子保存，并以第一句作为标题
 
 Web 界面的代理默认值规则：
 - 站点策略 -> `config.ini`（`[Network].proxy_mode`）-> `env`
@@ -215,8 +216,10 @@ surf "https://example.com" -h --html-inline  # 保存 HTML 并内联 CSS/JS
 ```bash
 surf "https://example.com" -x env      # 使用环境变量代理
 surf "https://example.com" -x win      # 使用 Windows 代理
-surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890  # 自定义代理
+surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890  # 自定义代理，优先使用命令行地址
 surf "https://example.com" -c http://127.0.0.1:7890  # 自定义代理简写
+surf "https://example.com" -x custom  # 回退到 config.ini 中的 custom_proxy
+surf "https://example.com" -c  # 等价于 -x custom，并回退到 config.ini 中的 custom_proxy
 surf "https://example.com" -n          # 不使用代理
 ```
 

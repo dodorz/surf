@@ -181,6 +181,35 @@ def _session_get_interruptibly(session, *args, **kwargs):
     return _call_interruptibly(session.get, *args, **kwargs)
 
 
+def _resolve_proxy_args(args, parser, config):
+    """Resolve and validate CLI proxy arguments, with config fallback for custom mode."""
+    proxy_mode = args.proxy
+    custom_proxy = args.set_proxy
+    if args.c is not None:
+        if args.proxy and args.proxy != "custom":
+            parser.error("-c cannot be combined with --proxy except --proxy custom")
+        if args.set_proxy:
+            parser.error("-c cannot be combined with --set-proxy")
+        proxy_mode = "custom"
+        custom_proxy = args.c
+    if args.n:
+        if args.proxy and args.proxy != "no":
+            parser.error("-n cannot be combined with --proxy except --proxy no")
+        if args.c is not None or args.set_proxy:
+            parser.error("-n cannot be combined with custom proxy arguments")
+        proxy_mode = "no"
+        custom_proxy = None
+
+    if custom_proxy and proxy_mode != "custom":
+        parser.error("--set-proxy requires --proxy custom")
+
+    config_custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+    if proxy_mode == "custom" and not (custom_proxy or config_custom_proxy):
+        parser.error("--proxy custom requires --set-proxy PROXY, -c PROXY, or [Network] custom_proxy in config")
+
+    return proxy_mode, custom_proxy
+
+
 def setup_verbose_logging():
     """Enable verbose logging with timestamps."""
     logging.getLogger().setLevel(logging.INFO)
@@ -6596,7 +6625,7 @@ class OutputHandler:
         normalized = re.sub(r"\s+", " ", text).strip()
         if not normalized:
             return None
-        match = re.search(r"^(.+?[。！？!?\.]+)(?:\s|$)", normalized)
+        match = re.search(r"^(.+?[。！？!?\.])", normalized)
         if match:
             return match.group(1).strip()
         return normalized
@@ -8050,16 +8079,18 @@ Twitter/X Backend:
         "-x",
         "--proxy",
         choices=proxy_choices,
-        help="Proxy mode: env=environment vars, custom=use --set-proxy, no=no proxy"
+        help="Proxy mode: env=environment vars, custom=use --set-proxy or config custom_proxy, no=no proxy"
         + (", win=Windows Internet Settings" if Fetcher._is_windows() else ""),
     )
     parser.add_argument(
         "-c",
+        nargs="?",
+        const="",
         metavar="PROXY",
-        help="Shorthand for --proxy custom --set-proxy PROXY",
+        help="Shorthand for --proxy custom; optionally provide PROXY to override config custom_proxy",
     )
     parser.add_argument("-n", action="store_true", help="Shorthand for --proxy no")
-    parser.add_argument("--set-proxy", help="Custom proxy URL (requires --proxy custom)")
+    parser.add_argument("--set-proxy", help="Custom proxy URL for --proxy custom (overrides config custom_proxy)")
 
     # LLM
     parser.add_argument("--llm", help="Override the default LLM provider")
@@ -8157,28 +8188,7 @@ Twitter/X Backend:
         return
 
     # Resolve proxy args (shared by normal fetch and --login)
-    proxy_mode = args.proxy
-    custom_proxy = args.set_proxy
-    if args.c:
-        if args.proxy and args.proxy != "custom":
-            parser.error("-c cannot be combined with --proxy except --proxy custom")
-        if args.set_proxy:
-            parser.error("-c cannot be combined with --set-proxy")
-        proxy_mode = "custom"
-        custom_proxy = args.c
-    if args.n:
-        if args.proxy and args.proxy != "no":
-            parser.error("-n cannot be combined with --proxy except --proxy no")
-        if args.c or args.set_proxy:
-            parser.error("-n cannot be combined with custom proxy arguments")
-        proxy_mode = "no"
-        custom_proxy = None
-
-    # Validate proxy arguments
-    if custom_proxy and proxy_mode != "custom":
-        parser.error("--set-proxy requires --proxy custom")
-    if proxy_mode == "custom" and not custom_proxy:
-        parser.error("--proxy custom requires --set-proxy PROXY (or use -c PROXY)")
+    proxy_mode, custom_proxy = _resolve_proxy_args(args, parser, config)
 
     # Handle --login
     if args.login:

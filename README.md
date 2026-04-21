@@ -37,6 +37,7 @@ surf "https://example.com" -r
 - **Flexible Proxy**: Unified proxy modes: `env` (environment variables), `win` (Windows Internet Settings), `custom`, and `no`.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
+- **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
 ### Special Site Policies
 
@@ -82,7 +83,7 @@ The web form exposes the most commonly used Surf options directly, including:
 - image OCR on/off, OCR engine, and OCR language
 - same-author thread expansion (`forward` / `backward` / `both` / off)
 - optional LLM provider override for translation
-- free-form URL input: you can paste share text and Surf will extract the first `http/https` URL automatically
+- free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
 
 Web proxy default selection is deterministic:
 - site default policy -> `config.ini` (`[Network].proxy_mode`) -> `env`
@@ -199,9 +200,11 @@ uv run surf.py "https://example.com" -x env
 # Windows only: use Windows Internet Settings proxy (WinINET)
 uv run surf.py "https://example.com" -x win
 
-# Custom proxy (two equivalent forms)
+# Custom proxy (CLI value overrides config `custom_proxy`)
 uv run surf.py "https://example.com" -x custom --set-proxy http://127.0.0.1:7890
 uv run surf.py "https://example.com" -c http://127.0.0.1:7890
+uv run surf.py "https://example.com" -x custom
+uv run surf.py "https://example.com" -c
 
 # Disable proxy
 uv run surf.py "https://example.com" -n

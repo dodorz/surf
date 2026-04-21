@@ -14,6 +14,7 @@ import os
 import re
 import threading
 import webbrowser
+from html import escape
 from types import SimpleNamespace
 
 # Flask web framework
@@ -130,7 +131,7 @@ HTML_TEMPLATE = """
             color: #333;
         }
         
-        input[type="text"], input[type="url"], select {
+        input[type="text"], input[type="url"], textarea, select {
             width: 100%;
             padding: 12px 15px;
             border: 2px solid #e1e5e9;
@@ -139,13 +140,15 @@ HTML_TEMPLATE = """
             transition: border-color 0.3s;
         }
         
-        input[type="text"]:focus, input[type="url"]:focus, select:focus {
+        input[type="text"]:focus, input[type="url"]:focus, textarea:focus, select:focus {
             outline: none;
             border-color: #667eea;
         }
         
         .url-input {
             font-size: 18px;
+            min-height: 96px;
+            resize: vertical;
         }
         
         .options-grid {
@@ -455,10 +458,10 @@ HTML_TEMPLATE = """
         <div class="card">
             <form id="surfForm">
                 <div class="form-group">
-                    <label for="url">URL 地址</label>
-                    <input type="text" id="url" name="url" class="url-input" 
-                           placeholder="粘贴链接，前后带文字也可以自动提取 URL" required>
-                    <div class="field-hint">支持直接粘贴分享文案，Surf 会自动提取其中第一个 http/https 链接。</div>
+                    <label for="url">URL 地址或纯文本</label>
+                    <textarea id="url" name="url" class="url-input" rows="4"
+                              placeholder="粘贴链接，或直接输入一段没有 URL 的文字"></textarea>
+                    <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
                 </div>
                 
                 <div class="section-title">输出格式</div>
@@ -1045,6 +1048,37 @@ def extract_url_from_text(value):
     return candidate or None
 
 
+def extract_text_post_title(value):
+    """Derive a post title from free-form text using the first sentence."""
+    text = (value or "").strip()
+    if not text:
+        return "Untitled"
+    return OutputHandler._extract_first_sentence(text) or "Untitled"
+
+
+def build_text_post_html(text, title):
+    """Wrap free-form text in a minimal article HTML document."""
+    normalized = (text or "").strip()
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
+    if not paragraphs:
+        paragraphs = [normalized] if normalized else []
+
+    body_parts = []
+    for paragraph in paragraphs:
+        escaped_paragraph = escape(paragraph).replace("\n", "<br>")
+        body_parts.append(f"<p>{escaped_paragraph}</p>")
+
+    body_html = "\n".join(body_parts)
+    escaped_title = escape(title or "Untitled")
+    return (
+        "<html><head><meta charset='utf-8'>"
+        f"<title>{escaped_title}</title>"
+        "</head><body><article>"
+        f"{body_html}"
+        "</article></body></html>"
+    )
+
+
 def extract_source_url_from_html(html_blob, default_url):
     if not html_blob:
         return default_url
@@ -1160,14 +1194,13 @@ def proxy_default():
 
 @app.route("/api/process", methods=["POST"])
 def process_url():
-    """Process a URL and return the result."""
+    """Process a URL or free-form text post and return the result."""
 
     data = request.get_json(silent=True) or {}
     raw_url_input = data.get("url")
     url = extract_url_from_text(raw_url_input)
-
-    if not url:
-        return jsonify({"success": False, "error": "A valid http/https URL is required"})
+    raw_text = (raw_url_input or "").strip()
+    is_text_post = bool(raw_text and not url)
 
     config = get_config()
 
@@ -1180,61 +1213,72 @@ def process_url():
         
         # Language mode
         lang_mode = data.get("lang", "trans")
-        
-        _, site_name, site_config = _get_handler_for_url(url)
-        fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
-        if site_config:
-            if site_config.get("default_no_translate") and lang_mode == "trans":
-                logger.info(f"Web: {site_name} using default 'no translate'")
-                lang_mode = "raw"
+        if is_text_post:
+            source_url = None
+            site_name = "text"
+            site_config = {}
+            title = extract_text_post_title(raw_text)
+            cleaned_html = build_text_post_html(raw_text, title)
+            html_content = cleaned_html
+            md_content = ContentProcessor.to_markdown(cleaned_html)
+            original_md = md_content
+            original_title = title
+            translated_title = None
+        else:
+            if not url:
+                return jsonify({"success": False, "error": "A valid http/https URL is required"})
 
-        html_content = Fetcher.fetch(
-            url,
-            config=config,
-            use_browser=data.get("browser", False),
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-            fetch_thread=fetch_thread,
-        )
-        if not html_content:
-            return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
+            _, site_name, site_config = _get_handler_for_url(url)
+            fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
+            if site_config:
+                if site_config.get("default_no_translate") and lang_mode == "trans":
+                    logger.info(f"Web: {site_name} using default 'no translate'")
+                    lang_mode = "raw"
 
-        source_url = extract_source_url_from_html(html_content, url)
-
-        # Extract content
-        title, cleaned_html = ContentProcessor.extract_content(html_content)
-        if not title:
-            title = "Untitled"
-
-        try:
-            cleaned_html = OcrHandler.annotate_html_with_ocr(
-                cleaned_html,
-                source_url=source_url,
-                site_name=site_name,
-                site_config=site_config,
-                args=build_web_ocr_args(data),
+            html_content = Fetcher.fetch(
+                url,
                 config=config,
+                use_browser=data.get("browser", False),
                 proxy_mode_override=proxy_mode,
                 custom_proxy_override=custom_proxy,
+                fetch_thread=fetch_thread,
             )
-        except Exception as e:
-            logger.warning(f"Web OCR failed and was skipped: {e}")
+            if not html_content:
+                return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
 
-        # Convert to markdown
-        md_content = ContentProcessor.to_markdown(cleaned_html)
+            source_url = extract_source_url_from_html(html_content, url)
 
-        social_title = OutputHandler._extract_social_first_sentence_title(
-            html_content, source_url=source_url
-        )
-        if social_title:
-            title = social_title
+            # Extract content
+            title, cleaned_html = ContentProcessor.extract_content(html_content)
+            if not title:
+                title = "Untitled"
+
+            try:
+                cleaned_html = OcrHandler.annotate_html_with_ocr(
+                    cleaned_html,
+                    source_url=source_url,
+                    site_name=site_name,
+                    site_config=site_config,
+                    args=build_web_ocr_args(data),
+                    config=config,
+                    proxy_mode_override=proxy_mode,
+                    custom_proxy_override=custom_proxy,
+                )
+            except Exception as e:
+                logger.warning(f"Web OCR failed and was skipped: {e}")
+
+            # Convert to markdown
+            md_content = ContentProcessor.to_markdown(cleaned_html)
+
+            social_title = OutputHandler._extract_social_first_sentence_title(
+                html_content, source_url=source_url
+            )
+            if social_title:
+                title = social_title
 
         # Handle language mode
         target_lang = config.get("Output", "target_language", fallback="zh-cn")
 
-        original_md = md_content
-        original_title = title
-        translated_title = None
         skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
 
         if lang_mode != "raw":
@@ -1256,8 +1300,9 @@ def process_url():
                 title = translated_title
 
         # Convert relative URLs to absolute
-        md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, url)
-        cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, url)
+        if url:
+            md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, url)
+            cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, url)
 
         # Determine if translation was performed for YAML front matter
         translation_performed = lang_mode != "raw"
