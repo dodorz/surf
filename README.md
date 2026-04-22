@@ -61,9 +61,10 @@ We recommend using `uv` for a clean environment.
 2.  **Setup Environment**:
     ```bash
     uv sync
-    uv run playwright install
+    npm install -g @playwright/cli
+    playwright-cli install-browser chromium
     ```
-    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `rapidocr-onnxruntime` for image OCR.
+    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `rapidocr-onnxruntime` for image OCR. Browser-backed features now call `playwright-cli` instead of the Python `playwright` package; if the binary is not on `PATH`, set `PLAYWRIGHT_CLI_BIN`.
 
 3.  **Optional: Install OCR engine(s) for image OCR**:
     `surf` prefers `RapidOCR` via the Python package dependency. If you need to install it separately, run:

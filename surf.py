@@ -28,6 +28,8 @@ import trafilatura
 import re
 import unicodedata
 import signal
+import shlex
+import uuid
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
@@ -240,6 +242,225 @@ def resolve_user_path(path):
         return os.path.normpath(normalized)
 
     return os.path.expanduser(raw_path)
+
+
+class PlaywrightCLIError(RuntimeError):
+    """Raised when playwright-cli commands fail."""
+
+
+class PlaywrightCLITimeoutError(PlaywrightCLIError):
+    """Raised when playwright-cli reports a timeout-like failure."""
+
+
+class PlaywrightCLI:
+    _resolved_command = None
+
+    @staticmethod
+    def _candidate_commands():
+        commands = []
+        configured = (os.environ.get("PLAYWRIGHT_CLI_BIN") or "").strip()
+        if configured:
+            commands.append(shlex.split(configured, posix=os.name != "nt"))
+        if shutil.which("playwright-cli"):
+            commands.append(["playwright-cli"])
+        if shutil.which("npx"):
+            commands.append(["npx", "--no-install", "@playwright/cli"])
+            commands.append(["npx", "--yes", "@playwright/cli@latest"])
+        return commands
+
+    @classmethod
+    def command(cls):
+        if cls._resolved_command:
+            return list(cls._resolved_command)
+        for candidate in cls._candidate_commands():
+            try:
+                completed = _run_subprocess_interruptibly(
+                    candidate + ["--version"],
+                    check=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                continue
+            if completed.returncode == 0:
+                cls._resolved_command = list(candidate)
+                return list(candidate)
+        raise PlaywrightCLIError(
+            "playwright-cli is not available. Install it with "
+            "`npm install -g @playwright/cli` or set PLAYWRIGHT_CLI_BIN."
+        )
+
+    @staticmethod
+    def _run(args, *, raw=False, cwd=None, check=True):
+        command = PlaywrightCLI.command()
+        if raw:
+            command.append("--raw")
+        command.extend(args)
+        completed = _run_subprocess_interruptibly(
+            command,
+            check=False,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=cwd,
+        )
+        if check and completed.returncode != 0:
+            message = (completed.stderr or completed.stdout or "").strip()
+            if "Timeout" in message or "timed out" in message.lower():
+                raise PlaywrightCLITimeoutError(message)
+            raise PlaywrightCLIError(message or f"playwright-cli exited with {completed.returncode}")
+        return completed
+
+    @staticmethod
+    def build_config(
+        *,
+        headless=True,
+        proxy=None,
+        args=None,
+        context_options=None,
+    ):
+        launch_options = {"headless": headless}
+        if proxy:
+            launch_options["proxy"] = proxy
+        if args:
+            launch_options["args"] = args
+        browser_config = {"launchOptions": launch_options}
+        if context_options:
+            browser_config["contextOptions"] = context_options
+        return {"browser": browser_config}
+
+    @staticmethod
+    def _write_temp_file(suffix, content):
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=suffix, delete=False
+        ) as handle:
+            handle.write(content)
+            return handle.name
+
+    @staticmethod
+    def _session_flag(session_name):
+        return f"-s={session_name}"
+
+    @staticmethod
+    def _random_session_name(prefix="surf"):
+        return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def open_session(
+        session_name,
+        *,
+        browser=None,
+        config=None,
+        headed=False,
+        persistent=False,
+        profile=None,
+    ):
+        temp_files = []
+        try:
+            args = [PlaywrightCLI._session_flag(session_name), "open", "about:blank"]
+            if browser:
+                args.append(f"--browser={browser}")
+            if config:
+                config_path = PlaywrightCLI._write_temp_file(
+                    ".json", json.dumps(config, ensure_ascii=False, indent=2)
+                )
+                temp_files.append(config_path)
+                args.append(f"--config={config_path}")
+            if headed:
+                args.append("--headed")
+            if persistent:
+                args.append("--persistent")
+            if profile:
+                args.append(f"--profile={profile}")
+            PlaywrightCLI._run(args)
+        finally:
+            for path in temp_files:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def close_session(session_name):
+        try:
+            PlaywrightCLI._run([PlaywrightCLI._session_flag(session_name), "close"], check=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def load_state(session_name, state_path):
+        PlaywrightCLI._run(
+            [PlaywrightCLI._session_flag(session_name), "state-load", state_path]
+        )
+
+    @staticmethod
+    def save_state(session_name, state_path):
+        PlaywrightCLI._run(
+            [PlaywrightCLI._session_flag(session_name), "state-save", state_path]
+        )
+
+    @staticmethod
+    def goto(session_name, url):
+        PlaywrightCLI._run([PlaywrightCLI._session_flag(session_name), "goto", url])
+
+    @staticmethod
+    def run_code(session_name, script, *, raw=False):
+        script_path = PlaywrightCLI._write_temp_file(".js", script)
+        try:
+            completed = PlaywrightCLI._run(
+                [
+                    PlaywrightCLI._session_flag(session_name),
+                    "run-code",
+                    "--filename",
+                    script_path,
+                ],
+                raw=raw,
+            )
+            return completed.stdout.strip()
+        finally:
+            try:
+                os.remove(script_path)
+            except Exception:
+                pass
+
+    @staticmethod
+    def run_json(session_name, script):
+        output = PlaywrightCLI.run_code(session_name, script, raw=True)
+        if not output:
+            return None
+        return json.loads(output)
+
+    @staticmethod
+    def run_workflow(
+        script,
+        *,
+        session_name=None,
+        browser=None,
+        config=None,
+        headed=False,
+        persistent=False,
+        profile=None,
+        state_file=None,
+        return_json=True,
+    ):
+        session_name = session_name or PlaywrightCLI._random_session_name()
+        PlaywrightCLI.open_session(
+            session_name,
+            browser=browser,
+            config=config,
+            headed=headed,
+            persistent=persistent,
+            profile=profile,
+        )
+        try:
+            if state_file and not persistent and os.path.exists(state_file):
+                PlaywrightCLI.load_state(session_name, state_file)
+            if return_json:
+                return PlaywrightCLI.run_json(session_name, script)
+            return PlaywrightCLI.run_code(session_name, script, raw=True)
+        finally:
+            PlaywrightCLI.close_session(session_name)
 
 
 class Config:
@@ -3000,58 +3221,59 @@ class Fetcher:
     def _fetch_wechat_article(
         url, config, proxy_mode_override=None, custom_proxy_override=None
     ):
-        from playwright.sync_api import sync_playwright
-
-        req_proxies, pw_proxy = Fetcher._get_proxies(
+        _, pw_proxy = Fetcher._get_proxies(
             config, proxy_mode_override, custom_proxy_override
         )
-        with sync_playwright() as p:
-            browser = (
-                p.chromium.launch(headless=True, proxy=pw_proxy)
-                if pw_proxy
-                else p.chromium.launch(headless=True)
-            )
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile MicroMessenger/8.0.30"
-            )
-            page = context.new_page()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                try:
-                    page.wait_for_selector("#js_content", timeout=15000)
-                except Exception:
-                    pass
-                title = page.evaluate(
-                    "() => (document.querySelector('#activity-name')?.innerText || document.title || '').trim()"
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            context_options={
+                "userAgent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                    "Mobile MicroMessenger/8.0.30"
                 )
-                content = page.evaluate("""() => {
-                    const el = document.querySelector('#js_content') || document.querySelector('.rich_media_content');
-                    if (el && el.innerHTML && el.innerHTML.trim().length > 20) return el.innerHTML;
-                    const scripts = Array.from(document.scripts).map(s => s.textContent || '');
-                    let match = null;
-                    for (const sc of scripts) {
-                        let m = sc.match(/desc\\s*:\\s*JsDecode\\((\"[\\s\\S]*?\")\\)/);
-                        if (m) { match = m[1]; break; }
-                        m = sc.match(/desc\\s*:\\s*\"([\\s\\S]*?)\"/);
-                        if (m) { match = '"' + m[1] + '"'; break; }
-                    }
-                    if (match) {
-                        try {
-                            const raw = JSON.parse(match);
-                            return raw;
-                        } catch(e) {}
-                    }
-                    return '';
-                }""")
-                html_content = None
-                if content and content.strip():
-                    html_content = f"<html><head><meta charset='utf-8'><title>{title or 'Untitled'}</title></head><body><article>{content}</article></body></html>"
-                return html_content
-            except Exception as e:
-                logger.warning(f"WeChat handler failed: {e}")
-                return None
-            finally:
-                browser.close()
+            },
+        )
+        script = f"""async (page) => {{
+  await page.goto({json.dumps(url)}, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+  try {{
+    await page.waitForSelector("#js_content", {{ timeout: 15000 }});
+  }} catch (error) {{
+  }}
+  const title = await page.evaluate(
+    "() => (document.querySelector('#activity-name')?.innerText || document.title || '').trim()"
+  );
+  const content = await page.evaluate(`() => {{
+    const el = document.querySelector('#js_content') || document.querySelector('.rich_media_content');
+    if (el && el.innerHTML && el.innerHTML.trim().length > 20) return el.innerHTML;
+    const scripts = Array.from(document.scripts).map(s => s.textContent || '');
+    let match = null;
+    for (const sc of scripts) {{
+      let m = sc.match(/desc\\s*:\\s*JsDecode\\((\\"[\\s\\S]*?\\")\\)/);
+      if (m) {{ match = m[1]; break; }}
+      m = sc.match(/desc\\s*:\\s*\\"([\\s\\S]*?)\\"/);
+      if (m) {{ match = '"' + m[1] + '"'; break; }}
+    }}
+    if (match) {{
+      try {{
+        return JSON.parse(match);
+      }} catch (e) {{
+      }}
+    }}
+    return '';
+  }}`);
+  const htmlContent = content && content.trim()
+    ? `<html><head><meta charset="utf-8"><title>${{title || "Untitled"}}</title></head><body><article>${{content}}</article></body></html>`
+    : null;
+  return JSON.stringify({{ htmlContent }});
+}}"""
+        try:
+            result = PlaywrightCLI.run_workflow(script, config=browser_config)
+            return (result or {}).get("htmlContent")
+        except Exception as e:
+            logger.warning(f"WeChat handler failed: {e}")
+            return None
 
     @staticmethod
     def _is_twitter_url(url):
@@ -3138,7 +3360,6 @@ class Fetcher:
         is_twitter_article=False,
     ):
         logger.info("Launching browser...")
-        from playwright.sync_api import sync_playwright
 
         twitter_target_url = (
             Fetcher._normalize_twitter_article_url(url)
@@ -3166,169 +3387,198 @@ class Fetcher:
             logger.info(f"Playwright Proxy: {pw_proxy}")
         else:
             logger.info("Playwright Proxy: None")
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-web-security",
+            "--disable-features=BlockInsecurePrivateNetworkRequests",
+        ]
+        if is_twitter_url:
+            context_options = {
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "locale": "en-US",
+                "timezoneId": "America/New_York",
+                "extraHTTPHeaders": {
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                },
+            }
+        elif is_zhihu_url:
+            context_options = {
+                "viewport": {"width": 1440, "height": 1080},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "locale": "zh-CN",
+                "timezoneId": "Asia/Shanghai",
+                "extraHTTPHeaders": {
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                },
+            }
+        else:
+            context_options = {
+                "viewport": {"width": 1920, "height": 1080},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "locale": "en-US",
+                "timezoneId": "America/New_York",
+                "extraHTTPHeaders": {
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                },
+            }
 
-        with sync_playwright() as p:
-            browser = None
-            profile_context = None
-            twitter_profile_dir = (
-                AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
-            )
+        twitter_profile_dir = (
+            AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
+        )
+        use_persistent_twitter_profile = bool(
+            is_twitter_url
+            and twitter_profile_dir
+            and os.path.exists(twitter_profile_dir)
+            and os.listdir(twitter_profile_dir)
+        )
+        state_file = None
+        if not use_persistent_twitter_profile:
+            if is_twitter_url:
+                state_file = AuthHandler._get_state_file("twitter")
+            elif is_zhihu_url:
+                state_file = AuthHandler._get_state_file("zhihu")
 
-            # Prefer persistent Twitter profile if it exists (more reliable than storage_state alone).
-            if (
-                is_twitter_url
-                and twitter_profile_dir
-                and os.path.exists(twitter_profile_dir)
-                and os.listdir(twitter_profile_dir)
-            ):
-                persistent_args = {"headless": True}
-                if pw_proxy:
-                    persistent_args["proxy"] = pw_proxy
-                try:
-                    profile_context = p.chromium.launch_persistent_context(
-                        twitter_profile_dir, channel="chrome", **persistent_args
-                    )
-                except Exception as e:
-                    logger.info(
-                        f"Chrome channel unavailable for twitter profile fetch, fallback to Chromium: {e}"
-                    )
-                    profile_context = p.chromium.launch_persistent_context(
-                        twitter_profile_dir, **persistent_args
-                    )
-                context = profile_context
-                page = context.pages[0] if context.pages else context.new_page()
-            else:
-                # Launch browser with stealth args
-                launch_args = {
-                    "headless": True,
-                    "args": [
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-features=IsolateOrigins,site-per-process",
-                        "--disable-web-security",
-                        "--disable-features=BlockInsecurePrivateNetworkRequests",
-                    ],
-                }
-                if pw_proxy:
-                    launch_args["proxy"] = pw_proxy
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=launch_args,
+            context_options=context_options,
+        )
+        target_url = twitter_target_url if is_twitter_url else url
+        wait_until = "domcontentloaded" if (is_twitter_url or is_zhihu_url) else "networkidle"
+        wait_after = 5000 if is_twitter_url else 4000 if is_zhihu_url else 2000
+        script = f"""async (page) => {{
+  await page.addInitScript(() => {{
+    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+    Object.defineProperty(navigator, 'plugins', {{ get: () => [1, 2, 3, 4, 5] }});
+    window.chrome = {{ runtime: {{}} }};
+  }});
+  await page.goto({json.dumps(target_url)}, {{ waitUntil: {json.dumps(wait_until)}, timeout: 60000 }});
+  await page.waitForTimeout({wait_after});
+  const content = await page.content();
+  return JSON.stringify({{ content }});
+}}"""
 
-                browser = p.chromium.launch(**launch_args)
-
-                # Attach persisted auth state for sites with saved login sessions.
-                auth_site_name = None
-                if is_twitter_url:
-                    auth_site_name = "twitter"
-                elif is_zhihu_url:
-                    auth_site_name = "zhihu"
-                context = Fetcher._create_stealth_context(
-                    browser, url, auth_site_name=auth_site_name
-                )
-                page = context.new_page()
-
+        try:
             try:
-                # For Twitter/X, use domcontentloaded + timeout instead of networkidle
-                # because X has persistent connections that never reach networkidle
-                if is_twitter_url:
-                    logger.info("Using domcontentloaded strategy for Twitter/X")
-                    page.goto(twitter_target_url, wait_until="domcontentloaded", timeout=60000)
-                    # Wait longer for content to hydrate
-                    page.wait_for_timeout(5000)
-                elif is_zhihu_url:
-                    logger.info("Using domcontentloaded strategy for Zhihu")
-                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(4000)
+                result = PlaywrightCLI.run_workflow(
+                    script,
+                    config=browser_config,
+                    browser="chrome" if use_persistent_twitter_profile else None,
+                    persistent=use_persistent_twitter_profile,
+                    profile=twitter_profile_dir if use_persistent_twitter_profile else None,
+                    state_file=state_file,
+                )
+            except Exception as profile_error:
+                if use_persistent_twitter_profile:
+                    logger.info(
+                        "Chrome channel unavailable for twitter profile fetch, fallback to Chromium: %s",
+                        profile_error,
+                    )
+                    result = PlaywrightCLI.run_workflow(
+                        script,
+                        config=browser_config,
+                        persistent=True,
+                        profile=twitter_profile_dir,
+                    )
                 else:
-                    page.goto(url, wait_until="networkidle", timeout=60000)
-                    page.wait_for_timeout(2000)
+                    raise
 
-                content = page.content()
+            content = (result or {}).get("content") or ""
 
-                if is_twitter_url:
-                    if Fetcher._is_twitter_placeholder_content(content):
-                        logger.info(
-                            "Browser returned placeholder/login content, trying syndication fallback"
-                        )
-                        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
-                            config, proxy_mode_override, custom_proxy_override
-                        )
-                        syndication_html = Fetcher._fetch_twitter_syndication_html(
-                            twitter_target_url, proxies=req_proxies
-                        )
-                        if syndication_html:
-                            logger.info("Using Twitter/X syndication fallback content")
-                            return syndication_html
-                        fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                            twitter_target_url, proxies=req_proxies
-                        )
-                        if fxapi_html:
-                            logger.info("Using fxTwitter API fallback content")
-                            return fxapi_html
-                        logger.warning(
-                            "Browser returned placeholder/login content and syndication fallback was unavailable"
-                        )
-                        return None
-
-                    # Clean Twitter Article content if needed
-                    if is_twitter_article:
-                        logger.info("Cleaning Twitter Article content...")
-                        content = Fetcher._clean_twitter_article_content(content)
-
-                    dom_content = Fetcher._extract_twitter_dom_content(
-                        content, source_url=twitter_target_url
-                    )
-                    if dom_content:
-                        logger.info("Using preserved Twitter/X DOM content")
-                        return dom_content
-
-                    structured = Fetcher._extract_twitter_structured_content(
-                        content, source_url=twitter_target_url
-                    )
-                    if structured:
-                        logger.info("Using structured Twitter/X content extraction")
-                        return Fetcher._tag_twitter_html_content(
-                            structured, "article" if is_twitter_article else "tweet"
-                        )
-
-                return content
-            except Exception as e:
-                if is_twitter_url:
-                    if Fetcher._should_retry_twitter_without_proxy(
-                        proxy_mode_override, pw_proxy, e
-                    ):
-                        logger.warning(
-                            "Browser fetch failed through Twitter/X proxy; retrying without proxy: %s",
-                            e,
-                        )
-                        return Fetcher.fetch_with_browser(
-                            url,
-                            config,
-                            proxy_mode_override="no",
-                            custom_proxy_override=None,
-                            is_twitter_article=is_twitter_article,
-                        )
-                    logger.warning(
-                        f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}"
+            if is_twitter_url:
+                if Fetcher._is_twitter_placeholder_content(content):
+                    logger.info(
+                        "Browser returned placeholder/login content, trying syndication fallback"
                     )
                     req_proxies, _ = Fetcher._get_twitter_forced_proxies(
                         config, proxy_mode_override, custom_proxy_override
                     )
+                    syndication_html = Fetcher._fetch_twitter_syndication_html(
+                        twitter_target_url, proxies=req_proxies
+                    )
+                    if syndication_html:
+                        logger.info("Using Twitter/X syndication fallback content")
+                        return syndication_html
                     fxapi_html = Fetcher._fetch_twitter_fxapi_html(
                         twitter_target_url, proxies=req_proxies
                     )
                     if fxapi_html:
                         logger.info("Using fxTwitter API fallback content")
                         return fxapi_html
-                logger.error(f"Browser fetch failed: {e}")
-                raise
-            finally:
-                try:
-                    context.close()
-                except Exception as close_error:
-                    logger.debug(f"Ignoring context close error: {close_error}")
-                if browser:
-                    try:
-                        browser.close()
-                    except Exception as close_error:
-                        logger.debug(f"Ignoring browser close error: {close_error}")
+                    logger.warning(
+                        "Browser returned placeholder/login content and syndication fallback was unavailable"
+                    )
+                    return None
+
+                if is_twitter_article:
+                    logger.info("Cleaning Twitter Article content...")
+                    content = Fetcher._clean_twitter_article_content(content)
+
+                dom_content = Fetcher._extract_twitter_dom_content(
+                    content, source_url=twitter_target_url
+                )
+                if dom_content:
+                    logger.info("Using preserved Twitter/X DOM content")
+                    return dom_content
+
+                structured = Fetcher._extract_twitter_structured_content(
+                    content, source_url=twitter_target_url
+                )
+                if structured:
+                    logger.info("Using structured Twitter/X content extraction")
+                    return Fetcher._tag_twitter_html_content(
+                        structured, "article" if is_twitter_article else "tweet"
+                    )
+
+            return content
+        except Exception as e:
+            if is_twitter_url:
+                if Fetcher._should_retry_twitter_without_proxy(
+                    proxy_mode_override, pw_proxy, e
+                ):
+                    logger.warning(
+                        "Browser fetch failed through Twitter/X proxy; retrying without proxy: %s",
+                        e,
+                    )
+                    return Fetcher.fetch_with_browser(
+                        url,
+                        config,
+                        proxy_mode_override="no",
+                        custom_proxy_override=None,
+                        is_twitter_article=is_twitter_article,
+                    )
+                logger.warning(
+                    f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}"
+                )
+                req_proxies, _ = Fetcher._get_twitter_forced_proxies(
+                    config, proxy_mode_override, custom_proxy_override
+                )
+                fxapi_html = Fetcher._fetch_twitter_fxapi_html(
+                    twitter_target_url, proxies=req_proxies
+                )
+                if fxapi_html:
+                    logger.info("Using fxTwitter API fallback content")
+                    return fxapi_html
+            logger.error(f"Browser fetch failed: {e}")
+            raise
 
     @staticmethod
     def _normalize_thread_author_key(author):
@@ -3702,224 +3952,205 @@ class Fetcher:
         site_name = "threads" if "threads.net" in url.lower() else "weibo"
         thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
 
-        from playwright.sync_api import sync_playwright
-
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=["--disable-blink-features=AutomationControlled"],
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        script = f"""async (page) => {{
+  await page.goto({json.dumps(url)}, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+  await page.waitForTimeout(4000);
+  const data = await page.evaluate((args) => {{
+    const site = args.site;
+    const threadMode = args.threadMode || '';
+    const currentUrl = window.location.href;
+    const urlMatch = currentUrl.match(site === 'threads'
+      ? /\\/post\\/([^/?#]+)/
+      : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)\\?/);
+    const targetId = urlMatch ? (urlMatch[2] || urlMatch[3] || urlMatch[1] || '') : '';
+    const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const textFrom = (node, selectors) => {{
+      for (const selector of selectors) {{
+        const found = node.querySelector(selector);
+        if (found && clean(found.innerText)) return clean(found.innerText);
+      }}
+      return '';
+    }};
+    const allNodes = Array.from(document.querySelectorAll('article, [role="article"]'));
+    const items = allNodes.map((node, index) => {{
+      const links = Array.from(node.querySelectorAll('a[href]')).map(a => a.href);
+      const permalink = links.find((href) => {{
+        if (site === 'threads') return /\\/post\\//.test(href);
+        return /m\\.weibo\\.cn|weibo\\.com/.test(href);
+      }}) || '';
+      let author = '';
+      let handle = '';
+      let timestamp = textFrom(node, ['time', 'a time']);
+      let text = '';
+      if (site === 'threads') {{
+        author = textFrom(node, ['h1', 'h2', 'h3', '[data-pressable-container="true"] span']);
+        handle = links.find(href => /threads\\.net\\/@/.test(href)) || '';
+        const textNode = Array.from(node.querySelectorAll('span, div')).find((el) => {{
+          const textValue = clean(el.innerText);
+          return textValue && textValue.length > 20;
+        }});
+        text = textNode ? clean(textNode.innerText) : '';
+      }} else {{
+        author = textFrom(node, ['header span', 'h1', 'h2', '.m-text-cut', '.wbpro-screen-box span']);
+        handle = links.find(href => /\\/(u|n)\\//.test(href)) || '';
+        const textNode = node.querySelector('[data-testid="post-content"], .detail_wbtext_4CRf9, .wbpro-feed-content, .weibo-text');
+        text = textNode ? clean(textNode.innerText) : clean(node.innerText);
+      }}
+      const authorKey = clean(author).toLowerCase();
+      const permalinkIdMatch = permalink.match(site === 'threads'
+        ? /\\/post\\/([^/?#]+)/
+        : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)$/);
+      const permalinkId = permalinkIdMatch ? (permalinkIdMatch[2] || permalinkIdMatch[3] || permalinkIdMatch[1] || '') : '';
+      return {{ index, author, authorKey, handle, timestamp, text, permalink, permalinkId }};
+    }}).filter(item => item.author && item.text);
+    if (!items.length) return {{ items: [] }};
+    let currentIndex = items.length - 1;
+    if (targetId) {{
+      const matchedIndex = items.findIndex(item => item.permalinkId && item.permalinkId === targetId);
+      if (matchedIndex >= 0) currentIndex = matchedIndex;
+    }}
+    let startIndex = currentIndex;
+    let endIndex = currentIndex;
+    if ((threadMode === 'forward' || threadMode === 'both') && items[currentIndex].authorKey) {{
+      while (startIndex > 0 && items[startIndex - 1].authorKey === items[currentIndex].authorKey) {{
+        startIndex -= 1;
+      }}
+    }}
+    if ((threadMode === 'backward' || threadMode === 'both') && items[currentIndex].authorKey) {{
+      while (endIndex + 1 < items.length && items[endIndex + 1].authorKey === items[currentIndex].authorKey) {{
+        endIndex += 1;
+      }}
+    }}
+    return {{ items: items.slice(startIndex, endIndex + 1), currentIndex: currentIndex - startIndex }};
+  }}, {{ site: {json.dumps(site_name)}, threadMode: {json.dumps(thread_mode or "")} }});
+  return JSON.stringify(data);
+}}"""
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
+        try:
+            data = PlaywrightCLI.run_workflow(script, config=browser_config) or {}
+            items = []
+            for item in data.get("items", []):
+                normalized = {
+                    "author": (item.get("author") or "").strip(),
+                    "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
+                    "handle": (item.get("handle") or "").strip(),
+                    "timestamp": (item.get("timestamp") or "").strip(),
+                    "text": (item.get("text") or "").strip(),
+                    "permalink": (item.get("permalink") or "").strip(),
+                }
+                if normalized["author"] and normalized["text"]:
+                    items.append(normalized)
 
-            browser = p.chromium.launch(**launch_args)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(4000)
-
-                data = page.evaluate(
-                    """(args) => {
-                        const site = args.site;
-                        const threadMode = args.threadMode || '';
-                        const currentUrl = window.location.href;
-                        const urlMatch = currentUrl.match(site === 'threads'
-                            ? /\\/post\\/([^/?#]+)/
-                            : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)\\?/);
-                        const targetId = urlMatch ? (urlMatch[2] || urlMatch[3] || urlMatch[1] || '') : '';
-
-                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-                        const textFrom = (node, selectors) => {
-                            for (const selector of selectors) {
-                                const found = node.querySelector(selector);
-                                if (found && clean(found.innerText)) return clean(found.innerText);
-                            }
-                            return '';
-                        };
-
-                        const allNodes = Array.from(document.querySelectorAll('article, [role="article"]'));
-                        const items = allNodes.map((node, index) => {
-                            const links = Array.from(node.querySelectorAll('a[href]')).map(a => a.href);
-                            const permalink = links.find(href => {
-                                if (site === 'threads') return /\\/post\\//.test(href);
-                                return /m\\.weibo\\.cn|weibo\\.com/.test(href);
-                            }) || '';
-
-                            let author = '';
-                            let handle = '';
-                            let timestamp = textFrom(node, ['time', 'a time']);
-                            let text = '';
-
-                            if (site === 'threads') {
-                                author = textFrom(node, ['h1', 'h2', 'h3', '[data-pressable-container="true"] span']);
-                                handle = links.find(href => /threads\\.net\\/@/.test(href)) || '';
-                                const textNode = Array.from(node.querySelectorAll('span, div')).find(el => {
-                                    const textValue = clean(el.innerText);
-                                    return textValue && textValue.length > 20;
-                                });
-                                text = textNode ? clean(textNode.innerText) : '';
-                            } else {
-                                author = textFrom(node, ['header span', 'h1', 'h2', '.m-text-cut', '.wbpro-screen-box span']);
-                                handle = links.find(href => /\\/(u|n)\\//.test(href)) || '';
-                                const textNode = node.querySelector('[data-testid="post-content"], .detail_wbtext_4CRf9, .wbpro-feed-content, .weibo-text');
-                                text = textNode ? clean(textNode.innerText) : clean(node.innerText);
-                            }
-
-                            const authorKey = clean(author).toLowerCase();
-                            const permalinkIdMatch = permalink.match(site === 'threads'
-                                ? /\\/post\\/([^/?#]+)/
-                                : /(detail|status)\\/([^/?#]+)|\\/([^/?#]+)$/);
-                            const permalinkId = permalinkIdMatch ? (permalinkIdMatch[2] || permalinkIdMatch[3] || permalinkIdMatch[1] || '') : '';
-
-                            return {
-                                index,
-                                author,
-                                authorKey,
-                                handle,
-                                timestamp,
-                                text,
-                                permalink,
-                                permalinkId,
-                            };
-                        }).filter(item => item.author && item.text);
-
-                        if (!items.length) return { items: [] };
-
-                        let currentIndex = items.length - 1;
-                        if (targetId) {
-                            const matchedIndex = items.findIndex(item => item.permalinkId && item.permalinkId === targetId);
-                            if (matchedIndex >= 0) currentIndex = matchedIndex;
-                        }
-
-                        let startIndex = currentIndex;
-                        let endIndex = currentIndex;
-                        if ((threadMode === 'forward' || threadMode === 'both') && items[currentIndex].authorKey) {
-                            while (startIndex > 0 && items[startIndex - 1].authorKey === items[currentIndex].authorKey) {
-                                startIndex -= 1;
-                            }
-                        }
-                        if ((threadMode === 'backward' || threadMode === 'both') && items[currentIndex].authorKey) {
-                            while (endIndex + 1 < items.length && items[endIndex + 1].authorKey === items[currentIndex].authorKey) {
-                                endIndex += 1;
-                            }
-                        }
-
-                        return { items: items.slice(startIndex, endIndex + 1), currentIndex: currentIndex - startIndex };
-                    }""",
-                    {"site": site_name, "threadMode": thread_mode or ""},
-                )
-
-                items = []
-                for item in data.get("items", []):
-                    normalized = {
-                        "author": (item.get("author") or "").strip(),
-                        "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
-                        "handle": (item.get("handle") or "").strip(),
-                        "timestamp": (item.get("timestamp") or "").strip(),
-                        "text": (item.get("text") or "").strip(),
-                        "permalink": (item.get("permalink") or "").strip(),
-                    }
-                    if normalized["author"] and normalized["text"]:
-                        items.append(normalized)
-
-                if not items:
-                    return None
-
-                return Fetcher._render_social_thread_html(
-                    site_name, url, items, data.get("currentIndex", len(items) - 1)
-                )
-            except Exception as e:
-                logger.warning(f"{site_name} social thread handler failed: {e}")
+            if not items:
                 return None
-            finally:
-                context.close()
-                browser.close()
+
+            return Fetcher._render_social_thread_html(
+                site_name, url, items, data.get("currentIndex", len(items) - 1)
+            )
+        except Exception as e:
+            logger.warning(f"{site_name} social thread handler failed: {e}")
+            return None
 
     @staticmethod
     def _get_twitter_thread_items(
         url, config, proxy_mode_override=None, custom_proxy_override=None, thread_mode="backward"
     ):
         try:
-            from playwright.sync_api import sync_playwright
-
             _, pw_proxy = Fetcher._get_twitter_forced_proxies(
                 config, proxy_mode_override, custom_proxy_override
             )
+            browser_config = PlaywrightCLI.build_config(
+                headless=True,
+                proxy=pw_proxy,
+                args=["--disable-blink-features=AutomationControlled"],
+                context_options={
+                    "viewport": {"width": 1280, "height": 800},
+                    "userAgent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "locale": "en-US",
+                    "timezoneId": "America/New_York",
+                    "extraHTTPHeaders": {
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    },
+                },
+            )
+            state_file = AuthHandler._get_state_file("twitter")
+            script = f"""async (page) => {{
+  await page.addInitScript(() => {{
+    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+    Object.defineProperty(navigator, 'plugins', {{ get: () => [1, 2, 3, 4, 5] }});
+    window.chrome = {{ runtime: {{}} }};
+  }});
+  await page.goto({json.dumps(url)}, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+  await page.waitForTimeout(5000);
+  const data = await page.evaluate((targetStatusId) => {{
+    const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+    const articles = Array.from(document.querySelectorAll("article[data-testid='tweet']"));
+    const items = articles.map((article) => {{
+      const authorNode = article.querySelector("[data-testid='User-Name']");
+      const textNode = article.querySelector("[data-testid='tweetText']");
+      const links = Array.from(article.querySelectorAll("a[href*='/status/']"));
+      const permalink = (links.find(link => /\\/status\\/\\d+/.test(link.href)) || {{}}).href || '';
+      const statusMatch = permalink.match(/\\/status\\/(\\d+)/);
+      return {{
+        author: clean(authorNode ? authorNode.innerText.split('@')[0] : ''),
+        timestamp: clean((links.find(link => link.querySelector('time')) || {{}}).innerText || ''),
+        text: clean(textNode ? textNode.innerText : ''),
+        permalink,
+        statusId: statusMatch ? statusMatch[1] : '',
+      }};
+    }}).filter(item => item.author && item.text);
+    return {{ items, currentIndex: items.findIndex(item => item.statusId === targetStatusId) }};
+  }}, {json.dumps(Fetcher._extract_twitter_status_id(url) or "")});
+  return JSON.stringify(data);
+}}"""
+            data = PlaywrightCLI.run_workflow(
+                script,
+                config=browser_config,
+                state_file=state_file,
+            ) or {}
 
-            with sync_playwright() as p:
-                launch_args = {
-                    "headless": True,
-                    "args": ["--disable-blink-features=AutomationControlled"],
-                }
-                if pw_proxy:
-                    launch_args["proxy"] = pw_proxy
-
-                browser = p.chromium.launch(**launch_args)
-                context = Fetcher._create_stealth_context(
-                    browser, url, auth_site_name="twitter"
+            items = []
+            for item in data.get("items", []):
+                items.append(
+                    {
+                        "author": item.get("author", ""),
+                        "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
+                        "handle": "",
+                        "timestamp": item.get("timestamp", ""),
+                        "text": item.get("text", ""),
+                        "permalink": item.get("permalink", ""),
+                    }
                 )
-                page = context.new_page()
 
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(5000)
-                    data = page.evaluate(
-                        """(targetStatusId) => {
-                            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-                            const articles = Array.from(document.querySelectorAll("article[data-testid='tweet']"));
-                            const items = articles.map((article) => {
-                                const authorNode = article.querySelector("[data-testid='User-Name']");
-                                const textNode = article.querySelector("[data-testid='tweetText']");
-                                const links = Array.from(article.querySelectorAll("a[href*='/status/']"));
-                                const permalink = (links.find(link => /\\/status\\/\\d+/.test(link.href)) || {}).href || '';
-                                const statusMatch = permalink.match(/\\/status\\/(\\d+)/);
-                                return {
-                                    author: clean(authorNode ? authorNode.innerText.split('@')[0] : ''),
-                                    timestamp: clean((links.find(link => link.querySelector('time')) || {}).innerText || ''),
-                                    text: clean(textNode ? textNode.innerText : ''),
-                                    permalink,
-                                    statusId: statusMatch ? statusMatch[1] : '',
-                                };
-                            }).filter(item => item.author && item.text);
+            if not items:
+                return [], -1
 
-                            return { items, currentIndex: items.findIndex(item => item.statusId === targetStatusId) };
-                        }""",
-                        Fetcher._extract_twitter_status_id(url) or "",
-                    )
+            current_index = data.get("currentIndex", -1)
+            if current_index is None or current_index < 0:
+                current_index = len(items) - 1
 
-                    items = []
-                    for item in data.get("items", []):
-                        items.append(
-                            {
-                                "author": item.get("author", ""),
-                                "author_key": Fetcher._normalize_thread_author_key(item.get("author")),
-                                "handle": "",
-                                "timestamp": item.get("timestamp", ""),
-                                "text": item.get("text", ""),
-                                "permalink": item.get("permalink", ""),
-                            }
-                        )
-
-                    if not items:
-                        return [], -1
-
-                    current_index = data.get("currentIndex", -1)
-                    if current_index is None or current_index < 0:
-                        current_index = len(items) - 1
-
-                    return Fetcher._extract_same_author_thread_items(
-                        items, current_index, thread_mode
-                    )
-                finally:
-                    context.close()
-                    browser.close()
+            return Fetcher._extract_same_author_thread_items(
+                items, current_index, thread_mode
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch Twitter/X thread items: {e}")
             return [], -1
@@ -4083,8 +4314,6 @@ class Fetcher:
         Supports both direct URLs and xhslink.com short URLs.
         Requires prior login using --login xiaohongshu
         """
-        from playwright.sync_api import sync_playwright
-
         req_proxies, pw_proxy = Fetcher._get_proxies(
             config, proxy_mode_override, custom_proxy_override
         )
@@ -4110,51 +4339,30 @@ class Fetcher:
             )
             return None
 
-        with sync_playwright() as p:
-            browser = (
-                p.chromium.launch(headless=True, proxy=pw_proxy)
-                if pw_proxy
-                else p.chromium.launch(headless=True)
-            )
-
-            # Try to use saved auth state
-            context = AuthHandler.create_context_with_auth(
-                browser,
-                "xiaohongshu",
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-
-            try:
-                logger.info(f"Navigating to: {url}")
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(3000)
-
-                # Check if we're still on login page (auth failed or not logged in)
-                current_url = page.url
-                logger.info(f"Current page URL: {current_url}")
-
-                if "/login" in current_url or "/signin" in current_url:
-                    logger.warning(
-                        "Saved auth state appears expired for xiaohongshu. Refresh it with "
-                        "`surf --login xiaohongshu`, then re-run the fetch. On headless servers, "
-                        "re-export the refreshed state and import it there."
-                    )
-                    return None
-
-                # Extract note content
-                # Xiaohongshu note pages have URLs like: https://www.xiaohongshu.com/explore/NOTE_ID
-                title = page.evaluate("""() => {
-                    const titleEl = document.querySelector('h1.title') ||
-                                     document.querySelector('.note-title') ||
-                                     document.querySelector('h1');
-                    return titleEl?.innerText?.trim() || document.title;
-                }
-                """)
-                logger.info(f"Extracted title: {title[:100] if title else 'None'}...")
-
-                content = page.evaluate("""() => {
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        state_file = AuthHandler._get_state_file("xiaohongshu")
+        script = """async (page) => {
+  await page.goto(%s, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForTimeout(3000);
+  const currentUrl = page.url();
+  const title = await page.evaluate(`() => {
+    const titleEl = document.querySelector('h1.title') ||
+      document.querySelector('.note-title') ||
+      document.querySelector('h1');
+    return titleEl?.innerText?.trim() || document.title;
+  }`);
+  const content = await page.evaluate(`() => {
                     // Try multiple selectors for note content
                     const selectors = [
                         '.note-content',
@@ -4177,12 +4385,9 @@ class Fetcher:
                     if (main) return main.innerHTML;
                     
                     return document.body.innerHTML;
-                }
-                """)
+                }`);
 
-                # Extract note images from note-detail data first; broad JSON scanning
-                # tends to pull unrelated UI/media assets from the page.
-                images = page.evaluate("""() => {
+  const images = await page.evaluate(`() => {
                     const normalizeUrl = (value) => {
                         if (!value || typeof value !== 'string') {
                             return '';
@@ -4397,30 +4602,132 @@ class Fetcher:
                         }
                     }
                     return ordered;
-                }
-                """)
+                }`);
+  const pageInfo = {
+    url: currentUrl,
+    title: await page.title(),
+    bodyLength: await page.evaluate(() => document.body?.innerText?.length || 0),
+  };
+  return JSON.stringify({ currentUrl, title, content, images, pageInfo });
+}""" % json.dumps(url)
 
-                logger.info(f"Extracted content length: {len(content) if content else 0} chars, images: {len(images)}")
+        try:
+            data = PlaywrightCLI.run_workflow(
+                script,
+                config=browser_config,
+                state_file=state_file,
+            ) or {}
+            current_url = data.get("currentUrl", "")
+            logger.info(f"Navigating to: {url}")
+            logger.info(f"Current page URL: {current_url}")
 
-                # Check if content is too short (might indicate page not fully loaded)
-                if not content or len(content.strip()) < 50:
-                    logger.warning("Content is too short, page might not have loaded correctly")
-                    # Try to get more info about the page
-                    page_info = page.evaluate("""() => {
-                        return {
-                            url: window.location.href,
-                            title: document.title,
-                            bodyLength: document.body?.innerText?.length || 0
-                        };
-                    }""")
-                    logger.info(f"Page info: {page_info}")
+            if "/login" in current_url or "/signin" in current_url:
+                logger.warning(
+                    "Saved auth state appears expired for xiaohongshu. Refresh it with "
+                    "`surf --login xiaohongshu`, then re-run the fetch. On headless servers, "
+                    "re-export the refreshed state and import it there."
+                )
+                return None
 
-                # Build HTML with full page structure (for cleaning)
-                # Store the cleaned URL in a meta tag for later use in metadata
-                content_soup = BeautifulSoup(content or "", "html.parser")
-                content_image_map = {}
-                content_image_key_map = {}
-                content_image_list = []
+            title = data.get("title") or ""
+            content = data.get("content") or ""
+            images = data.get("images") or []
+
+            logger.info(f"Extracted title: {title[:100] if title else 'None'}...")
+            logger.info(f"Extracted content length: {len(content) if content else 0} chars, images: {len(images)}")
+
+            if not content or len(content.strip()) < 50:
+                logger.warning("Content is too short, page might not have loaded correctly")
+                logger.info(f"Page info: {data.get('pageInfo')}")
+
+            # Build HTML with full page structure (for cleaning)
+            # Store the cleaned URL in a meta tag for later use in metadata
+            content_soup = BeautifulSoup(content or "", "html.parser")
+            content_image_map = {}
+            content_image_key_map = {}
+            content_image_list = []
+            for img in content_soup.find_all("img"):
+                img_url = (
+                    img.get("src")
+                    or img.get("data-src")
+                    or img.get("data-original")
+                    or ""
+                ).strip()
+                canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                    img_url
+                )
+                if (
+                    canonical_img_url
+                    and "xhscdn.com" in canonical_img_url
+                    and "sns-avatar-qc.xhscdn.com" not in canonical_img_url
+                    and canonical_img_url not in content_image_map
+                ):
+                    content_image_map[canonical_img_url] = img_url
+                    content_image_list.append(img_url)
+                    match_key = Fetcher._xiaohongshu_image_match_key(img_url)
+                    if match_key and match_key not in content_image_key_map:
+                        content_image_key_map[match_key] = img_url
+
+            ordered_content_images = []
+            seen_ordered_images = set()
+            for img_url in images:
+                canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                    img_url
+                )
+                match_key = Fetcher._xiaohongshu_image_match_key(img_url)
+                if (
+                    canonical_img_url
+                    and canonical_img_url in content_image_map
+                    and canonical_img_url not in seen_ordered_images
+                ):
+                    ordered_content_images.append(content_image_map[canonical_img_url])
+                    seen_ordered_images.add(canonical_img_url)
+                elif (
+                    match_key
+                    and match_key in content_image_key_map
+                ):
+                    matched_content_url = content_image_key_map[match_key]
+                    matched_canonical = (
+                        Fetcher._canonicalize_xiaohongshu_image_url(
+                            matched_content_url
+                        )
+                    )
+                    if matched_canonical and matched_canonical not in seen_ordered_images:
+                        ordered_content_images.append(matched_content_url)
+                        seen_ordered_images.add(matched_canonical)
+
+            gallery_images = ordered_content_images[:]
+            if not gallery_images and content_image_list:
+                # Prefer only images that were actually present in the extracted note body.
+                # This avoids unrelated JSON images and duplicate re-insertion.
+                gallery_images = content_image_list[:]
+                for img_url in gallery_images:
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                        img_url
+                    )
+                    if canonical_img_url:
+                        seen_ordered_images.add(canonical_img_url)
+
+            if not gallery_images:
+                seen_gallery_images = set()
+                for img_url in images:
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
+                        img_url
+                    )
+                    if (
+                        canonical_img_url
+                        and canonical_img_url not in seen_gallery_images
+                    ):
+                        gallery_images.append(img_url)
+                        seen_gallery_images.add(canonical_img_url)
+
+            gallery_images = Fetcher._normalize_xiaohongshu_gallery_order(
+                gallery_images
+            )
+
+            if gallery_images:
+                # Rebuild note images once and remove original in-content copies
+                # so the note body keeps exactly one gallery.
                 for img in content_soup.find_all("img"):
                     img_url = (
                         img.get("src")
@@ -4435,126 +4742,42 @@ class Fetcher:
                         canonical_img_url
                         and "xhscdn.com" in canonical_img_url
                         and "sns-avatar-qc.xhscdn.com" not in canonical_img_url
-                        and canonical_img_url not in content_image_map
                     ):
-                        content_image_map[canonical_img_url] = img_url
-                        content_image_list.append(img_url)
-                        match_key = Fetcher._xiaohongshu_image_match_key(img_url)
-                        if match_key and match_key not in content_image_key_map:
-                            content_image_key_map[match_key] = img_url
+                        img.decompose()
 
-                ordered_content_images = []
-                seen_ordered_images = set()
-                for img_url in images:
-                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                        img_url
-                    )
-                    match_key = Fetcher._xiaohongshu_image_match_key(img_url)
-                    if (
-                        canonical_img_url
-                        and canonical_img_url in content_image_map
-                        and canonical_img_url not in seen_ordered_images
-                    ):
-                        ordered_content_images.append(content_image_map[canonical_img_url])
-                        seen_ordered_images.add(canonical_img_url)
-                    elif (
-                        match_key
-                        and match_key in content_image_key_map
-                    ):
-                        matched_content_url = content_image_key_map[match_key]
-                        matched_canonical = (
-                            Fetcher._canonicalize_xiaohongshu_image_url(
-                                matched_content_url
-                            )
-                        )
-                        if matched_canonical and matched_canonical not in seen_ordered_images:
-                            ordered_content_images.append(matched_content_url)
-                            seen_ordered_images.add(matched_canonical)
+            content = str(content_soup)
 
-                gallery_images = ordered_content_images[:]
-                if not gallery_images and content_image_list:
-                    # Prefer only images that were actually present in the extracted note body.
-                    # This avoids unrelated JSON images and duplicate re-insertion.
-                    gallery_images = content_image_list[:]
-                    for img_url in gallery_images:
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
-                        if canonical_img_url:
-                            seen_ordered_images.add(canonical_img_url)
+            html_parts = [
+                "<html><head><meta charset='utf-8'>",
+                f"<title>{title}</title>",
+                f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
+                '<meta name="surf-source-site" content="xiaohongshu">',
+                "</head><body><article>",
+                f"<h1>{title}</h1>",
+            ]
 
-                if not gallery_images:
-                    seen_gallery_images = set()
-                    for img_url in images:
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
-                        if (
-                            canonical_img_url
-                            and canonical_img_url not in seen_gallery_images
-                        ):
-                            gallery_images.append(img_url)
-                            seen_gallery_images.add(canonical_img_url)
+            # Insert a single ordered gallery when we can align the structured order
+            # against images already present in the extracted content block.
+            if gallery_images:
+                html_parts.append("<div class='images'>")
+                for img_url in gallery_images:
+                    html_parts.append(f'<img src="{img_url}" />')
+                html_parts.append("</div>")
 
-                gallery_images = Fetcher._normalize_xiaohongshu_gallery_order(
-                    gallery_images
-                )
+            html_parts.append(content)
+            html_parts.append("</article></body></html>")
+            html_content = "".join(html_parts)
 
-                if gallery_images:
-                    # Rebuild note images once and remove original in-content copies
-                    # so the note body keeps exactly one gallery.
-                    for img in content_soup.find_all("img"):
-                        img_url = (
-                            img.get("src")
-                            or img.get("data-src")
-                            or img.get("data-original")
-                            or ""
-                        ).strip()
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
-                        if (
-                            canonical_img_url
-                            and "xhscdn.com" in canonical_img_url
-                            and "sns-avatar-qc.xhscdn.com" not in canonical_img_url
-                        ):
-                            img.decompose()
+            # Clean the content to remove unrelated UI elements
+            html_content = Fetcher._clean_xiaohongshu_content(html_content)
 
-                content = str(content_soup)
+            return html_content
 
-                html_parts = [
-                    "<html><head><meta charset='utf-8'>",
-                    f"<title>{title}</title>",
-                    f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
-                    '<meta name="surf-source-site" content="xiaohongshu">',
-                    "</head><body><article>",
-                    f"<h1>{title}</h1>",
-                ]
-
-                # Insert a single ordered gallery when we can align the structured order
-                # against images already present in the extracted content block.
-                if gallery_images:
-                    html_parts.append("<div class='images'>")
-                    for img_url in gallery_images:
-                        html_parts.append(f'<img src="{img_url}" />')
-                    html_parts.append("</div>")
-
-                html_parts.append(content)
-                html_parts.append("</article></body></html>")
-                html_content = "".join(html_parts)
-
-                # Clean the content to remove unrelated UI elements
-                html_content = Fetcher._clean_xiaohongshu_content(html_content)
-
-                return html_content
-
-            except Exception as e:
-                logger.error(f"Xiaohongshu handler failed: {e}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                return None
-            finally:
-                browser.close()
+        except Exception as e:
+            logger.error(f"Xiaohongshu handler failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
 
     @staticmethod
     def _is_ncpssd_secure_article_url(url):
@@ -4584,7 +4807,183 @@ class Fetcher:
         Download the original NCPSSD full-text PDF by clicking the page's `全文下载` button.
         Returns the saved local PDF path on success, otherwise None.
         """
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+        return Fetcher._download_ncpssd_pdf_via_cli(
+            url,
+            config,
+            output_path=output_path,
+            proxy_mode_override=proxy_mode_override,
+            custom_proxy_override=custom_proxy_override,
+        )
+
+    @staticmethod
+    def _download_ncpssd_pdf_via_cli(
+        url,
+        config,
+        output_path=None,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+    ):
+        if not Fetcher._is_ncpssd_secure_article_url(url):
+            logger.info("NCPSSD direct PDF download skipped: URL is not a secure article detail page")
+            return None
+
+        parsed_input = urlparse(url)
+        host = (parsed_input.netloc or "").lower()
+        effective_url = url
+        if host in {"ncpssd.cn", "ncpssd.org"}:
+            effective_url = urlunparse(parsed_input._replace(netloc=f"www.{host}"))
+            logger.info(f"NCPSSD: normalized download host to {urlparse(effective_url).netloc}")
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=["--disable-blink-features=AutomationControlled"],
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                ),
+                "acceptDownloads": True,
+            },
+        )
+        state_file = AuthHandler._get_state_file("ncpssd")
+        resolved_output = resolve_user_path(output_path) if output_path else None
+        if resolved_output == "-":
+            logger.warning(
+                "NCPSSD direct PDF download does not support stdout output. "
+                "Falling back to default pdf_dir."
+            )
+            resolved_output = None
+        pdf_dir = config.get_path("Output", "pdf_dir", fallback=".")
+        os.makedirs(pdf_dir, exist_ok=True)
+        script = ("""async (page) => {{
+  const fs = require('fs');
+  const path = require('path');
+  const effectiveUrl = %s;
+  const outputPath = %s;
+  const defaultPdfDir = %s;
+  const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const safeStem = (value, fallback = 'NCPSSD-fulltext') =>
+    (clean(value).replace(/[<>:"/\\\\|?*\\x00-\\x1f]+/g, ' ') || fallback).slice(0, 180);
+  const resolveOutputPdfPath = (suggestedFilename, preferredBasename) => {{
+    const parsed = path.parse(path.basename(suggestedFilename || 'NCPSSD-fulltext.pdf'));
+    const safeName = `${{safeStem(preferredBasename || parsed.name)}}.pdf`;
+    if (outputPath) {{
+      const looksLikeDir = outputPath.endsWith('/') || outputPath.endsWith('\\\\') || (fs.existsSync(outputPath) && fs.statSync(outputPath).isDirectory());
+      if (looksLikeDir) {{
+        fs.mkdirSync(outputPath, {{ recursive: true }});
+        return path.join(outputPath, safeName);
+      }}
+      const ensured = outputPath.toLowerCase().endsWith('.pdf') ? outputPath : `${{outputPath}}.pdf`;
+      fs.mkdirSync(path.dirname(ensured), {{ recursive: true }});
+      return ensured;
+    }}
+    fs.mkdirSync(defaultPdfDir, {{ recursive: true }});
+    return path.join(defaultPdfDir, safeName);
+  }};
+  await page.goto(effectiveUrl, {{ waitUntil: 'networkidle', timeout: 60000 }});
+  await page.waitForTimeout(2000);
+  const pageMeta = await page.evaluate(() => ({
+    title: (document.querySelector('#h2_title_c') || document.querySelector('h1') || {{}}).innerText || '',
+    articleid: (document.querySelector('#ftl_urlId') || {{}}).value || '',
+  }));
+  const button = page.locator('#a_down');
+  if (await button.count() === 0) {{
+    return JSON.stringify({{ savedPath: null, warning: 'download-button-missing' }});
+  }}
+  try {{
+    const downloadPromise = page.waitForEvent('download', {{ timeout: 10000 }});
+    await button.click({{ force: true }});
+    const download = await downloadPromise;
+    const filepath = resolveOutputPdfPath(download.suggestedFilename(), pageMeta.title);
+    await download.saveAs(filepath);
+    return JSON.stringify({{ savedPath: filepath }});
+  }} catch (error) {{
+  }}
+  const articleId = clean(pageMeta.articleid);
+  if (!articleId) {{
+    return JSON.stringify({{ savedPath: null, warning: 'article-id-missing' }});
+  }}
+  const endpoints = [
+    `https://${{new URL(effectiveUrl).host}}/Literature/readurl?id=${{articleId}}`,
+    `https://www.ncpssd.cn/Literature/readurl?id=${{articleId}}`,
+    `https://ncpssd.cn/Literature/readurl?id=${{articleId}}`,
+    `https://www.ncpssd.org/Literature/readurl?id=${{articleId}}`,
+    `https://ncpssd.org/Literature/readurl?id=${{articleId}}`,
+  ];
+  const context = page.context();
+  for (const endpoint of endpoints) {{
+    try {{
+      const resp = await context.request.get(endpoint, {{
+        timeout: 30000,
+        headers: {{ Referer: effectiveUrl }},
+      }});
+      if (resp.status() >= 400) continue;
+      const ct = String(resp.headers()['content-type'] || '').toLowerCase();
+      const body = await resp.body();
+      if (ct.includes('application/pdf') && body.length) {{
+        const filepath = resolveOutputPdfPath(`${{articleId}}.pdf`, pageMeta.title);
+        fs.writeFileSync(filepath, body);
+        return JSON.stringify({{ savedPath: filepath }});
+      }}
+      if (ct.includes('application/json') || body.slice(0, 1).toString() === '{{') {{
+        const payload = JSON.parse(body.toString('utf-8'));
+        if (payload?.url) {{
+          const finalResp = await context.request.get(String(payload.url), {{
+            timeout: 60000,
+            headers: {{ Referer: effectiveUrl }},
+          }});
+          const finalBody = await finalResp.body();
+          const finalCt = String(finalResp.headers()['content-type'] || '').toLowerCase();
+          if (finalResp.status() < 400 && (finalCt.includes('application/pdf') || finalBody.slice(0, 4).toString() === '%PDF')) {{
+            const filepath = resolveOutputPdfPath(path.basename(new URL(String(payload.url)).pathname) || `${{articleId}}.pdf`, pageMeta.title);
+            fs.writeFileSync(filepath, finalBody);
+            return JSON.stringify({{ savedPath: filepath }});
+          }}
+        }}
+      }}
+    }} catch (error) {{
+    }}
+  }}
+  return JSON.stringify({{ savedPath: null, warning: 'pdf-url-missing' }});
+}}""" % (
+            json.dumps(effective_url),
+            json.dumps(resolved_output),
+            json.dumps(pdf_dir),
+        )).replace("{{", "{").replace("}}", "}")
+        try:
+            result = PlaywrightCLI.run_workflow(
+                script,
+                config=browser_config,
+                state_file=state_file,
+            ) or {}
+            saved_path = result.get("savedPath")
+            if saved_path:
+                logger.info(f"NCPSSD original PDF saved to {saved_path}")
+                return saved_path
+            warning = result.get("warning")
+            if warning == "download-button-missing":
+                logger.warning(
+                    "NCPSSD: '全文下载' button was not found. If login is required, run `surf --login ncpssd` first."
+                )
+            elif warning == "article-id-missing":
+                logger.warning("NCPSSD: Failed to resolve article id (`#ftl_urlId`) for readurl API")
+            elif warning == "pdf-url-missing":
+                logger.warning("NCPSSD: readurl API did not return a downloadable PDF URL")
+            return None
+        except PlaywrightCLITimeoutError:
+            logger.warning(
+                "NCPSSD: Timed out waiting for download after clicking '全文下载'. "
+                "If the page requires login, run `surf --login ncpssd`."
+            )
+            return None
+        except Exception as e:
+            logger.warning(f"NCPSSD direct PDF download failed: {e}")
+            return None
+
+        # Unreachable legacy implementation kept below for reference during migration.
 
         if not Fetcher._is_ncpssd_secure_article_url(url):
             logger.info("NCPSSD direct PDF download skipped: URL is not a secure article detail page")
@@ -5046,92 +5445,80 @@ class Fetcher:
         Fetch NCPSSD (国家哲学社会科学文献中心) literature pages.
         Mandates: force browser, no translation, h1 title, full content capture.
         """
-        from playwright.sync_api import sync_playwright
-
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=["--disable-blink-features=AutomationControlled"],
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        script = f"""async (page) => {{
+  await page.goto({json.dumps(url)}, {{ waitUntil: "networkidle", timeout: 60000 }});
+  await page.waitForTimeout(3000);
+  const data = await page.evaluate(() => {{
+    const getVal = (id) => document.getElementById(id)?.innerText?.trim() || "";
+    return {{
+      title: document.querySelector('h1')?.innerText?.trim() || document.title,
+      title_e: getVal('h3_title_e'),
+      creator: getVal('p_creator'),
+      institutions: getVal('p_institutions'),
+      media: getVal('p_media'),
+      year: getVal('p_year'),
+      abstract_z: getVal('p_remark'),
+      abstract_e: getVal('p_remarke'),
+      page_range: getVal('p_page'),
+      page_count: getVal('p_pagination'),
+      keywords: getVal('p_keyword'),
+      classification: getVal('p_class'),
+    }};
+  }});
+  return JSON.stringify(data);
+}}"""
+        try:
+            data = PlaywrightCLI.run_workflow(script, config=browser_config) or {}
+            html_parts = [
+                "<html><head><meta charset='utf-8'>",
+                f"<title>{data['title']}</title>",
+                "</head><body><article>",
+                f"<h1>{data['title']}</h1>",
+            ]
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
+            if data["title_e"]:
+                html_parts.append(f"<h2>{data['title_e']}</h2>")
+            if data["creator"]:
+                html_parts.append(f"<p>{data['creator']}</p>")
+            if data["institutions"]:
+                html_parts.append(f"<p>{data['institutions']}</p>")
+            if data["media"]:
+                html_parts.append(f"<p>{data['media']}</p>")
+            if data["year"]:
+                html_parts.append(f"<p>{data['year']}</p>")
+            if data["abstract_z"]:
+                html_parts.append(f"<div><h3>中文摘要</h3><p>{data['abstract_z']}</p></div>")
+            if data["abstract_e"]:
+                html_parts.append(f"<div><h3>英文摘要</h3><p>{data['abstract_e']}</p></div>")
+            if data["keywords"]:
+                html_parts.append(f"<p>{data['keywords']}</p>")
+            if data["page_range"]:
+                html_parts.append(f"<p>{data['page_range']}</p>")
+            if data["page_count"]:
+                html_parts.append(f"<p>{data['page_count']}</p>")
+            if data["classification"]:
+                html_parts.append(f"<p>{data['classification']}</p>")
 
-            browser = p.chromium.launch(**launch_args)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
+            html_parts.append("</article></body></html>")
+            return "".join(html_parts)
 
-            try:
-                page.goto(url, wait_until="networkidle", timeout=60000)
-                page.wait_for_timeout(3000)
-
-                # Extract data using JS
-                data = page.evaluate("""() => {
-                    const getVal = (id) => document.getElementById(id)?.innerText?.trim() || "";
-
-                    // User mandated: Use h1 as title
-                    const title = document.querySelector('h1')?.innerText?.trim() || document.title;
-                    const title_e = getVal('h3_title_e');
-                    const creator = getVal('p_creator');
-                    const institutions = getVal('p_institutions');
-                    const media = getVal('p_media');
-                    const year = getVal('p_year');
-                    const abstract_z = getVal('p_remark');
-                    const abstract_e = getVal('p_remarke');
-                    const page_range = getVal('p_page');
-                    const page_count = getVal('p_pagination');
-                    const keywords = getVal('p_keyword');
-                    const classification = getVal('p_class');
-
-                    return {
-                        title, title_e, creator, institutions, media, year,
-                        abstract_z, abstract_e, page_range, page_count, keywords, classification
-                    };
-                }""")
-
-                # Construct HTML
-                html_parts = [
-                    "<html><head><meta charset='utf-8'>",
-                    f"<title>{data['title']}</title>",
-                    "</head><body><article>",
-                    f"<h1>{data['title']}</h1>",
-                ]
-
-                if data["title_e"]:
-                    html_parts.append(f"<h2>{data['title_e']}</h2>")
-                if data["creator"]:
-                    html_parts.append(f"<p>{data['creator']}</p>")
-                if data["institutions"]:
-                    html_parts.append(f"<p>{data['institutions']}</p>")
-                if data["media"]:
-                    html_parts.append(f"<p>{data['media']}</p>")
-                if data["year"]:
-                    html_parts.append(f"<p>{data['year']}</p>")
-                if data["abstract_z"]:
-                    html_parts.append(f"<div><h3>中文摘要</h3><p>{data['abstract_z']}</p></div>")
-                if data["abstract_e"]:
-                    html_parts.append(f"<div><h3>英文摘要</h3><p>{data['abstract_e']}</p></div>")
-                if data["keywords"]:
-                    html_parts.append(f"<p>{data['keywords']}</p>")
-                if data["page_range"]:
-                    html_parts.append(f"<p>{data['page_range']}</p>")
-                if data["page_count"]:
-                    html_parts.append(f"<p>{data['page_count']}</p>")
-                if data["classification"]:
-                    html_parts.append(f"<p>{data['classification']}</p>")
-
-                html_parts.append("</article></body></html>")
-                return "".join(html_parts)
-
-            except Exception as e:
-                logger.warning(f"NCPSSD handler failed: {e}")
-                return None
-            finally:
-                browser.close()
+        except Exception as e:
+            logger.warning(f"NCPSSD handler failed: {e}")
+            return None
 
     @staticmethod
     def _fetch_github_readme(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -5143,7 +5530,6 @@ class Fetcher:
         """
         import re
         from urllib.parse import urlparse
-        from playwright.sync_api import sync_playwright
 
         logger.info(f"Fetching GitHub README: {url}")
 
@@ -5157,28 +5543,25 @@ class Fetcher:
         owner, repo = path_match.groups()
 
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(3000)
-
-                # Check for language-specific README links
-                readme_data = page.evaluate("""() => {
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=["--disable-blink-features=AutomationControlled"],
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        target_lang = config.get("Output", "target_language", fallback="zh-cn")
+        lang_code = target_lang.split("-")[0]
+        script = ("""async (page) => {{
+  await page.goto(%s, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+  await page.waitForTimeout(3000);
+  const readmeData = await page.evaluate(() => {{
                     // Look for language-specific README links in the file list
                     const links = Array.from(document.querySelectorAll('a'));
                     const readmeLinks = links.filter(a => {
@@ -5221,30 +5604,23 @@ class Fetcher:
                             break;
                         }
                     }
-
                     return { readmeLinks: readmeLinks.map(a => a.href), title, description };
-                }
-                """)
-
-                target_url = url
-                # Check if we should navigate to a language-specific README
-                target_lang = config.get("Output", "target_language", fallback="zh-cn")
-                lang_code = target_lang.split("-")[0]  # e.g., "zh" from "zh-cn"
-
-                if readme_data.get("readmeLinks"):
-                    for link in readme_data["readmeLinks"]:
-                        if f"README_{lang_code}" in link or f"readme_{lang_code}" in link.lower():
-                            target_url = link if link.startswith("http") else f"https://github.com{link}"
-                            logger.info(f"Found language-specific README: {target_url}")
-                            break
-
-                # Navigate to the target README URL if different
-                if target_url != url:
-                    page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(2000)
-
-                # Extract README content
-                html_content = page.evaluate("""() => {
+                }});
+  let targetUrl = %s;
+  if (readmeData.readmeLinks) {{
+    for (const link of readmeData.readmeLinks) {{
+      const lowered = link.toLowerCase();
+      if (link.includes(%s) || lowered.includes(%s)) {{
+        targetUrl = link.startsWith("http") ? link : `https://github.com${{link}}`;
+        break;
+      }}
+    }}
+  }}
+  if (targetUrl !== %s) {{
+    await page.goto(targetUrl, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+    await page.waitForTimeout(2000);
+  }}
+  const htmlContent = await page.evaluate(() => {
                     const article = document.querySelector('article.markdown-body');
                     if (!article) return null;
 
@@ -5255,42 +5631,54 @@ class Fetcher:
                     // Also remove anchor links with symbol
                     const anchorLinks = article.querySelectorAll('a.anchor');
                     anchorLinks.forEach(a => a.remove());
-
                     return article.outerHTML;
-                }
-                """)
-
-                if not html_content:
-                    logger.warning("No README content found in article.markdown-body")
-                    return None
-
-                # Construct full HTML document
-                title = readme_data.get("title", repo)
-                description = readme_data.get("description", "")
-
-                html_parts = [
-                    "<!DOCTYPE html>",
-                    "<html lang=\"en\"><head>",
-                    "<meta charset=\"utf-8\">",
-                    f"<title>{title}</title>",
-                    "</head><body>",
-                    f"<h1>{title}</h1>",
-                ]
-
-                if description:
-                    html_parts.append(f"<p><strong>Description:</strong> {description}</p>")
-
-                html_parts.append(f"<p><strong>Repository:</strong> <a href=\"{url}\">{url}</a></p>")
-                html_parts.append(html_content)
-                html_parts.append("</body></html>")
-
-                return "".join(html_parts)
-
-            except Exception as e:
-                logger.warning(f"GitHub handler failed: {e}")
+                });
+  return JSON.stringify({{
+    readmeData,
+    targetUrl,
+    htmlContent,
+  }});
+}}""" % (
+            json.dumps(url),
+            json.dumps(url),
+            json.dumps(url),
+            json.dumps(f"README_{lang_code}"),
+            json.dumps(f"readme_{lang_code}"),
+        )).replace("{{", "{").replace("}}", "}")
+        try:
+            result = PlaywrightCLI.run_workflow(script, config=browser_config) or {}
+            html_content = result.get("htmlContent")
+            if not html_content:
+                logger.warning("No README content found in article.markdown-body")
                 return None
-            finally:
-                browser.close()
+
+            title = (result.get("readmeData") or {}).get("title", repo)
+            description = (result.get("readmeData") or {}).get("description", "")
+            target_url = result.get("targetUrl", url)
+            if target_url != url:
+                logger.info(f"Found language-specific README: {target_url}")
+
+            html_parts = [
+                "<!DOCTYPE html>",
+                "<html lang=\"en\"><head>",
+                "<meta charset=\"utf-8\">",
+                f"<title>{title}</title>",
+                "</head><body>",
+                f"<h1>{title}</h1>",
+            ]
+
+            if description:
+                html_parts.append(f"<p><strong>Description:</strong> {description}</p>")
+
+            html_parts.append(f"<p><strong>Repository:</strong> <a href=\"{url}\">{url}</a></p>")
+            html_parts.append(html_content)
+            html_parts.append("</body></html>")
+
+            return "".join(html_parts)
+
+        except Exception as e:
+            logger.warning(f"GitHub handler failed: {e}")
+            return None
 
     @staticmethod
     def _fetch_wikipedia(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -5298,32 +5686,26 @@ class Fetcher:
         Fetch Wikipedia article with content optimization.
         Removes citation marks, fixes table captions, and cleans up navigation elements.
         """
-        from playwright.sync_api import sync_playwright
-
         logger.info(f"Fetching Wikipedia article: {url}")
 
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
-            context = browser.new_context(
-                viewport={"width": 1280, "height": 800},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            page = context.new_page()
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(2000)
-
-                html_content = page.evaluate("""() => {
+        browser_config = PlaywrightCLI.build_config(
+            headless=True,
+            proxy=pw_proxy,
+            args=["--disable-blink-features=AutomationControlled"],
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        script = ("""async (page) => {{
+  await page.goto(%s, {{ waitUntil: "domcontentloaded", timeout: 60000 }});
+  await page.waitForTimeout(2000);
+  const htmlContent = await page.evaluate(() => {
                     const content = document.querySelector('#mw-content-text .mw-parser-output');
                     if (!content) return null;
 
@@ -5389,47 +5771,45 @@ class Fetcher:
                             p.remove();
                         }
                     });
-
                     return clone.innerHTML;
-                }
-                """)
-
-                if not html_content:
-                    logger.warning("No Wikipedia content found")
-                    return None
-
-                # Get title
-                title = page.evaluate("""() => {
-                    return document.querySelector('#firstHeading')?.innerText?.trim() ||
-                           document.querySelector('h1')?.innerText?.trim() ||
-                           document.title;
-                }
-                """)
-
-                html_parts = [
-                    "<!DOCTYPE html>",
-                    "<html lang=\"en\"><head>",
-                    "<meta charset=\"utf-8\">",
-                    f"<title>{title}</title>",
-                    "<style>",
-                    "table { border-collapse: collapse; margin: 1em 0; }",
-                    "table, th, td { border: 1px solid #ccc; padding: 0.5em; }",
-                    "caption { font-weight: bold; margin-bottom: 0.5em; }",
-                    ".infobox { background: #f9f9f9; }",
-                    "</style>",
-                    "</head><body>",
-                    f"<h1>{title}</h1>",
-                    html_content,
-                    "</body></html>",
-                ]
-
-                return "".join(html_parts)
-
-            except Exception as e:
-                logger.warning(f"Wikipedia handler failed: {e}")
+                });
+  const title = await page.evaluate(() => {
+    return document.querySelector('#firstHeading')?.innerText?.trim() ||
+      document.querySelector('h1')?.innerText?.trim() ||
+      document.title;
+  });
+  return JSON.stringify({{ htmlContent, title }});
+}}""" % json.dumps(url)).replace("{{", "{").replace("}}", "}")
+        try:
+            result = PlaywrightCLI.run_workflow(script, config=browser_config) or {}
+            html_content = result.get("htmlContent")
+            if not html_content:
+                logger.warning("No Wikipedia content found")
                 return None
-            finally:
-                browser.close()
+
+            title = result.get("title", "")
+            html_parts = [
+                "<!DOCTYPE html>",
+                "<html lang=\"en\"><head>",
+                "<meta charset=\"utf-8\">",
+                f"<title>{title}</title>",
+                "<style>",
+                "table { border-collapse: collapse; margin: 1em 0; }",
+                "table, th, td { border: 1px solid #ccc; padding: 0.5em; }",
+                "caption { font-weight: bold; margin-bottom: 0.5em; }",
+                ".infobox { background: #f9f9f9; }",
+                "</style>",
+                "</head><body>",
+                f"<h1>{title}</h1>",
+                html_content,
+                "</body></html>",
+            ]
+
+            return "".join(html_parts)
+
+        except Exception as e:
+            logger.warning(f"Wikipedia handler failed: {e}")
+            return None
 
     @staticmethod
     def _fetch_bluesky(
@@ -7163,14 +7543,13 @@ class OutputHandler:
     @staticmethod
     def _generate_with_playwright(full_html, filepath, config):
         try:
-            from playwright.sync_api import sync_playwright
-
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                page.set_content(full_html)
-                page.pdf(path=filepath, format="A4")
-                browser.close()
+            browser_config = PlaywrightCLI.build_config(headless=True)
+            script = f"""async (page) => {{
+  await page.setContent({json.dumps(full_html)});
+  await page.pdf({{ path: {json.dumps(filepath)}, format: "A4" }});
+  return JSON.stringify({{ ok: true }});
+}}"""
+            PlaywrightCLI.run_workflow(script, config=browser_config)
             return True
         except Exception as e:
             logger.error(f"Playwright PDF failed: {e}")
@@ -7699,8 +8078,6 @@ class AuthHandler:
         Returns:
             bool: True if login was successful, False otherwise
         """
-        from playwright.sync_api import sync_playwright
-
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if not AuthHandler.can_launch_headed_browser():
             login_url = AuthHandler.get_login_url(normalized_site_name) or login_url
@@ -7732,87 +8109,101 @@ class AuthHandler:
         print("3. Once logged in, press Enter in this terminal to save the session")
         print(f"{'=' * 60}\n")
 
-        with sync_playwright() as p:
-            browser = None
-            context = None
-            profile_dir = None
+        session_name = PlaywrightCLI._random_session_name("surf-login")
+        profile_dir = None
+        state_file = AuthHandler._get_state_file(normalized_site_name)
+        browser_config = PlaywrightCLI.build_config(
+            headless=False,
+            proxy=pw_proxy,
+            context_options={
+                "viewport": {"width": 1280, "height": 800},
+                "userAgent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        if normalized_site_name == "zhihu":
+            browser_config["browser"]["contextOptions"].update(
+                {
+                    "viewport": {"width": 1440, "height": 1080},
+                    "userAgent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    "locale": "zh-CN",
+                    "timezoneId": "Asia/Shanghai",
+                    "extraHTTPHeaders": {
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    },
+                }
+            )
+
+        try:
+            open_kwargs = {
+                "config": browser_config,
+                "headed": True,
+            }
             if normalized_site_name == "twitter":
-                # Use persistent profile and minimal fingerprint modifications for login.
                 profile_dir = AuthHandler.get_twitter_profile_dir()
                 os.makedirs(profile_dir, exist_ok=True)
-                persistent_args = {
-                    "headless": False,
-                }
-                if pw_proxy:
-                    persistent_args["proxy"] = pw_proxy
-
-                try:
-                    context = p.chromium.launch_persistent_context(
-                        profile_dir, channel="chrome", **persistent_args
-                    )
-                except Exception as e:
-                    logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
-                    context = p.chromium.launch_persistent_context(
-                        profile_dir, **persistent_args
-                    )
-            else:
-                launch_args = {"headless": False}
-                if pw_proxy:
-                    launch_args["proxy"] = pw_proxy
-                try:
-                    browser = p.chromium.launch(channel="chrome", **launch_args)
-                except Exception as e:
-                    logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
-                    browser = p.chromium.launch(**launch_args)
-
-                if normalized_site_name == "zhihu":
-                    context = Fetcher._create_stealth_context(browser, login_url)
+                open_kwargs.update(
+                    {
+                        "persistent": True,
+                        "profile": profile_dir,
+                        "browser": "chrome",
+                    }
+                )
+            try:
+                PlaywrightCLI.open_session(session_name, **open_kwargs)
+            except Exception as open_error:
+                if normalized_site_name == "twitter":
+                    logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {open_error}")
+                    open_kwargs.pop("browser", None)
+                    PlaywrightCLI.open_session(session_name, **open_kwargs)
                 else:
-                    context = browser.new_context(
-                        viewport={"width": 1280, "height": 800},
-                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    )
+                    raise
 
-            page = context.pages[0] if context.pages else context.new_page()
+            if normalized_site_name == "zhihu":
+                PlaywrightCLI.run_json(
+                    session_name,
+                    """async (page) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    window.chrome = { runtime: {} };
+  });
+  return JSON.stringify({ ok: true });
+}""",
+                )
+
+            PlaywrightCLI.goto(session_name, login_url)
+            print(f"Browser opened. Please log in to {normalized_site_name}...")
+            input("Press Enter after you have logged in...")
 
             try:
-                page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
-                print(f"Browser opened. Please log in to {normalized_site_name}...")
-                input("Press Enter after you have logged in...")
-
-                # Save the state
+                PlaywrightCLI.save_state(session_name, state_file)
+            except Exception as state_error:
                 if normalized_site_name == "twitter" and profile_dir:
-                    # For persistent Twitter context, the profile itself is primary session storage.
-                    # Attempt to export storage_state for compatibility; tolerate target-closed cases.
-                    try:
-                        state = context.storage_state()
-                        AuthHandler.save_state(normalized_site_name, state)
-                    except Exception as state_error:
-                        logger.warning(
-                            f"Unable to export twitter storage_state, will rely on persistent profile: {state_error}"
-                        )
+                    logger.warning(
+                        f"Unable to export twitter storage_state, will rely on persistent profile: {state_error}"
+                    )
                 else:
-                    state = context.storage_state()
-                    AuthHandler.save_state(normalized_site_name, state)
-                print(f"Login state saved for {normalized_site_name}")
-                return True
+                    raise
+            print(f"Login state saved for {normalized_site_name}")
+            return True
 
-            except KeyboardInterrupt:
-                logger.warning("Interactive login cancelled by user.")
-                return False
-            except Exception as e:
-                logger.error(f"Interactive login failed: {e}")
-                return False
-            finally:
-                try:
-                    context.close()
-                except Exception as close_error:
-                    logger.debug(f"Ignoring context close error: {close_error}")
-                if browser:
-                    try:
-                        browser.close()
-                    except Exception as close_error:
-                        logger.debug(f"Ignoring browser close error: {close_error}")
+        except KeyboardInterrupt:
+            logger.warning("Interactive login cancelled by user.")
+            return False
+        except Exception as e:
+            logger.error(f"Interactive login failed: {e}")
+            return False
+        finally:
+            PlaywrightCLI.close_session(session_name)
 
     @staticmethod
     def create_context_with_auth(browser, site_name, **context_options):
