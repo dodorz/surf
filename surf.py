@@ -31,6 +31,64 @@ import signal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
+def _build_direct_markdown_payload(markdown_text, title, source_url, site_name="markdown"):
+    """Wrap raw markdown so downstream code can detect and bypass HTML extraction."""
+    safe_title = escape(title or "Untitled")
+    safe_source_url = escape(source_url or "")
+    safe_site_name = escape(site_name or "markdown")
+    safe_markdown = escape(markdown_text or "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{safe_title}</title>
+<meta name="source-url" content="{safe_source_url}">
+<meta name="surf-source-site" content="{safe_site_name}">
+<meta name="surf-direct-markdown" content="true">
+</head>
+<body>
+<pre id="surf-direct-markdown" hidden>{safe_markdown}</pre>
+</body>
+</html>"""
+
+
+def _extract_direct_markdown_payload(html_content):
+    """Return embedded markdown payload when the fetch stage already resolved raw markdown."""
+    if not html_content:
+        return None
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        marker = soup.find("meta", attrs={"name": "surf-direct-markdown"})
+        if not marker or (marker.get("content") or "").strip().lower() != "true":
+            return None
+        payload_node = soup.find(id="surf-direct-markdown")
+        if payload_node is None:
+            return None
+        title_tag = soup.find("title")
+        source_meta = soup.find("meta", attrs={"name": "source-url"})
+        site_meta = soup.find("meta", attrs={"name": "surf-source-site"})
+        markdown_text = payload_node.get_text()
+        return {
+            "markdown": markdown_text or "",
+            "title": title_tag.get_text(strip=True) if title_tag else "Untitled",
+            "source_url": source_meta.get("content") if source_meta else None,
+            "site_name": site_meta.get("content") if site_meta else None,
+        }
+    except Exception:
+        return None
+
+
+def _render_markdown_to_html(markdown_text):
+    """Render markdown for HTML/PDF output when the fetch step already returned markdown."""
+    try:
+        import markdown  # type: ignore
+
+        body = markdown.markdown(markdown_text or "")
+    except Exception:
+        body = f"<pre>{escape(markdown_text or '')}</pre>"
+    return f"<article>{body}</article>"
+
+
 def _get_version():
     """从 pyproject.toml [project] 小节读取版本号"""
     try:
@@ -382,6 +440,111 @@ class Fetcher:
                 continue
 
         return response.text
+
+    @staticmethod
+    def _build_github_markdown_targets(url, config):
+        """
+        Resolve supported GitHub URLs to raw markdown fetch targets.
+
+        Supported inputs:
+        - Repo root: https://github.com/OWNER/REPO
+        - Markdown file without branch: https://github.com/OWNER/REPO/path/to/file.md
+        - Markdown file with blob/raw branch context
+        """
+        parsed = urlparse(url)
+        if parsed.netloc.lower() not in {"github.com", "www.github.com"}:
+            return None
+
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) < 2:
+            return None
+
+        owner, repo = path_parts[:2]
+        rest = path_parts[2:]
+        target_lang = (config.get("Output", "target_language", fallback="zh-cn") or "zh-cn").lower()
+        lang_code = target_lang.split("-")[0]
+        repo_title = f"{owner}/{repo}"
+
+        if not rest:
+            readme_names = [f"README_{lang_code}.md", "README.md"]
+            branch_candidates = ["master", "main"]
+            candidates = []
+            for name in readme_names:
+                for branch in branch_candidates:
+                    candidates.append(
+                        {
+                            "raw_url": f"https://github.com/{owner}/{repo}/raw/refs/heads/{branch}/{name}",
+                            "source_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{name}",
+                            "title": repo_title,
+                        }
+                    )
+            return candidates
+
+        branch = None
+        file_parts = None
+        if rest[0] in {"blob", "tree"} and len(rest) >= 3:
+            branch = rest[1]
+            file_parts = rest[2:]
+        elif rest[0] == "raw" and len(rest) >= 3:
+            if len(rest) >= 5 and rest[1] == "refs" and rest[2] == "heads":
+                branch = rest[3]
+                file_parts = rest[4:]
+            else:
+                branch = rest[1]
+                file_parts = rest[2:]
+        elif rest[-1].lower().endswith(".md"):
+            file_parts = rest
+
+        if not file_parts or not file_parts[-1].lower().endswith(".md"):
+            return None
+
+        normalized_path = "/".join(file_parts)
+        branch_candidates = [branch] if branch else ["main", "master"]
+        title = file_parts[-1]
+        return [
+            {
+                "raw_url": f"https://github.com/{owner}/{repo}/raw/refs/heads/{candidate_branch}/{normalized_path}",
+                "source_url": f"https://github.com/{owner}/{repo}/blob/{candidate_branch}/{normalized_path}",
+                "title": title,
+            }
+            for candidate_branch in branch_candidates
+        ]
+
+    @staticmethod
+    def _fetch_github_markdown(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """Fetch raw markdown from supported GitHub repo/file URLs and bypass HTML-to-Markdown conversion."""
+        targets = Fetcher._build_github_markdown_targets(url, config)
+        if not targets:
+            return None
+
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        last_error = None
+        for target in targets:
+            try:
+                logger.info(f"Fetching GitHub markdown directly: {target['raw_url']}")
+                response = _requests_get_interruptibly(
+                    target["raw_url"], headers=headers, proxies=req_proxies, timeout=20
+                )
+                response.raise_for_status()
+                markdown_text = Fetcher._decode_response_text(response)
+                if markdown_text and markdown_text.strip():
+                    return _build_direct_markdown_payload(
+                        markdown_text=markdown_text,
+                        title=target["title"],
+                        source_url=target["source_url"],
+                        site_name="github",
+                    )
+            except Exception as exc:
+                last_error = exc
+                logger.info(f"GitHub markdown candidate failed: {target['raw_url']} ({exc})")
+
+        if last_error:
+            logger.warning(f"GitHub markdown direct fetch failed: {last_error}")
+        return None
 
     @staticmethod
     def _get_system_proxy_win():
@@ -5141,6 +5304,12 @@ class Fetcher:
         Prefers language-specific READMEs (e.g., README_zh.md) if available.
         Removes permalink anchors (aria-label^="Permalink:") to clean up output.
         """
+        direct_markdown = Fetcher._fetch_github_markdown(
+            url, config, proxy_mode_override, custom_proxy_override
+        )
+        if direct_markdown:
+            return direct_markdown
+
         import re
         from urllib.parse import urlparse
         from playwright.sync_api import sync_playwright
@@ -5659,6 +5828,8 @@ SPECIAL_SITE_HANDLERS = {
     "github": {
         "patterns": [
             r"^https?://(www\.)?github\.com/[^/]+/[^/]+/?$",
+            r"^https?://(www\.)?github\.com/[^/]+/[^/]+/.+\.md(?:[#?].*)?$",
+            r"^https?://(www\.)?github\.com/[^/]+/[^/]+/(blob|raw|tree)/[^/]+/.+\.md(?:[#?].*)?$",
         ],
         "handler": Fetcher._fetch_github_readme,
         "skip_title_translation": True,  # Don't translate GitHub repo names, but content can be translated
@@ -8344,40 +8515,50 @@ Twitter/X Backend:
 
     source_url = _extract_source_url_from_html(html_content, args.url)
 
+    direct_markdown_payload = _extract_direct_markdown_payload(html_content)
+
     # 2. Extract
     _raise_if_interrupted()
-    try:
-        title, cleaned_html = ContentProcessor.extract_content(html_content)
-        if not title:
-            title = "Untitled"
-        logger.info(f"Title: {title}")
-    except Exception as e:
-        logger.error(f"Failed to extract content: {e}")
-        sys.exit(1)
+    if direct_markdown_payload:
+        title = direct_markdown_payload.get("title") or "Untitled"
+        md_content = direct_markdown_payload.get("markdown") or ""
+        cleaned_html = _render_markdown_to_html(md_content)
+        logger.info(f"Using direct markdown payload. Title: {title}")
+    else:
+        try:
+            title, cleaned_html = ContentProcessor.extract_content(html_content)
+            if not title:
+                title = "Untitled"
+            logger.info(f"Title: {title}")
+        except Exception as e:
+            logger.error(f"Failed to extract content: {e}")
+            sys.exit(1)
 
     # 2.5 OCR images
     _raise_if_interrupted()
-    try:
-        cleaned_html = OcrHandler.annotate_html_with_ocr(
-            cleaned_html,
-            source_url=source_url,
-            site_name=site_name,
-            site_config=site_config,
-            args=args,
-            config=config,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-        )
-    except Exception as e:
-        logger.warning(f"Image OCR failed and was skipped: {e}")
+    if not direct_markdown_payload:
+        try:
+            cleaned_html = OcrHandler.annotate_html_with_ocr(
+                cleaned_html,
+                source_url=source_url,
+                site_name=site_name,
+                site_config=site_config,
+                args=args,
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+        except Exception as e:
+            logger.warning(f"Image OCR failed and was skipped: {e}")
 
     # 3. Convert
     _raise_if_interrupted()
-    try:
-        md_content = ContentProcessor.to_markdown(cleaned_html)
-    except Exception as e:
-        logger.error(f"Failed to convert to markdown: {e}")
-        sys.exit(1)
+    if not direct_markdown_payload:
+        try:
+            md_content = ContentProcessor.to_markdown(cleaned_html)
+        except Exception as e:
+            logger.error(f"Failed to convert to markdown: {e}")
+            sys.exit(1)
 
     twitter_title = OutputHandler._extract_social_first_sentence_title(
         html_content, source_url=source_url
@@ -8435,12 +8616,13 @@ Twitter/X Backend:
             title = translated_title
 
     # 4.5 Convert relative URLs to absolute (after translation, before output)
-    if args.url:
+    base_url_for_links = source_url or args.url
+    if base_url_for_links:
         md_content = OutputHandler._convert_markdown_urls_to_absolute(
-            md_content, args.url
+            md_content, base_url_for_links
         )
         # Also convert HTML URLs for HTML output
-        cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, args.url)
+        cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)
 
     # 5. Output
     # Use the source URL from meta tag if available (for xhslink resolution)

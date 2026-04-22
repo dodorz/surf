@@ -47,9 +47,11 @@ from surf import (
     OcrHandler,
     OutputHandler,
     TTSHandler,
+    _extract_direct_markdown_payload,
     _get_handler_for_url,
     _get_version,
     logger,
+    _render_markdown_to_html,
     resolve_user_path,
 )
 
@@ -1247,28 +1249,36 @@ def process_url():
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
 
             source_url = extract_source_url_from_html(html_content, url)
+            direct_markdown_payload = _extract_direct_markdown_payload(html_content)
 
-            # Extract content
-            title, cleaned_html = ContentProcessor.extract_content(html_content)
-            if not title:
-                title = "Untitled"
+            if direct_markdown_payload:
+                title = direct_markdown_payload.get("title") or "Untitled"
+                md_content = direct_markdown_payload.get("markdown") or ""
+                cleaned_html = _render_markdown_to_html(md_content)
+            else:
+                # Extract content
+                title, cleaned_html = ContentProcessor.extract_content(html_content)
+                if not title:
+                    title = "Untitled"
 
-            try:
-                cleaned_html = OcrHandler.annotate_html_with_ocr(
-                    cleaned_html,
-                    source_url=source_url,
-                    site_name=site_name,
-                    site_config=site_config,
-                    args=build_web_ocr_args(data),
-                    config=config,
-                    proxy_mode_override=proxy_mode,
-                    custom_proxy_override=custom_proxy,
-                )
-            except Exception as e:
-                logger.warning(f"Web OCR failed and was skipped: {e}")
+            if not direct_markdown_payload:
+                try:
+                    cleaned_html = OcrHandler.annotate_html_with_ocr(
+                        cleaned_html,
+                        source_url=source_url,
+                        site_name=site_name,
+                        site_config=site_config,
+                        args=build_web_ocr_args(data),
+                        config=config,
+                        proxy_mode_override=proxy_mode,
+                        custom_proxy_override=custom_proxy,
+                    )
+                except Exception as e:
+                    logger.warning(f"Web OCR failed and was skipped: {e}")
 
-            # Convert to markdown
-            md_content = ContentProcessor.to_markdown(cleaned_html)
+            if not direct_markdown_payload:
+                # Convert to markdown
+                md_content = ContentProcessor.to_markdown(cleaned_html)
 
             social_title = OutputHandler._extract_social_first_sentence_title(
                 html_content, source_url=source_url
@@ -1300,9 +1310,10 @@ def process_url():
                 title = translated_title
 
         # Convert relative URLs to absolute
-        if url:
-            md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, url)
-            cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, url)
+        base_url_for_links = source_url or url
+        if base_url_for_links:
+            md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, base_url_for_links)
+            cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)
 
         # Determine if translation was performed for YAML front matter
         translation_performed = lang_mode != "raw"
