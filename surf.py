@@ -857,6 +857,7 @@ class Fetcher:
         )
 
         if not use_browser:
+            should_use_browser = False
             try:
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -875,16 +876,19 @@ class Fetcher:
                     logger.info(
                         "Content seems short or requires JS. Switching to browser..."
                     )
-                    return Fetcher.fetch_with_browser(
-                        url, config, proxy_mode_override, custom_proxy_override
-                    )
+                    should_use_browser = True
+                else:
+                    return decoded_text
 
-                return decoded_text
             except Exception as e:
                 logger.warning(f"Requests failed: {e}. Switching to browser...")
-                return Fetcher.fetch_with_browser(
-                    url, config, proxy_mode_override, custom_proxy_override
-                )
+
+            if should_use_browser:
+                logger.info("Using browser fallback for dynamic content.")
+
+            return Fetcher.fetch_with_browser(
+                url, config, proxy_mode_override, custom_proxy_override
+            )
         else:
             return Fetcher.fetch_with_browser(
                 url, config, proxy_mode_override, custom_proxy_override
@@ -3316,7 +3320,7 @@ class Fetcher:
         is_twitter_article=False,
     ):
         logger.info("Launching browser...")
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
         twitter_target_url = (
             Fetcher._normalize_twitter_article_url(url)
@@ -3415,7 +3419,20 @@ class Fetcher:
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
                     page.wait_for_timeout(4000)
                 else:
-                    page.goto(url, wait_until="networkidle", timeout=60000)
+                    try:
+                        page.goto(url, wait_until="networkidle", timeout=60000)
+                    except PlaywrightTimeoutError as e:
+                        logger.warning(
+                            "Browser networkidle wait timed out; retrying with domcontentloaded: %s",
+                            e,
+                        )
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        except PlaywrightTimeoutError as fallback_error:
+                            logger.warning(
+                                "Browser domcontentloaded retry also timed out; using partial page content: %s",
+                                fallback_error,
+                            )
                     page.wait_for_timeout(2000)
 
                 content = page.content()
