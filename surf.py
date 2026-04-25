@@ -268,6 +268,21 @@ def _resolve_proxy_args(args, parser, config):
     return proxy_mode, custom_proxy
 
 
+def _normalize_thread_argv(argv):
+    """Allow `surf -t URL` even though argparse optional values are ambiguous."""
+    normalized = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        normalized.append(token)
+        if token in {"-t", "--thread"} and index + 1 < len(argv):
+            next_token = argv[index + 1]
+            if re.match(r"^https?://", next_token, re.IGNORECASE):
+                normalized.append("backward")
+        index += 1
+    return normalized
+
+
 def setup_verbose_logging():
     """Enable verbose logging with timestamps."""
     logging.getLogger().setLevel(logging.INFO)
@@ -821,7 +836,7 @@ class Fetcher:
                     browser=twitter_browser,
                     profile=twitter_profile,
                 )
-            elif site_name in {"bluesky", "weibo", "threads"}:
+            elif site_name in {"bluesky", "weibo", "threads", "v2ex"}:
                 html_content = handler(
                     url,
                     config,
@@ -5759,6 +5774,212 @@ class Fetcher:
             logger.warning(f"Bluesky handler failed: {e}")
             return None
 
+    @staticmethod
+    def _get_v2ex_proxy_overrides(config, proxy_mode_override, custom_proxy_override):
+        """V2EX is commonly unreachable directly, so prefer configured proxy unless explicitly overridden."""
+        if proxy_mode_override is not None:
+            return proxy_mode_override, custom_proxy_override
+
+        custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+        if custom_proxy:
+            logger.info("V2EX: Forcing configured custom proxy")
+            return "custom", custom_proxy_override
+
+        config_mode = Fetcher._normalize_proxy_mode(config.get("Network", "proxy_mode", fallback="env"))
+        if config_mode and config_mode != "no":
+            logger.info(f"V2EX: Forcing configured proxy mode '{config_mode}'")
+            return config_mode, custom_proxy_override
+
+        logger.warning("V2EX: No proxy configured; direct access may fail")
+        return proxy_mode_override, custom_proxy_override
+
+    @staticmethod
+    def _v2ex_topic_page_url(url, page_number):
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        query["p"] = [str(page_number)]
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                urlencode(query, doseq=True),
+                parsed.fragment,
+            )
+        )
+
+    @staticmethod
+    def _v2ex_markdown_from_node(node):
+        if not node:
+            return ""
+        html = str(node)
+        markdown = markdownify.markdownify(html, heading_style="ATX")
+        markdown = re.sub(r"\n{3,}", "\n\n", markdown)
+        return markdown.strip()
+
+    @staticmethod
+    def _extract_v2ex_topic_page(html_content, page_url, include_replies=False):
+        soup = BeautifulSoup(html_content, "html.parser")
+        title_node = soup.select_one("#Main .box .header h1") or soup.find("h1")
+        title = re.sub(r"\s+", " ", title_node.get_text(" ", strip=True)).strip() if title_node else "V2EX Topic"
+
+        header = title_node.find_parent(class_="header") if title_node else soup.select_one("#Main .box .header")
+        author = None
+        published = None
+        node_name = None
+        if header:
+            small = header.find("small", class_="gray")
+            if small:
+                author_link = small.find("a", href=re.compile(r"^/member/"))
+                if author_link:
+                    author = author_link.get_text(" ", strip=True)
+                time_span = small.find("span", attrs={"title": True})
+                if time_span:
+                    published = time_span.get("title")
+            breadcrumbs = header.select(".flex-one-row a")
+            if breadcrumbs:
+                node_name = breadcrumbs[-1].get_text(" ", strip=True)
+
+        topic_content = soup.select_one("#Main .topic_content")
+        topic_markdown = Fetcher._v2ex_markdown_from_node(topic_content)
+        if not topic_markdown:
+            return None
+
+        lines = []
+        meta = []
+        if author:
+            meta.append(f"Author: {author}")
+        if node_name:
+            meta.append(f"Node: {node_name}")
+        if published:
+            meta.append(f"Published: {published}")
+        meta.append(f"Source: {page_url}")
+        lines.extend(meta)
+        lines.append("")
+        lines.append(topic_markdown)
+
+        replies = []
+        max_page = 1
+        for link in soup.find_all("a", href=True):
+            match = re.search(r"[?&]p=(\d+)", link.get("href") or "")
+            if match:
+                max_page = max(max_page, int(match.group(1)))
+
+        if include_replies:
+            for cell in soup.select('#Main .cell[id^="r_"]'):
+                reply_content = cell.select_one(".reply_content")
+                if not reply_content:
+                    continue
+                floor_node = cell.select_one(".no")
+                author_node = cell.select_one('a.dark[href^="/member/"]')
+                time_node = cell.select_one(".ago[title]")
+                floor = floor_node.get_text(" ", strip=True) if floor_node else "?"
+                reply_author = author_node.get_text(" ", strip=True) if author_node else "Unknown"
+                reply_time = time_node.get("title") if time_node else ""
+                reply_markdown = Fetcher._v2ex_markdown_from_node(reply_content)
+                if reply_markdown:
+                    replies.append(
+                        {
+                            "floor": floor,
+                            "author": reply_author,
+                            "time": reply_time,
+                            "markdown": reply_markdown,
+                        }
+                    )
+
+        return {
+            "title": title,
+            "markdown_lines": lines,
+            "replies": replies,
+            "max_page": max_page,
+        }
+
+    @staticmethod
+    def _fetch_v2ex_topic(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        fetch_thread=None,
+    ):
+        """Fetch V2EX topic pages as structured Markdown, with replies only when requested."""
+        try:
+            proxy_mode_override, custom_proxy_override = Fetcher._get_v2ex_proxy_overrides(
+                config, proxy_mode_override, custom_proxy_override
+            )
+            req_proxies, _ = Fetcher._get_proxies(
+                config, proxy_mode_override, custom_proxy_override
+            )
+            include_replies = fetch_thread is not None and fetch_thread is not False
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            }
+
+            response = _requests_get_interruptibly(
+                url, headers=headers, proxies=req_proxies, timeout=20
+            )
+            response.raise_for_status()
+            html_content = Fetcher._decode_response_text(response)
+            first_page = Fetcher._extract_v2ex_topic_page(
+                html_content, response.url or url, include_replies=include_replies
+            )
+            if not first_page:
+                return None
+
+            markdown_lines = first_page["markdown_lines"]
+            replies = list(first_page["replies"])
+            seen_reply_keys = {
+                (reply["floor"], reply["author"], reply["markdown"]) for reply in replies
+            }
+
+            if include_replies and first_page["max_page"] > 1:
+                for page_number in range(2, first_page["max_page"] + 1):
+                    page_url = Fetcher._v2ex_topic_page_url(response.url or url, page_number)
+                    try:
+                        page_response = _requests_get_interruptibly(
+                            page_url, headers=headers, proxies=req_proxies, timeout=20
+                        )
+                        page_response.raise_for_status()
+                        page_html = Fetcher._decode_response_text(page_response)
+                        page_data = Fetcher._extract_v2ex_topic_page(
+                            page_html, page_response.url or page_url, include_replies=True
+                        )
+                        if not page_data:
+                            continue
+                        for reply in page_data["replies"]:
+                            key = (reply["floor"], reply["author"], reply["markdown"])
+                            if key in seen_reply_keys:
+                                continue
+                            seen_reply_keys.add(key)
+                            replies.append(reply)
+                    except Exception as exc:
+                        logger.warning(f"V2EX: Failed to fetch replies page {page_number}: {exc}")
+
+            if include_replies and replies:
+                markdown_lines.extend(["", "## Replies", ""])
+                for reply in replies:
+                    heading = f"### #{reply['floor']} {reply['author']}"
+                    markdown_lines.append(heading)
+                    if reply["time"]:
+                        markdown_lines.append("")
+                        markdown_lines.append(reply["time"])
+                    markdown_lines.append("")
+                    markdown_lines.append(reply["markdown"])
+                    markdown_lines.append("")
+
+            markdown_text = "\n".join(markdown_lines).strip() + "\n"
+            return _build_direct_markdown_payload(
+                markdown_text=markdown_text,
+                title=first_page["title"],
+                source_url=response.url or url,
+                site_name="v2ex",
+            )
+        except Exception as e:
+            logger.warning(f"V2EX handler failed: {e}")
+            return None
+
 
 # =============================================================================
 # Special Site Handlers
@@ -5862,6 +6083,16 @@ SPECIAL_SITE_HANDLERS = {
         ],
         "handler": Fetcher._fetch_social_thread_page,
         "default_thread": True,
+    },
+    "v2ex": {
+        "patterns": [
+            r"^https?://(www\.)?v2ex\.com/t/\d+",
+        ],
+        "handler": Fetcher._fetch_v2ex_topic,
+        "force_proxy": True,
+        "default_no_translate": True,
+        "skip_title_translation": True,
+        "no_generic_fallback": True,
     },
 }
 
@@ -8098,6 +8329,9 @@ Special Sites:
   Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `backward`.
   Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
                         use `First sentence - Author on Site`.
+  V2EX:                Forces configured proxy by default, keeps the original
+                        language, and downloads only the main topic unless
+                        `-t/--thread` is used to include replies.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -8299,7 +8533,7 @@ Twitter/X Backend:
     )
     parser.add_argument("--help", action="help", help="Show this help message")
 
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_thread_argv(sys.argv[1:]))
     _raise_if_interrupted()
 
     # Enable verbose logging if requested

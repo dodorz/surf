@@ -13,6 +13,7 @@ Each site entry may define:
 - `patterns`: URL regex list
 - `handler`: handler function
 - `default_no_proxy`: default no-proxy policy (overridable by CLI)
+- `force_proxy`: default force-proxy policy (overridable by CLI)
 - `default_no_translate`: default raw-language policy (overridable by CLI)
 - `default_thread`: default thread mode (`backward`), overridable by `--thread` / `--no-thread`
 
@@ -29,7 +30,8 @@ Each site entry may define:
 7. Bluesky
 8. Weibo
 9. Threads
-10. NCPSSD
+10. V2EX
+11. NCPSSD
 
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 
@@ -55,6 +57,13 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 ### Social Thread Sites (Twitter/X, Bluesky, Weibo, Threads)
 - Default thread mode: `backward`.
 - Short-post title normalization: `First sentence - Author on Site`.
+
+### V2EX
+- Scope: `https://v2ex.com/t/<id>` and `https://www.v2ex.com/t/<id>` topic pages.
+- Forces configured proxy by default, preferring `[Network].custom_proxy` when present; explicit `-x/--proxy` or `-n` still wins.
+- Default: raw language, main topic only.
+- Use `-t` / `--thread` to include replies. Reply pages (`?p=...`) are fetched and deduplicated when pagination is present.
+- Uses a V2EX-specific DOM parser and direct Markdown payload so generic readability does not mistake replies for the main post.
 
 ### NCPSSD
 - Scope: `.../Literature/secure/articleinfo?params=...` pages.

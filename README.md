@@ -7,9 +7,9 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
+- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
-- **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`.
+- **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`; V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
 - **Filename Safety with Minimal Loss**: When titles are used as filenames, Surf preserves valid punctuation (including CJK punctuation) and only removes filesystem-illegal filename characters.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
@@ -41,7 +41,7 @@ surf "https://example.com" -r
 
 ### Special Site Policies
 
-Surf includes site-specific handlers for platforms such as Twitter/X, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, NCPSSD, GitHub, and Wikipedia.
+Surf includes site-specific handlers for platforms such as Twitter/X, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, V2EX, NCPSSD, GitHub, and Wikipedia.
 
 Detailed matching rules, handler behavior, default policy overrides, and maintenance notes are documented in:
 - `SPECIAL_SITES.md` (English)
@@ -81,12 +81,12 @@ The web form exposes the most commonly used Surf options directly, including:
 - proxy mode and custom proxy (`win/env/custom/no` on Windows, `env/custom/no` on non-Windows)
 - browser rendering
 - image OCR on/off, OCR engine, and OCR language
-- same-author thread expansion (`forward` / `backward` / `both` / off)
+- thread expansion (`forward` / `backward` / `both` / off; V2EX uses this as reply inclusion)
 - optional LLM provider override for translation
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
 
 Web proxy default selection is deterministic:
-- site default policy -> `config.ini` (`[Network].proxy_mode`) -> `env`
+- site default policy, including V2EX custom-proxy preference -> `config.ini` (`[Network].proxy_mode`) -> `env`
 
 For local access:
 
@@ -275,6 +275,13 @@ uv run surf.py "https://x.com/user/status/123" -t
 uv run surf.py "https://x.com/user/status/123" --thread forward
 uv run surf.py "https://x.com/user/status/123" --thread both
 uv run surf.py "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
+```
+
+For V2EX topics, Surf defaults to the main post only and uses the configured proxy automatically when available. Add `-t` or `--thread` to include replies:
+
+```bash
+uv run surf.py "https://v2ex.com/t/1208365" -r
+uv run surf.py "https://v2ex.com/t/1208365" -r -t
 ```
 
 ### Image OCR (--ocr-images / --no-ocr-images)

@@ -1020,6 +1020,10 @@ def resolve_web_proxy_mode_default(config, url=None):
         _, _, site_config = _get_handler_for_url(url)
         if site_config and site_config.get("default_no_proxy"):
             return "no"
+        if site_config and site_config.get("force_proxy"):
+            custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
+            if custom_proxy:
+                return "custom"
 
     ini_mode = normalize_web_proxy_mode(config.get("Network", "proxy_mode", fallback="env"))
     if ini_mode == "custom":
@@ -1207,6 +1211,10 @@ def process_url():
     config = get_config()
 
     try:
+        original_md = ""
+        original_title = "Untitled"
+        translated_title = None
+
         # Fetch content
         proxy_mode = normalize_web_proxy_mode(data.get("proxy", "env"))
         custom_proxy = (data.get("custom_proxy") or "").strip() or None
@@ -1225,7 +1233,6 @@ def process_url():
             md_content = ContentProcessor.to_markdown(cleaned_html)
             original_md = md_content
             original_title = title
-            translated_title = None
         else:
             if not url:
                 return jsonify({"success": False, "error": "A valid http/https URL is required"})
@@ -1285,6 +1292,9 @@ def process_url():
             )
             if social_title:
                 title = social_title
+
+            original_md = md_content
+            original_title = title
 
         # Handle language mode
         target_lang = config.get("Output", "target_language", fallback="zh-cn")
