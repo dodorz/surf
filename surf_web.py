@@ -155,8 +155,13 @@ HTML_TEMPLATE = """
         
         .options-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 18px 20px;
+            align-items: start;
+        }
+
+        .form-group.wide {
+            grid-column: 1 / -1;
         }
         
         .checkbox-group {
@@ -455,48 +460,8 @@ HTML_TEMPLATE = """
                     <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
                 </div>
                 
-                <div class="section-title">输出格式</div>
+                <div class="section-title">获取内容</div>
                 <div class="options-grid">
-                    <div class="form-group">
-                        <label>格式</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="format-md" name="format" value="md" checked>
-                                <label for="format-md">Markdown (.md)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-html" name="format" value="html">
-                                <label for="format-html">HTML (.html)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-pdf" name="format" value="pdf">
-                                <label for="format-pdf">PDF (.pdf)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-audio" name="format" value="audio">
-                                <label for="format-audio">Audio (.mp3)</label>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="form-group">
-                        <label>语言模式</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="lang-trans" name="lang" value="trans" checked>
-                                <label for="lang-trans">翻译为中文</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="lang-raw" name="lang" value="raw">
-                                <label for="lang-raw">保留原文</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="lang-both" name="lang" value="both">
-                                <label for="lang-both">双语对照</label>
-                            </div>
-                        </div>
-                    </div>
-                    
                     <div class="form-group">
                         <label>代理模式</label>
                         <div class="radio-group" id="proxyGroup">
@@ -527,11 +492,13 @@ HTML_TEMPLATE = """
                                value="{{ default_custom_proxy }}"
                                placeholder="http://127.0.0.1:7890">
                     </div>
-                </div>
-                
-                <div class="section-title">高级选项</div>
-                <div class="options-grid">
-                    <div class="form-group">
+
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="browser" name="browser">
+                        <label for="browser">使用浏览器渲染 (JavaScript)</label>
+                    </div>
+
+                    <div class="form-group wide">
                         <label>线程抓取</label>
                         <div class="radio-group">
                             <div class="radio-option">
@@ -556,6 +523,39 @@ HTML_TEMPLATE = """
                             </div>
                         </div>
                         <div class="field-hint">对应 CLI 的 `--thread/--no-thread`。仅支持的社交站点会生效。</div>
+                    </div>
+                </div>
+
+                <div class="section-title">内容处理</div>
+                <div class="options-grid">
+                    <div class="form-group">
+                        <label>语言模式</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="lang-trans" name="lang" value="trans" checked>
+                                <label for="lang-trans">翻译为中文</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="lang-raw" name="lang" value="raw">
+                                <label for="lang-raw">保留原文</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="lang-both" name="lang" value="both">
+                                <label for="lang-both">双语对照</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="llmProviderGroup">
+                        <label>LLM Provider</label>
+                        <div class="radio-group">
+                            {% for provider in llm_providers %}
+                            <div class="radio-option">
+                                <input type="radio" id="llm-{{ loop.index }}" name="llm" value="{{ provider }}" {% if provider == default_llm_provider %}checked{% endif %}>
+                                <label for="llm-{{ loop.index }}">{{ provider }}</label>
+                            </div>
+                            {% endfor %}
+                        </div>
                     </div>
 
                     <div class="form-group">
@@ -605,22 +605,30 @@ HTML_TEMPLATE = """
                             {% endfor %}
                         </div>
                     </div>
+                </div>
 
-                    <div class="form-group" id="llmProviderGroup">
-                        <label>LLM Provider</label>
+                <div class="section-title">输出设置</div>
+                <div class="options-grid">
+                    <div class="form-group wide">
+                        <label>格式</label>
                         <div class="radio-group">
-                            {% for provider in llm_providers %}
                             <div class="radio-option">
-                                <input type="radio" id="llm-{{ loop.index }}" name="llm" value="{{ provider }}" {% if provider == default_llm_provider %}checked{% endif %}>
-                                <label for="llm-{{ loop.index }}">{{ provider }}</label>
+                                <input type="radio" id="format-md" name="format" value="md" checked>
+                                <label for="format-md">Markdown (.md)</label>
                             </div>
-                            {% endfor %}
+                            <div class="radio-option">
+                                <input type="radio" id="format-html" name="format" value="html">
+                                <label for="format-html">HTML (.html)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-pdf" name="format" value="pdf">
+                                <label for="format-pdf">PDF (.pdf)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-audio" name="format" value="audio">
+                                <label for="format-audio">Audio (.mp3)</label>
+                            </div>
                         </div>
-                    </div>
-
-                    <div class="form-group checkbox-group">
-                        <input type="checkbox" id="browser" name="browser">
-                        <label for="browser">使用浏览器渲染 (JavaScript)</label>
                     </div>
                     
                     <div class="form-group checkbox-group" id="htmlInlineGroup" style="display: none;">
