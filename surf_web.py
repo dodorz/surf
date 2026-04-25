@@ -284,21 +284,10 @@ HTML_TEMPLATE = """
             flex-wrap: wrap;
         }
 
-        .save-toggle {
+        .play-btn {
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            padding: 8px 14px;
-            border: 2px solid #e1e5e9;
-            border-radius: 999px;
-            color: #333;
-            font-weight: 500;
-            background: #fff;
-        }
-
-        .save-toggle input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
+            justify-content: center;
         }
 
         .save-btn {
@@ -587,7 +576,7 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div class="form-group">
+                    <div class="form-group" id="ocrEngineGroup" {% if not default_ocr_enabled %}style="display: none;"{% endif %}>
                         <label>OCR 引擎</label>
                         <div class="radio-group">
                             <div class="radio-option">
@@ -617,7 +606,7 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div class="form-group">
+                    <div class="form-group" id="llmProviderGroup">
                         <label>LLM Provider</label>
                         <div class="radio-group">
                             {% for provider in llm_providers %}
@@ -647,7 +636,7 @@ HTML_TEMPLATE = """
                 
                 <div style="text-align: center; margin-top: 25px;">
                     <button type="submit" class="btn btn-primary" id="submitBtn">
-                        开始转换
+                        开始获取
                     </button>
                 </div>
             </form>
@@ -660,10 +649,6 @@ HTML_TEMPLATE = """
                     <div class="save-links" id="saveLinks">
                         <!-- Save buttons will be added here -->
                     </div>
-                    <label class="save-toggle" for="speak">
-                        <input type="checkbox" id="speak" name="speak">
-                        <span>播放语音 (TTS)</span>
-                    </label>
                 </div>
             </div>
             
@@ -692,8 +677,16 @@ HTML_TEMPLATE = """
     <script>
         let proxyModeTouched = false;
         let proxyModeProgrammaticUpdate = false;
+        let langModeTouched = false;
+        let langModeProgrammaticUpdate = false;
+        let currentSiteDefaults = {
+            site_name: null,
+            lang_mode: 'trans',
+            ocr_enabled: {{ 'true' if default_ocr_enabled else 'false' }},
+        };
+        let siteDefaultsRequestId = 0;
+        let siteDefaultsTimer = null;
         const urlInput = document.getElementById('url');
-        const speakCheckbox = document.getElementById('speak');
 
         function getCheckedRadioValue(name) {
             const checked = document.querySelector(`input[name="${name}"]:checked`);
@@ -753,6 +746,48 @@ HTML_TEMPLATE = """
         }
         refreshProxyDefault(true);
 
+        async function refreshSiteDefaults(force = false) {
+            const requestId = ++siteDefaultsRequestId;
+            try {
+                const url = (urlInput?.value || '').trim();
+                const query = url ? ('?url=' + encodeURIComponent(url)) : '';
+                const response = await fetch('/api/site-defaults' + query);
+                const result = await parseJsonResponse(response);
+                if (requestId !== siteDefaultsRequestId || !result.success) {
+                    return;
+                }
+
+                currentSiteDefaults = {
+                    site_name: result.site_name || null,
+                    lang_mode: result.lang_mode || 'trans',
+                    ocr_enabled: !!result.ocr_enabled,
+                };
+
+                if ((force || !langModeTouched) && currentSiteDefaults.lang_mode) {
+                    langModeProgrammaticUpdate = true;
+                    setCheckedRadioValue('lang', currentSiteDefaults.lang_mode);
+                    updateLanguageControls();
+                    langModeProgrammaticUpdate = false;
+                }
+                updateOcrControls();
+            } catch (error) {
+                langModeProgrammaticUpdate = false;
+            }
+        }
+
+        function scheduleSiteDefaultsRefresh() {
+            window.clearTimeout(siteDefaultsTimer);
+            siteDefaultsTimer = window.setTimeout(() => {
+                refreshSiteDefaults(false);
+                refreshProxyDefault(false);
+            }, 250);
+        }
+
+        if (urlInput) {
+            urlInput.addEventListener('input', scheduleSiteDefaultsRefresh);
+            urlInput.addEventListener('blur', () => refreshSiteDefaults(false));
+        }
+
         // Show/hide format-specific options
         function updateFormatSpecificOptions() {
             const format = getCheckedRadioValue('format');
@@ -778,8 +813,16 @@ HTML_TEMPLATE = """
         updateFormatSpecificOptions();
 
         function updateOcrControls() {
-            const disabled = getCheckedRadioValue('ocr_mode') === 'off';
+            const ocrMode = getCheckedRadioValue('ocr_mode');
+            const effectiveOcrEnabled = ocrMode === 'on' || (
+                ocrMode === 'default' && currentSiteDefaults.ocr_enabled
+            );
+            const disabled = !effectiveOcrEnabled;
             const useTesseract = getCheckedRadioValue('ocr_engine') === 'tesseract';
+            const ocrEngineGroup = document.getElementById('ocrEngineGroup');
+            if (ocrEngineGroup) {
+                ocrEngineGroup.style.display = disabled ? 'none' : 'block';
+            }
             document.querySelectorAll('input[name="ocr_engine"]').forEach((input) => {
                 input.disabled = disabled;
             });
@@ -797,7 +840,27 @@ HTML_TEMPLATE = """
             input.addEventListener('change', updateOcrControls);
         });
 
-        updateOcrControls();
+        function updateLanguageControls() {
+            const keepOriginal = getCheckedRadioValue('lang') === 'raw';
+            const llmProviderGroup = document.getElementById('llmProviderGroup');
+            if (llmProviderGroup) {
+                llmProviderGroup.style.display = keepOriginal ? 'none' : 'block';
+            }
+            document.querySelectorAll('input[name="llm"]').forEach((input) => {
+                input.disabled = keepOriginal;
+            });
+        }
+
+        document.querySelectorAll('input[name="lang"]').forEach((input) => {
+            input.addEventListener('change', function() {
+                updateLanguageControls();
+                if (!langModeProgrammaticUpdate) {
+                    langModeTouched = true;
+                }
+            });
+        });
+
+        refreshSiteDefaults(true);
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -835,9 +898,14 @@ HTML_TEMPLATE = """
             
             const submitBtn = document.getElementById('submitBtn');
             const statusDiv = document.getElementById('status') || createStatusDiv();
+            const resultCard = document.getElementById('resultCard');
             
             submitBtn.disabled = true;
             submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
+            currentResult = null;
+            if (resultCard) {
+                resultCard.classList.remove('show');
+            }
             
             showStatus('processing', '正在获取网页内容...');
             
@@ -849,7 +917,7 @@ HTML_TEMPLATE = """
              
             // Convert checkboxes to booleans
             data.browser = data.browser === 'on';
-            data.speak = !!speakCheckbox?.checked;
+            data.lang_touched = langModeTouched;
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             
@@ -865,7 +933,7 @@ HTML_TEMPLATE = """
                 const result = await parseJsonResponse(response);
                 
                 if (result.success) {
-                    showStatus('success', '转换完成！');
+                    showStatus('success', '获取完成！');
 
                     // Update result card
                     document.getElementById('resultTitle').textContent = result.title;
@@ -908,6 +976,13 @@ HTML_TEMPLATE = """
                     audioBtn.innerHTML = '🔊 保存 Audio';
                     audioBtn.onclick = () => saveFile('audio');
                     saveLinks.appendChild(audioBtn);
+
+                    // Speak button
+                    const playBtn = document.createElement('button');
+                    playBtn.className = 'save-btn save-audio play-btn';
+                    playBtn.innerHTML = '▶ 播放语音';
+                    playBtn.onclick = () => saveFile('audio', { speak: true, promptForDir: false });
+                    saveLinks.appendChild(playBtn);
                     
                     document.getElementById('resultCard').classList.add('show');
                 } else {
@@ -917,7 +992,7 @@ HTML_TEMPLATE = """
                 showStatus('error', '请求失败: ' + error.message);
             } finally {
                 submitBtn.disabled = false;
-                submitBtn.textContent = '开始转换';
+                submitBtn.textContent = '开始获取';
             }
         });
         
@@ -944,7 +1019,7 @@ HTML_TEMPLATE = """
         // Store result data for saving
         let currentResult = null;
 
-        async function saveFile(fileType) {
+        async function saveFile(fileType, options = {}) {
             if (!currentResult) {
                 showStatus('error', '没有可保存的内容');
                 return;
@@ -952,15 +1027,20 @@ HTML_TEMPLATE = """
 
             // Get default directory from config
             const defaultDir = window.defaultDirs[fileType] || '';
+            const promptForDir = options.promptForDir !== false;
+            const speak = !!options.speak;
 
-            const saveDir = prompt(
-                `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
-                ''
-            );
+            let saveDir = '';
+            if (promptForDir) {
+                saveDir = prompt(
+                    `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
+                    ''
+                );
 
-            // If user cancelled
-            if (saveDir === null) {
-                return;
+                // If user cancelled
+                if (saveDir === null) {
+                    return;
+                }
             }
 
             try {
@@ -973,14 +1053,18 @@ HTML_TEMPLATE = """
                         fileType,
                         saveDir: saveDir.trim(),
                         data: currentResult,
-                        speak: !!speakCheckbox?.checked
+                        speak
                     })
                 });
 
                 const result = await parseJsonResponse(response);
 
                 if (result.success) {
-                    showStatus('success', `${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
+                    if (speak) {
+                        showStatus('success', `语音已播放，音频文件已保存到: ${result.savePath}`);
+                    } else {
+                        showStatus('success', `${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
+                    }
                 } else {
                     showStatus('error', '保存失败: ' + result.error);
                 }
@@ -1013,25 +1097,13 @@ def normalize_web_proxy_mode(mode):
 
 def resolve_web_proxy_mode_default(config, url=None):
     """
-    Resolve Web UI default proxy mode with precedence:
-    special-site policy -> INI -> env.
-    """
-    if url:
-        _, _, site_config = _get_handler_for_url(url)
-        if site_config and site_config.get("default_no_proxy"):
-            return "no"
-        if site_config and site_config.get("force_proxy"):
-            custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
-            if custom_proxy:
-                return "custom"
+    Resolve Web UI default proxy mode.
 
-    ini_mode = normalize_web_proxy_mode(config.get("Network", "proxy_mode", fallback="env"))
-    if ini_mode == "custom":
-        custom_proxy = (config.get("Network", "custom_proxy", fallback="") or "").strip()
-        if custom_proxy:
-            return "custom"
-        return "env"
-    return ini_mode if ini_mode else "env"
+    Surf Web is commonly deployed on a server where direct outbound access is
+    expected. Keep proxy usage opt-in from the Web UI instead of inheriting CLI
+    or special-site proxy defaults such as V2EX's local-machine preference.
+    """
+    return "no"
 
 
 def get_runtime_version():
@@ -1175,6 +1247,24 @@ def resolve_web_thread_mode(data, site_name, site_config):
     return None
 
 
+def resolve_web_site_defaults(config, url=None):
+    """Resolve URL-sensitive Web UI defaults without fetching page content."""
+    site_name = None
+    site_config = None
+    if url:
+        _, site_name, site_config = _get_handler_for_url(url)
+
+    args = SimpleNamespace(ocr_images=False, no_ocr_images=False)
+    ocr_enabled = OcrHandler._is_enabled_for_site(site_name, site_config, args, config)
+    lang_mode = "raw" if site_config and site_config.get("default_no_translate") else "trans"
+
+    return {
+        "site_name": site_name,
+        "lang_mode": lang_mode,
+        "ocr_enabled": bool(ocr_enabled),
+    }
+
+
 @app.route("/")
 def index():
     """Serve the main page."""
@@ -1185,6 +1275,7 @@ def index():
         version=get_runtime_version(),
         is_windows=Fetcher._is_windows(),
         default_proxy_mode=resolve_web_proxy_mode_default(config),
+        default_ocr_enabled=resolve_web_site_defaults(config)["ocr_enabled"],
         **ui_context,
     )
 
@@ -1196,6 +1287,15 @@ def proxy_default():
     url = extract_url_from_text(request.args.get("url"))
     mode = resolve_web_proxy_mode_default(config, url=url)
     return jsonify({"success": True, "proxy_mode": mode})
+
+
+@app.route("/api/site-defaults", methods=["GET"])
+def site_defaults():
+    """Resolve URL-sensitive defaults for Web UI option visibility."""
+    config = get_config()
+    url = extract_url_from_text(request.args.get("url"))
+    defaults = resolve_web_site_defaults(config, url=url)
+    return jsonify({"success": True, **defaults})
 
 
 @app.route("/api/process", methods=["POST"])
@@ -1240,7 +1340,11 @@ def process_url():
             _, site_name, site_config = _get_handler_for_url(url)
             fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
             if site_config:
-                if site_config.get("default_no_translate") and lang_mode == "trans":
+                if (
+                    site_config.get("default_no_translate")
+                    and lang_mode == "trans"
+                    and not data.get("lang_touched", False)
+                ):
                     logger.info(f"Web: {site_name} using default 'no translate'")
                     lang_mode = "raw"
 

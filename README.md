@@ -80,13 +80,15 @@ The web form exposes the most commonly used Surf options directly, including:
 - language mode (`trans` / `raw` / `both`)
 - proxy mode and custom proxy (`win/env/custom/no` on Windows, `env/custom/no` on non-Windows)
 - browser rendering
-- image OCR on/off, OCR engine, and OCR language
+- image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`forward` / `backward` / `both` / off; V2EX uses this as reply inclusion)
-- optional LLM provider override for translation
+- optional LLM provider override for translation, shown only when language mode is not `raw`
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
 
+As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.
+
 Web proxy default selection is deterministic:
-- site default policy, including V2EX custom-proxy preference -> `config.ini` (`[Network].proxy_mode`) -> `env`
+- Surf Web defaults to no proxy because it is usually deployed on a server with direct outbound access. Choose `env`, `custom`, or another proxy mode manually in the Web UI for the few sites or deployments that need it.
 
 For local access:
 

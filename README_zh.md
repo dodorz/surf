@@ -57,13 +57,15 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 语言模式（`trans` / `raw` / `both`）
 - 代理模式和自定义代理（Windows: `win/env/custom/no`；非 Windows: `env/custom/no`）
 - 浏览器渲染
-- 图片 OCR 开关、OCR 引擎、OCR 语言
+- 图片 OCR 开关；OCR 引擎和 OCR 语言只在未关闭 OCR 时显示
 - Thread 抓取模式（`forward` / `backward` / `both` / 关闭；V2EX 将该选项用作是否包含回帖）
-- 翻译时可选的 LLM Provider 覆盖
+- 翻译时可选的 LLM Provider 覆盖；语言模式不是 `raw` / 保留原文时才显示
 - 宽松 URL / 文本输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接；如果没有 URL，则会把这段文字直接当作帖子保存，并以第一句作为标题
 
+输入 URL 时，Web UI 会动态应用匹配到的特殊站点默认值。例如默认保留原文的站点会隐藏 LLM Provider，除非手动选择翻译或双语；当前有效 OCR 默认为关闭时会隐藏 OCR 引擎，除非手动选择启用 OCR。
+
 Web 界面的代理默认值规则：
-- 站点策略（含 V2EX 优先使用自定义代理）-> `config.ini`（`[Network].proxy_mode`）-> `env`
+- Surf Web 默认不使用代理，因为它通常部署在可直连外网的服务器上。少量需要代理的站点或部署环境，可在 Web UI 中手动选择 `env`、`custom` 等代理模式。
 
 本机访问时可以直接启动：
 
