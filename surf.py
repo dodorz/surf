@@ -371,6 +371,30 @@ class Config:
 
 
 class Fetcher:
+    _COMMON_SHORT_URL_HOSTS = {
+        "t.co",
+        "bit.ly",
+        "bitly.com",
+        "tinyurl.com",
+        "goo.gl",
+        "ow.ly",
+        "buff.ly",
+        "is.gd",
+        "soo.gd",
+        "s.id",
+        "lnkd.in",
+        "fb.me",
+        "ift.tt",
+        "shorturl.at",
+        "rebrand.ly",
+        "cutt.ly",
+        "trib.al",
+        "amzn.to",
+        "youtu.be",
+        "b23.tv",
+        "xhslink.com",
+    }
+
     _HTML_META_CHARSET_RE = re.compile(
         rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE
     )
@@ -808,6 +832,13 @@ class Fetcher:
             proxy_mode_override: Override proxy_mode from command line
             custom_proxy_override: Override custom_proxy from command line
         """
+        url = Fetcher._resolve_common_short_url(
+            url,
+            config,
+            proxy_mode_override=proxy_mode_override,
+            custom_proxy_override=custom_proxy_override,
+        )
+
         logger.info(f"Fetching {url}...")
 
         handler, site_name, site_config = _get_handler_for_url(url)
@@ -2289,6 +2320,43 @@ class Fetcher:
         except Exception as e:
             logger.debug(f"Failed to resolve redirect URL {url}: {e}")
             return None
+
+    @staticmethod
+    def _is_common_short_url(url):
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host in Fetcher._COMMON_SHORT_URL_HOSTS
+
+    @staticmethod
+    def _resolve_common_short_url(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        timeout=20,
+    ):
+        if not Fetcher._is_common_short_url(url):
+            return url
+
+        req_proxies, _ = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        resolved = Fetcher._resolve_url_with_redirects(
+            url, proxies=req_proxies, timeout=timeout
+        )
+        if resolved and resolved != url:
+            logger.info(f"Resolved short URL for processing: {url} -> {resolved}")
+            return resolved
+        return url
 
     @staticmethod
     def _extract_twitter_article_target(url, oembed_html, proxies=None):
@@ -8673,6 +8741,13 @@ Twitter/X Backend:
     # Check if url is required but not provided
     if not args.url:
         parser.error("URL is required (unless using --login or --clear-auth)")
+
+    args.url = Fetcher._resolve_common_short_url(
+        args.url,
+        config,
+        proxy_mode_override=proxy_mode,
+        custom_proxy_override=custom_proxy,
+    )
 
     # Determine final format
     output_format = "md"  # default

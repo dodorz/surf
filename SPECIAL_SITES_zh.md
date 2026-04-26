@@ -454,11 +454,12 @@ surf "https://v2ex.com/t/1208365" -r -t
 
 当用户输入 URL 时，系统执行以下步骤：
 
-1. **URL 分发**: 调用 `Fetcher.fetch()` 方法
-2. **特殊处理检查**: 调用 `_get_handler_for_url(url)` 遍历 `SPECIAL_SITE_HANDLERS`
-3. **模式匹配**: 使用编译后的正则表达式匹配 URL
-4. **调用处理器**: 如果匹配成功，调用对应的 `handler` 函数
-5. **回退机制**: 如果处理器返回 `None`，回退到常规抓取（requests 或 Playwright）
+1. **短网址解析**: 对 `t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com` 等常见短网址先解析为最终长网址
+2. **URL 分发**: 调用 `Fetcher.fetch()` 方法
+3. **特殊处理检查**: 调用 `_get_handler_for_url(url)` 遍历 `SPECIAL_SITE_HANDLERS`
+4. **模式匹配**: 使用编译后的正则表达式匹配解析后的 URL
+5. **调用处理器**: 如果匹配成功，调用对应的 `handler` 函数
+6. **回退机制**: 如果处理器返回 `None`，回退到常规抓取（requests 或 Playwright）
 
 ### 回退处理
 

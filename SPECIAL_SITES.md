@@ -9,6 +9,7 @@ Chinese version: `SPECIAL_SITES_zh.md`
 ## Overview
 
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
+Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, and `xhslink.com` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target.
 Each site entry may define:
 - `patterns`: URL regex list
 - `handler`: handler function

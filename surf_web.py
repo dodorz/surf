@@ -1345,6 +1345,12 @@ def process_url():
             if not url:
                 return jsonify({"success": False, "error": "A valid http/https URL is required"})
 
+            url = Fetcher._resolve_common_short_url(
+                url,
+                config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
             _, site_name, site_config = _get_handler_for_url(url)
             fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
             if site_config:
