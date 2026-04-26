@@ -2306,20 +2306,28 @@ class Fetcher:
         """Resolve short links (for example t.co) to their final destination URL."""
         if not url:
             return None
-        try:
-            headers = {
+        header_variants = [
+            {"User-Agent": "Mozilla/5.0"},
+            {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
-            }
-            response = _requests_get_interruptibly(
-                url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
-            )
-            return response.url or url
-        except Exception as e:
-            logger.debug(f"Failed to resolve redirect URL {url}: {e}")
-            return None
+            },
+        ]
+        last_resolved = None
+        for headers in header_variants:
+            try:
+                response = _requests_get_interruptibly(
+                    url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
+                )
+                resolved = response.url or url
+                last_resolved = resolved
+                if resolved and resolved != url:
+                    return resolved
+            except Exception as e:
+                logger.debug(f"Failed to resolve redirect URL {url}: {e}")
+        return last_resolved
 
     @staticmethod
     def _is_common_short_url(url):

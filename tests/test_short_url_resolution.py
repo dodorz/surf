@@ -31,6 +31,27 @@ def test_common_short_url_resolves_before_special_site_matching(monkeypatch):
     assert site_name == "twitter"
 
 
+def test_redirect_resolution_retries_when_first_user_agent_is_not_redirected(monkeypatch):
+    class _FakeResponse:
+        def __init__(self, url):
+            self.url = url
+
+    seen_user_agents = []
+
+    def _fake_get(url, headers=None, **kwargs):
+        seen_user_agents.append((headers or {}).get("User-Agent"))
+        if len(seen_user_agents) == 1:
+            return _FakeResponse(url)
+        return _FakeResponse("https://example.com/final")
+
+    monkeypatch.setattr(surf, "_requests_get_interruptibly", _fake_get)
+
+    resolved = Fetcher._resolve_url_with_redirects("https://t.co/abc123")
+
+    assert resolved == "https://example.com/final"
+    assert len(seen_user_agents) == 2
+
+
 def test_non_short_url_is_not_resolved(monkeypatch):
     def _should_not_resolve(*args, **kwargs):
         raise AssertionError("regular URLs should not be resolved up front")
