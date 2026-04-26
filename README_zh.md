@@ -11,6 +11,7 @@
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
 - **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。
+- **GitHub Markdown 来源保留**：GitHub 仓库页和不带分支的 Markdown 文件 URL 可以从实际 README/blob 文件抓取内容，但 front matter 的 `source` 会保留用户输入的页面 URL。
 - **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”；长文（例如 X 的 `/article/...`）会保留文章自身标题。
 - **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。
 - **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。

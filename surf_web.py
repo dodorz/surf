@@ -1322,6 +1322,7 @@ def process_url():
         original_md = ""
         original_title = "Untitled"
         translated_title = None
+        content_base_url = None
 
         # Fetch content
         proxy_mode = normalize_web_proxy_mode(data.get("proxy", "env"))
@@ -1374,11 +1375,13 @@ def process_url():
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
 
             source_url = extract_source_url_from_html(html_content, url)
+            content_base_url = source_url
             direct_markdown_payload = _extract_direct_markdown_payload(html_content)
 
             if direct_markdown_payload:
                 title = direct_markdown_payload.get("title") or "Untitled"
                 md_content = direct_markdown_payload.get("markdown") or ""
+                content_base_url = direct_markdown_payload.get("base_url") or source_url
                 cleaned_html = _render_markdown_to_html(md_content)
             else:
                 # Extract content
@@ -1438,7 +1441,7 @@ def process_url():
                 title = translated_title
 
         # Convert relative URLs to absolute
-        base_url_for_links = source_url or url
+        base_url_for_links = content_base_url or source_url or url
         if base_url_for_links:
             md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, base_url_for_links)
             cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)

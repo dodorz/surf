@@ -66,6 +66,11 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Use `-t` / `--thread` to include replies. Reply pages (`?p=...`) are fetched and deduplicated when pagination is present.
 - Uses a V2EX-specific DOM parser and direct Markdown payload so generic readability does not mistake replies for the main post.
 
+### GitHub
+- Repo URLs such as `https://github.com/USER/REPO` fetch the best matching README Markdown file directly, while front matter `source` remains the repo URL.
+- Branchless Markdown URLs such as `https://github.com/USER/REPO/PATH/TO/FILE.md` fetch from `main`/`master` candidates, while front matter `source` remains the branchless URL.
+- Relative links inside fetched Markdown are resolved against the actual blob URL used for content, not the preserved source URL.
+
 ### NCPSSD
 - Scope: `.../Literature/secure/articleinfo?params=...` pages.
 - Default output format for this scope: PDF (implicit `-p`) unless user explicitly chooses another format.

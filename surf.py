@@ -31,11 +31,18 @@ import signal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
-def _build_direct_markdown_payload(markdown_text, title, source_url, site_name="markdown"):
+def _build_direct_markdown_payload(
+    markdown_text,
+    title,
+    source_url,
+    site_name="markdown",
+    base_url=None,
+):
     """Wrap raw markdown so downstream code can detect and bypass HTML extraction."""
     safe_title = escape(title or "Untitled")
     safe_source_url = escape(source_url or "")
     safe_site_name = escape(site_name or "markdown")
+    safe_base_url = escape(base_url or source_url or "")
     safe_markdown = escape(markdown_text or "")
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -43,6 +50,7 @@ def _build_direct_markdown_payload(markdown_text, title, source_url, site_name="
 <meta charset="utf-8">
 <title>{safe_title}</title>
 <meta name="source-url" content="{safe_source_url}">
+<meta name="content-base-url" content="{safe_base_url}">
 <meta name="surf-source-site" content="{safe_site_name}">
 <meta name="surf-direct-markdown" content="true">
 </head>
@@ -66,12 +74,14 @@ def _extract_direct_markdown_payload(html_content):
             return None
         title_tag = soup.find("title")
         source_meta = soup.find("meta", attrs={"name": "source-url"})
+        base_meta = soup.find("meta", attrs={"name": "content-base-url"})
         site_meta = soup.find("meta", attrs={"name": "surf-source-site"})
         markdown_text = payload_node.get_text()
         return {
             "markdown": markdown_text or "",
             "title": title_tag.get_text(strip=True) if title_tag else "Untitled",
             "source_url": source_meta.get("content") if source_meta else None,
+            "base_url": base_meta.get("content") if base_meta else None,
             "site_name": site_meta.get("content") if site_meta else None,
         }
     except Exception:
@@ -503,6 +513,7 @@ class Fetcher:
         target_lang = (config.get("Output", "target_language", fallback="zh-cn") or "zh-cn").lower()
         lang_code = target_lang.split("-")[0]
         repo_title = f"{owner}/{repo}"
+        repo_source_url = f"https://github.com/{owner}/{repo}"
 
         if not rest:
             readme_names = [f"README_{lang_code}.md", "README.md"]
@@ -510,10 +521,12 @@ class Fetcher:
             candidates = []
             for name in readme_names:
                 for branch in branch_candidates:
+                    blob_url = f"https://github.com/{owner}/{repo}/blob/{branch}/{name}"
                     candidates.append(
                         {
                             "raw_url": f"https://github.com/{owner}/{repo}/raw/refs/heads/{branch}/{name}",
-                            "source_url": f"https://github.com/{owner}/{repo}/blob/{branch}/{name}",
+                            "source_url": repo_source_url,
+                            "base_url": blob_url,
                             "title": repo_title,
                         }
                     )
@@ -540,14 +553,19 @@ class Fetcher:
         normalized_path = "/".join(file_parts)
         branch_candidates = [branch] if branch else ["main", "master"]
         title = file_parts[-1]
-        return [
-            {
-                "raw_url": f"https://github.com/{owner}/{repo}/raw/refs/heads/{candidate_branch}/{normalized_path}",
-                "source_url": f"https://github.com/{owner}/{repo}/blob/{candidate_branch}/{normalized_path}",
-                "title": title,
-            }
-            for candidate_branch in branch_candidates
-        ]
+        source_path_url = f"{repo_source_url}/{normalized_path}"
+        targets = []
+        for candidate_branch in branch_candidates:
+            blob_url = f"https://github.com/{owner}/{repo}/blob/{candidate_branch}/{normalized_path}"
+            targets.append(
+                {
+                    "raw_url": f"https://github.com/{owner}/{repo}/raw/refs/heads/{candidate_branch}/{normalized_path}",
+                    "source_url": blob_url if branch else source_path_url,
+                    "base_url": blob_url,
+                    "title": title,
+                }
+            )
+        return targets
 
     @staticmethod
     def _fetch_github_markdown(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -576,6 +594,7 @@ class Fetcher:
                         title=target["title"],
                         source_url=target["source_url"],
                         site_name="github",
+                        base_url=target.get("base_url") or target["source_url"],
                     )
             except Exception as exc:
                 last_error = exc
@@ -8892,6 +8911,7 @@ Twitter/X Backend:
         return default_url
 
     source_url = _extract_source_url_from_html(html_content, args.url)
+    content_base_url = source_url
 
     direct_markdown_payload = _extract_direct_markdown_payload(html_content)
 
@@ -8900,6 +8920,7 @@ Twitter/X Backend:
     if direct_markdown_payload:
         title = direct_markdown_payload.get("title") or "Untitled"
         md_content = direct_markdown_payload.get("markdown") or ""
+        content_base_url = direct_markdown_payload.get("base_url") or source_url
         cleaned_html = _render_markdown_to_html(md_content)
         logger.info(f"Using direct markdown payload. Title: {title}")
     else:
@@ -8994,7 +9015,7 @@ Twitter/X Backend:
             title = translated_title
 
     # 4.5 Convert relative URLs to absolute (after translation, before output)
-    base_url_for_links = source_url or args.url
+    base_url_for_links = content_base_url or source_url or args.url
     if base_url_for_links:
         md_content = OutputHandler._convert_markdown_urls_to_absolute(
             md_content, base_url_for_links
