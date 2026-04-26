@@ -1355,6 +1355,50 @@ class Fetcher:
         return "".join(out), media_refs
 
     @staticmethod
+    def _render_fx_text_html(text, entities=None):
+        if not text:
+            return ""
+
+        if not entities:
+            return escape(text)
+
+        if isinstance(entities, dict):
+            style_ranges = entities.get("inlineStyleRanges") or entities.get("inline_style_ranges")
+            entity_ranges = entities.get("entityRanges") or entities.get("entity_ranges")
+            entity_map = entities.get("entityMap") or entities.get("entity_map")
+            if style_ranges or entity_ranges:
+                rendered, _ = Fetcher._apply_fx_ranges(
+                    text,
+                    style_ranges=style_ranges,
+                    entity_ranges=entity_ranges,
+                    entity_map=entity_map,
+                )
+                return rendered
+
+            normalized_entities = []
+            for key in (
+                "urls",
+                "url",
+                "hashtags",
+                "symbols",
+                "user_mentions",
+                "mentions",
+                "media",
+            ):
+                value = entities.get(key)
+                if isinstance(value, list):
+                    normalized_entities.extend(item for item in value if isinstance(item, dict))
+                elif isinstance(value, dict):
+                    normalized_entities.append(value)
+            if normalized_entities:
+                return Fetcher._render_twitter_entities_to_html(text, normalized_entities)
+
+        if isinstance(entities, list):
+            return Fetcher._render_twitter_entities_to_html(text, entities)
+
+        return escape(text)
+
+    @staticmethod
     def _extract_twitter_media_urls_from_entity(entity):
         if not isinstance(entity, dict):
             return []
@@ -7534,7 +7578,7 @@ class OutputHandler:
             # Handle special cases: "." or "./" (current directory)
             if filepath == "." or filepath == "./":
                 # Use current directory + default filename
-                safe_title = OutputHandler._safe_filename_title(filename_title)
+                safe_title = OutputHandler._safe_filename_title(filename_title, max_len=120)
                 filename = f"{safe_title}.md"
                 filepath = os.path.join(".", filename)
             # Ensure directory exists
@@ -7543,7 +7587,7 @@ class OutputHandler:
                 os.makedirs(filepath_dir)
         else:
             # Simple sanitization
-            safe_title = OutputHandler._safe_filename_title(filename_title)
+            safe_title = OutputHandler._safe_filename_title(filename_title, max_len=120)
             filename = f"{safe_title}.md"
             filepath = os.path.join(md_dir, filename)
 
