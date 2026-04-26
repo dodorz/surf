@@ -677,32 +677,7 @@ HTML_TEMPLATE = """
             </form>
         </div>
         
-        <div class="card result-card" id="resultCard">
-            <div class="result-header">
-                <h2 class="result-title" id="resultTitle">转换结果</h2>
-                <div class="save-actions">
-                    <div class="save-links" id="saveLinks">
-                        <!-- Save buttons will be added here -->
-                    </div>
-                </div>
-            </div>
-            
-            <div class="tabs">
-                <button class="tab active" data-tab="markdown">Markdown</button>
-                <button class="tab" data-tab="html">HTML</button>
-                <button class="tab" data-tab="raw">原始内容</button>
-            </div>
-            
-            <div class="tab-content active" id="tab-markdown">
-                <pre class="content-preview" id="markdownContent"></pre>
-            </div>
-            <div class="tab-content" id="tab-html">
-                <pre class="content-preview" id="htmlContent"></pre>
-            </div>
-            <div class="tab-content" id="tab-raw">
-                <pre class="content-preview" id="rawContent"></pre>
-            </div>
-        </div>
+        <div id="resultsContainer"></div>
         
         <div class="version-info">
             Surf v{{ version }} | 运行本地服务器
@@ -927,20 +902,130 @@ HTML_TEMPLATE = """
             return result;
         }
         
+        function extractUrlsFromInput(value) {
+            const matches = (value || '').match(/https?:\\/\\/[^\\s<>"']+/g) || [];
+            const seen = new Set();
+            const urls = [];
+            for (const match of matches) {
+                const cleaned = match.replace(/[),.;!?，。；！？、）】》]+$/g, '');
+                if (cleaned && !seen.has(cleaned)) {
+                    seen.add(cleaned);
+                    urls.push(cleaned);
+                }
+            }
+            return urls;
+        }
+
+        function addSaveButtons(container, result) {
+            const saveLinks = container.querySelector('.save-links');
+            saveLinks.innerHTML = '';
+
+            const buttons = [
+                ['md', 'save-md', '📄 保存 Markdown', {}],
+                ['html', 'save-html', '🌐 保存 HTML', {}],
+                ['pdf', 'save-pdf', '📕 保存 PDF', {}],
+                ['audio', 'save-audio', '🔊 保存 Audio', {}],
+                ['audio', 'save-audio play-btn', '▶ 播放语音', { speak: true, promptForDir: false }],
+            ];
+
+            for (const [fileType, className, label, options] of buttons) {
+                const btn = document.createElement('button');
+                btn.className = 'save-btn ' + className;
+                btn.innerHTML = label;
+                btn.onclick = () => saveFile(result, fileType, options);
+                saveLinks.appendChild(btn);
+            }
+        }
+
+        function wireResultTabs(card) {
+            card.querySelectorAll('.tab').forEach(tab => {
+                tab.addEventListener('click', function() {
+                    card.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    card.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                    this.classList.add('active');
+                    const target = card.querySelector(`[data-tab-content="${this.dataset.tab}"]`);
+                    if (target) {
+                        target.classList.add('active');
+                    }
+                });
+            });
+        }
+
+        function renderResultCard(result, index, total) {
+            const container = document.getElementById('resultsContainer');
+            const card = document.createElement('div');
+            card.className = 'card result-card show';
+            const label = total > 1 ? ` (${index + 1}/${total})` : '';
+            const source = result?.metadata?.source_url || result?.input_url || '';
+
+            card.innerHTML = `
+                <div class="result-header">
+                    <h2 class="result-title"></h2>
+                    <div class="save-actions">
+                        <div class="save-links"></div>
+                    </div>
+                </div>
+                ${source ? `<div class="field-hint"></div>` : ''}
+                <div class="tabs">
+                    <button class="tab active" data-tab="markdown">Markdown</button>
+                    <button class="tab" data-tab="html">HTML</button>
+                    <button class="tab" data-tab="raw">原始内容</button>
+                </div>
+                <div class="tab-content active" data-tab-content="markdown">
+                    <pre class="content-preview"></pre>
+                </div>
+                <div class="tab-content" data-tab-content="html">
+                    <pre class="content-preview"></pre>
+                </div>
+                <div class="tab-content" data-tab-content="raw">
+                    <pre class="content-preview"></pre>
+                </div>
+            `;
+
+            card.querySelector('.result-title').textContent = `${result.title || 'Untitled'}${label}`;
+            const hint = card.querySelector('.field-hint');
+            if (hint) {
+                hint.textContent = source;
+            }
+            card.querySelector('[data-tab-content="markdown"] pre').textContent = result.markdown || '';
+            card.querySelector('[data-tab-content="html"] pre').textContent = result.html || '';
+            card.querySelector('[data-tab-content="raw"] pre').textContent = result.raw || '';
+
+            addSaveButtons(card, result);
+            wireResultTabs(card);
+            container.appendChild(card);
+        }
+
+        function renderErrorCard(input, message, index, total) {
+            const container = document.getElementById('resultsContainer');
+            const card = document.createElement('div');
+            card.className = 'card result-card show status-error';
+            const label = total > 1 ? ` (${index + 1}/${total})` : '';
+            card.innerHTML = `
+                <div class="result-header">
+                    <h2 class="result-title"></h2>
+                </div>
+                <div class="field-hint"></div>
+                <pre class="content-preview"></pre>
+            `;
+            card.querySelector('.result-title').textContent = `获取失败${label}`;
+            card.querySelector('.field-hint').textContent = input;
+            card.querySelector('pre').textContent = message || 'Unknown error';
+            container.appendChild(card);
+        }
+
         // Form submission
         document.getElementById('surfForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const submitBtn = document.getElementById('submitBtn');
             const statusDiv = document.getElementById('status') || createStatusDiv();
-            const resultCard = document.getElementById('resultCard');
+            const resultsContainer = document.getElementById('resultsContainer');
             
             submitBtn.disabled = true;
             submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
-            currentResult = null;
-            if (resultCard) {
-                resultCard.classList.remove('show');
-            }
+            currentResults = [];
+            resultsContainer.innerHTML = '';
             
             showStatus('processing', '正在获取网页内容...');
             
@@ -956,74 +1041,43 @@ HTML_TEMPLATE = """
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
+            const rawInput = (data.url || '').trim();
+            const urls = extractUrlsFromInput(rawInput);
+            const inputs = urls.length ? urls : (rawInput ? [rawInput] : []);
+
+            if (!inputs.length) {
+                showStatus('error', '请输入 URL 或文本');
+                submitBtn.disabled = false;
+                submitBtn.textContent = '开始获取';
+                return;
+            }
             
             try {
-                const response = await fetch('/api/process', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(data)
-                });
-                
-                const result = await parseJsonResponse(response);
-                
-                if (result.success) {
-                    showStatus('success', '获取完成！');
+                let successCount = 0;
+                for (let i = 0; i < inputs.length; i += 1) {
+                    const input = inputs[i];
+                    showStatus('processing', `正在处理 ${i + 1}/${inputs.length}: ${input}`);
+                    const itemData = { ...data, url: input };
+                    const response = await fetch('/api/process', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(itemData)
+                    });
 
-                    // Update result card
-                    document.getElementById('resultTitle').textContent = result.title;
-                    document.getElementById('markdownContent').textContent = result.markdown;
-                    document.getElementById('htmlContent').textContent = result.html;
-                    document.getElementById('rawContent').textContent = result.raw;
-
-                    // Store result data for saving
-                    currentResult = result;
-                    window.defaultDirs = result.defaultDirs || {};
-                    
-                    // Update save buttons - always show all buttons
-                    const saveLinks = document.getElementById('saveLinks');
-                    saveLinks.innerHTML = '';
-
-                    // Markdown button
-                    const mdBtn = document.createElement('button');
-                    mdBtn.className = 'save-btn save-md';
-                    mdBtn.innerHTML = '📄 保存 Markdown';
-                    mdBtn.onclick = () => saveFile('md');
-                    saveLinks.appendChild(mdBtn);
-
-                    // HTML button
-                    const htmlBtn = document.createElement('button');
-                    htmlBtn.className = 'save-btn save-html';
-                    htmlBtn.innerHTML = '🌐 保存 HTML';
-                    htmlBtn.onclick = () => saveFile('html');
-                    saveLinks.appendChild(htmlBtn);
-
-                    // PDF button
-                    const pdfBtn = document.createElement('button');
-                    pdfBtn.className = 'save-btn save-pdf';
-                    pdfBtn.innerHTML = '📕 保存 PDF';
-                    pdfBtn.onclick = () => saveFile('pdf');
-                    saveLinks.appendChild(pdfBtn);
-
-                    // Audio button
-                    const audioBtn = document.createElement('button');
-                    audioBtn.className = 'save-btn save-audio';
-                    audioBtn.innerHTML = '🔊 保存 Audio';
-                    audioBtn.onclick = () => saveFile('audio');
-                    saveLinks.appendChild(audioBtn);
-
-                    // Speak button
-                    const playBtn = document.createElement('button');
-                    playBtn.className = 'save-btn save-audio play-btn';
-                    playBtn.innerHTML = '▶ 播放语音';
-                    playBtn.onclick = () => saveFile('audio', { speak: true, promptForDir: false });
-                    saveLinks.appendChild(playBtn);
-                    
-                    document.getElementById('resultCard').classList.add('show');
-                } else {
-                    showStatus('error', '错误: ' + result.error);
+                    const result = await parseJsonResponse(response);
+                    if (result.success) {
+                        result.input_url = input;
+                        currentResults.push(result);
+                        window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
+                        renderResultCard(result, i, inputs.length);
+                        successCount += 1;
+                    } else {
+                        renderErrorCard(input, result.error, i, inputs.length);
+                    }
                 }
+                showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
             } finally {
@@ -1053,16 +1107,16 @@ HTML_TEMPLATE = """
         }
 
         // Store result data for saving
-        let currentResult = null;
+        let currentResults = [];
 
-        async function saveFile(fileType, options = {}) {
-            if (!currentResult) {
+        async function saveFile(resultData, fileType, options = {}) {
+            if (!resultData) {
                 showStatus('error', '没有可保存的内容');
                 return;
             }
 
             // Get default directory from config
-            const defaultDir = window.defaultDirs[fileType] || '';
+            const defaultDir = (resultData.defaultDirs || window.defaultDirs || {})[fileType] || '';
             const promptForDir = options.promptForDir !== false;
             const speak = !!options.speak;
 
@@ -1088,7 +1142,7 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({
                         fileType,
                         saveDir: saveDir.trim(),
-                        data: currentResult,
+                        data: resultData,
                         speak
                     })
                 });
