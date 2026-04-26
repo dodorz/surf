@@ -28,7 +28,7 @@ import trafilatura
 import re
 import unicodedata
 import signal
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 
 
 def _build_direct_markdown_payload(
@@ -2398,6 +2398,64 @@ class Fetcher:
             logger.info(f"Resolved short URL for processing: {url} -> {resolved}")
             return resolved
         return url
+
+    @staticmethod
+    def save_wayback_snapshot(
+        url,
+        config=None,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        timeout=60,
+    ):
+        if not url:
+            return None
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return None
+
+        proxies = None
+        if config is not None:
+            proxies, _ = Fetcher._get_proxies(
+                config, proxy_mode_override, custom_proxy_override
+            )
+
+        save_url = f"https://web.archive.org/save/{quote(url, safe=':/')}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            logger.info(f"Saving URL to Wayback Machine: {url}")
+            response = _requests_get_interruptibly(
+                save_url,
+                headers=headers,
+                proxies=proxies,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+        except Exception as e:
+            logger.warning(f"Wayback snapshot request failed for {url}: {e}")
+            return None
+
+        if response.status_code >= 400:
+            logger.warning(
+                "Wayback snapshot request failed for %s: HTTP %s",
+                url,
+                response.status_code,
+            )
+            return None
+
+        archive_ref = (
+            response.headers.get("Content-Location")
+            or response.headers.get("content-location")
+            or response.headers.get("Location")
+            or response.headers.get("location")
+            or ""
+        ).strip()
+        if archive_ref:
+            archive_url = urljoin("https://web.archive.org/", archive_ref)
+            logger.info(f"Wayback snapshot URL: {archive_url}")
+            return archive_url
+
+        logger.info(f"Wayback snapshot submitted without archive location: {save_url}")
+        return save_url
 
     @staticmethod
     def _extract_twitter_article_target(url, oembed_html, proxies=None):
@@ -7519,7 +7577,7 @@ class OutputHandler:
         return md_content
 
     @staticmethod
-    def _extract_metadata(html_content, source_url=None, translator=None):
+    def _extract_metadata(html_content, source_url=None, translator=None, archive_url=None):
         """
         从HTML中提取元数据用于YAML front matter。
 
@@ -7539,6 +7597,7 @@ class OutputHandler:
             "tags": [],
             "source": source_url,
             "translator": translator,
+            "archive": archive_url,
         }
 
         source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
@@ -7637,6 +7696,9 @@ class OutputHandler:
         if metadata.get("source"):
             lines.append(f"source: {metadata['source']}")
 
+        if metadata.get("archive"):
+            lines.append(f"archive: {metadata['archive']}")
+
         if metadata.get("translator"):
             lines.append(f"translator: {metadata['translator']}")
 
@@ -7656,6 +7718,7 @@ class OutputHandler:
         translated_title=None,
         source_url=None,
         translator=None,
+        archive_url=None,
     ):
         """
         Save content as Markdown file.
@@ -7671,6 +7734,7 @@ class OutputHandler:
             translated_title: Translated title to use in YAML front matter (if translation was performed)
             source_url: Source URL to include in YAML front matter (default: None)
             translator: Translation model name to include in YAML front matter (default: None)
+            archive_url: Wayback Machine snapshot URL to include in YAML front matter (default: None)
         """
         md_dir = config.get_path("Output", "md_dir", fallback="./notes")
         if not os.path.exists(md_dir):
@@ -7710,7 +7774,10 @@ class OutputHandler:
         yaml_frontmatter = ""
         if html_content and add_front_matter:
             metadata = OutputHandler._extract_metadata(
-                html_content, source_url=source_url, translator=translator
+                html_content,
+                source_url=source_url,
+                translator=translator,
+                archive_url=archive_url,
             )
             # Use translated_title if provided (translation was performed)
             if translated_title:
@@ -8699,6 +8766,11 @@ Twitter/X Backend:
         help="Disable YAML front matter in markdown output",
     )
     parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter",
+    )
+    parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
     parser.add_argument("--help", action="help", help="Show this help message")
@@ -9111,6 +9183,15 @@ Twitter/X Backend:
             except Exception as e:
                 logger.warning(f"Could not get LLM config for translator: {e}")
 
+        archive_url = None
+        if args.archive and not args.no_front_matter and output_path != "-":
+            archive_url = Fetcher.save_wayback_snapshot(
+                source_url,
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+
         if output_path:
             if output_path == "-":
                 # Output to stdout
@@ -9129,6 +9210,7 @@ Twitter/X Backend:
                     else None,
                     source_url=source_url,
                     translator=translator,
+                    archive_url=archive_url,
                 )
         elif args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
@@ -9143,6 +9225,7 @@ Twitter/X Backend:
                 translated_title=translated_title if translation_performed else None,
                 source_url=source_url,
                 translator=translator,
+                archive_url=archive_url,
             )
 
 

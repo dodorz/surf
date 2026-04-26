@@ -10,8 +10,10 @@ Example:
 """
 
 import argparse
+import importlib.util
 import os
 import re
+import sys
 import threading
 import webbrowser
 from html import escape
@@ -38,6 +40,25 @@ except ImportError:
         send_file,
     )
     from werkzeug.exceptions import HTTPException
+
+def _ensure_local_surf_module():
+    """Make surf_web import the sibling surf.py even when an older surf is installed."""
+    local_surf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "surf.py"))
+    loaded = sys.modules.get("surf")
+    loaded_path = os.path.abspath(getattr(loaded, "__file__", "") or "") if loaded else ""
+    if loaded_path == local_surf_path:
+        return
+
+    spec = importlib.util.spec_from_file_location("surf", local_surf_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load local surf module from {local_surf_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["surf"] = module
+    spec.loader.exec_module(module)
+
+
+_ensure_local_surf_module()
+
 
 # Import surf modules
 from surf import (
@@ -641,6 +662,11 @@ HTML_TEMPLATE = """
                         <input type="checkbox" id="noFrontMatter" name="no_front_matter">
                         <label for="noFrontMatter">禁用 YAML Front Matter</label>
                     </div>
+
+                    <div class="form-group checkbox-group" id="archiveSourceGroup">
+                        <input type="checkbox" id="archiveSource" name="archive_source">
+                        <label for="archiveSource">保存 source 到 Internet Archive</label>
+                    </div>
                 </div>
                 
                 <div style="text-align: center; margin-top: 25px;">
@@ -929,6 +955,7 @@ HTML_TEMPLATE = """
             data.lang_touched = langModeTouched;
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
+            data.archive_source = data.archive_source === 'on';
             
             try {
                 const response = await fetch('/api/process', {
@@ -1464,6 +1491,15 @@ def process_url():
             except Exception:
                 pass
 
+        archive_url = None
+        if data.get("archive_source") and not data.get("no_front_matter", False):
+            archive_url = Fetcher.save_wayback_snapshot(
+                source_url,
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+
         # Get default directories for frontend
         defaultDirs = {
             "md": config.get_path("Output", "md_dir", fallback="notes"),
@@ -1489,6 +1525,7 @@ def process_url():
                     if translation_performed
                     else None,
                     "source_url": source_url,
+                    "archive_url": archive_url,
                     "translator": translator,
                     "html_inline": data.get("html_inline", False),
                 },
@@ -1566,6 +1603,7 @@ def save_file():
                 translated_title=metadata.get("translated_title"),
                 source_url=metadata.get("source_url"),
                 translator=metadata.get("translator"),
+                archive_url=metadata.get("archive_url"),
             )
             return jsonify({"success": True, "savePath": md_path})
 
