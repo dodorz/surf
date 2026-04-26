@@ -12,6 +12,7 @@
 - **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`; V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, and `xhslink.com` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL.
 - **GitHub Markdown Source Preservation**: GitHub repo and branchless Markdown URLs can be fetched from the resolved README/blob file while front matter `source` preserves the user-facing URL you entered.
+- **Accurate Translation Metadata**: Front matter includes `translator` only when content or title translation actually changed the output; language detection alone does not count.
 - **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
 - **Filename Safety with Minimal Loss**: When titles are used as filenames, Surf preserves valid punctuation (including CJK punctuation) and only removes filesystem-illegal filename characters.
 - **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.

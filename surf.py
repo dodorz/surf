@@ -99,6 +99,20 @@ def _render_markdown_to_html(markdown_text):
     return f"<article>{body}</article>"
 
 
+def _translation_was_performed(
+    original_text,
+    translated_text,
+    original_title=None,
+    translated_title=None,
+    title_was_translated=True,
+):
+    if (translated_text or "") != (original_text or ""):
+        return True
+    if title_was_translated and (translated_title or "") != (original_title or ""):
+        return True
+    return False
+
+
 def _get_version():
     """从 pyproject.toml [project] 小节读取版本号"""
     try:
@@ -8968,6 +8982,7 @@ Twitter/X Backend:
     # 4. Translate
     target_lang = config.get("Output", "target_language", fallback="zh-cn")
     translated_title = None  # Initialize for raw mode
+    translation_performed = False
 
     # Check if this is a site that should skip title translation
     _, site_name, site_config = _get_handler_for_url(args.url) if args.url else (None, None, None)
@@ -8992,6 +9007,13 @@ Twitter/X Backend:
             target_lang=target_lang,
             config=config,
             llm_provider=llm_provider,
+        )
+        translation_performed = _translation_was_performed(
+            original_md,
+            translated_md,
+            original_title,
+            translated_title,
+            title_was_translated=not skip_title_translation,
         )
 
         # Use original title if title translation was skipped
@@ -9078,9 +9100,6 @@ Twitter/X Backend:
         md_content = OutputHandler.normalize_markdown_encoding(md_content)
         if translated_title:
             translated_title = OutputHandler.normalize_markdown_encoding(translated_title)
-
-        # Determine if translation was performed
-        translation_performed = lang_mode != "raw"
 
         # Get translator model name if translation was performed
         translator = None

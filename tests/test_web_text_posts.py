@@ -1,5 +1,5 @@
 import surf_web
-from surf import Fetcher, _build_direct_markdown_payload
+from surf import Fetcher, _build_direct_markdown_payload, _translation_was_performed
 
 
 class _FakeConfig:
@@ -54,6 +54,33 @@ def test_process_url_treats_plain_text_as_post(monkeypatch):
     assert payload["title"] == "第一句就是标题。"
     assert "后面还有内容。" in payload["markdown"]
     assert payload["metadata"]["source_url"] is None
+
+
+def test_translation_metadata_requires_actual_translation(monkeypatch):
+    assert not _translation_was_performed("中文正文", "中文正文", "中文标题", "中文标题")
+    assert _translation_was_performed("English", "中文", "Title", "标题")
+
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+    monkeypatch.setattr(
+        surf_web.ContentProcessor,
+        "translate_if_needed",
+        lambda text, title=None, **kwargs: (text, title),
+    )
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "这是中文标题。这里是中文正文。",
+            "lang": "trans",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["metadata"]["translator"] is None
+    assert payload["metadata"]["translated_title"] is None
 
 
 def test_github_markdown_target_resolution_repo_root():

@@ -52,6 +52,7 @@ from surf import (
     _get_version,
     logger,
     _render_markdown_to_html,
+    _translation_was_performed,
     resolve_user_path,
 )
 
@@ -1323,6 +1324,7 @@ def process_url():
         original_title = "Untitled"
         translated_title = None
         content_base_url = None
+        translation_performed = False
 
         # Fetch content
         proxy_mode = normalize_web_proxy_mode(data.get("proxy", "env"))
@@ -1431,6 +1433,13 @@ def process_url():
                 config=config,
                 llm_provider=llm_provider,
             )
+            translation_performed = _translation_was_performed(
+                original_md,
+                md_content,
+                original_title,
+                translated_title,
+                title_was_translated=not skip_title_translation,
+            )
             if skip_title_translation:
                 translated_title = original_title
 
@@ -1446,8 +1455,6 @@ def process_url():
             md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, base_url_for_links)
             cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)
 
-        # Determine if translation was performed for YAML front matter
-        translation_performed = lang_mode != "raw"
         translator = None
         if translation_performed:
             try:
