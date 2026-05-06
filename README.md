@@ -39,7 +39,7 @@ surf "https://example.com" -r
 - **PDF Generation**: Generate PDF files using Playwright.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
-- **Flexible Proxy**: Unified proxy modes: `env` (environment variables), `win` (Windows Internet Settings), `custom`, and `no`.
+- **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
@@ -83,7 +83,7 @@ We recommend using `uv` for a clean environment.
 
 The web form exposes the most commonly used Surf options directly, including:
 - language mode (`trans` / `raw` / `both`)
-- proxy mode and custom proxy (`win/env/custom/no` on Windows, `env/custom/no` on non-Windows)
+- proxy mode and custom proxy (`auto/win/env/custom/no` on Windows, `auto/env/custom/no` on non-Windows)
 - browser rendering
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`forward` / `backward` / `both` / off; V2EX uses this as reply inclusion)
@@ -92,8 +92,11 @@ The web form exposes the most commonly used Surf options directly, including:
 
 As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.
 
-Web proxy default selection is deterministic:
-- Surf Web defaults to no proxy because it is usually deployed on a server with direct outbound access. Choose `env`, `custom`, or another proxy mode manually in the Web UI for the few sites or deployments that need it.
+GitHub repo and Markdown URLs default to raw language in Surf Web to avoid long README translations blocking the synchronous Web request. You can still manually select translation or bilingual mode when needed.
+
+Web proxy default selection is intentionally different from the CLI:
+- CLI defaults to implicit auto proxy resolution because it often runs on Windows client machines where many sites need a local proxy.
+- Surf Web defaults to `no` proxy because it usually runs on a server where public sites are directly reachable, and Linux servers do not have Windows registry proxy settings. Choose `auto`, `env`, `custom`, or another proxy mode manually in the Web UI only when that deployment needs it.
 
 For local access:
 

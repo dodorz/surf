@@ -146,3 +146,124 @@ def test_process_url_preserves_direct_markdown_payload(monkeypatch):
     assert payload["title"] == "guide.md"
     assert payload["markdown"] == "[Next](https://github.com/USER/PROJECT/blob/main/docs/other.md)"
     assert payload["metadata"]["source_url"] == "https://github.com/USER/PROJECT/docs/guide.md"
+
+
+def test_web_auto_proxy_uses_cli_implicit_proxy_resolution(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    seen = {}
+
+    def fake_fetch(*args, **kwargs):
+        seen["proxy_mode_override"] = kwargs.get("proxy_mode_override")
+        return _build_direct_markdown_payload(
+            markdown_text="content",
+            title="PROJECT",
+            source_url="https://github.com/USER/PROJECT",
+            site_name="github",
+            base_url="https://github.com/USER/PROJECT/blob/main/README.md",
+        )
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", fake_fetch)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT",
+            "lang": "raw",
+            "proxy": "auto",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert seen["proxy_mode_override"] is None
+
+
+def test_web_proxy_default_is_no():
+    client = surf_web.app.test_client()
+    response = client.get("/api/proxy-default")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["proxy_mode"] == "no"
+
+
+def test_web_process_without_proxy_uses_no_proxy_override(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    seen = {}
+
+    def fake_fetch(*args, **kwargs):
+        seen["proxy_mode_override"] = kwargs.get("proxy_mode_override")
+        return _build_direct_markdown_payload(
+            markdown_text="content",
+            title="PROJECT",
+            source_url="https://github.com/USER/PROJECT",
+            site_name="github",
+            base_url="https://github.com/USER/PROJECT/blob/main/README.md",
+        )
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", fake_fetch)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT",
+            "lang": "raw",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert seen["proxy_mode_override"] == "no"
+
+
+def test_web_github_defaults_to_raw_language():
+    client = surf_web.app.test_client()
+    response = client.get("/api/site-defaults?url=https://github.com/USER/PROJECT")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["site_name"] == "github"
+    assert payload["lang_mode"] == "raw"
+
+
+def test_web_github_untouched_translation_mode_skips_translation(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    def fake_fetch(*args, **kwargs):
+        return _build_direct_markdown_payload(
+            markdown_text="English README",
+            title="PROJECT",
+            source_url="https://github.com/USER/PROJECT",
+            site_name="github",
+            base_url="https://github.com/USER/PROJECT/blob/main/README.md",
+        )
+
+    def should_not_translate(*args, **kwargs):
+        raise AssertionError("GitHub Web default should keep README content raw")
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", fake_fetch)
+    monkeypatch.setattr(surf_web.ContentProcessor, "translate_if_needed", should_not_translate)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT",
+            "lang": "trans",
+            "lang_touched": False,
+            "proxy": "no",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["markdown"] == "English README"

@@ -79,6 +79,8 @@ from surf import (
 
 app = Flask(__name__)
 
+WEB_DEFAULT_RAW_SITES = {"github"}
+
 
 @app.errorhandler(Exception)
 def handle_api_error(error):
@@ -487,6 +489,10 @@ HTML_TEMPLATE = """
                     <div class="form-group">
                         <label>代理模式</label>
                         <div class="radio-group" id="proxyGroup">
+                            <div class="radio-option">
+                                <input type="radio" id="proxy-auto" name="proxy" value="auto" {% if default_proxy_mode == 'auto' %}checked{% endif %}>
+                                <label for="proxy-auto">自动（与 CLI 一致）</label>
+                            </div>
                             {% if is_windows %}
                             <div class="radio-option">
                                 <input type="radio" id="proxy-win" name="proxy" value="win" {% if default_proxy_mode == 'win' %}checked{% endif %}>
@@ -1032,7 +1038,7 @@ HTML_TEMPLATE = """
             const formData = new FormData(this);
             const data = Object.fromEntries(formData.entries());
             if (!data.proxy) {
-                data.proxy = getCheckedRadioValue('proxy') || 'env';
+                data.proxy = getCheckedRadioValue('proxy') || 'no';
             }
              
             // Convert checkboxes to booleans
@@ -1177,21 +1183,30 @@ def get_config():
 
 
 def normalize_web_proxy_mode(mode):
+    raw_mode = str(mode or "").strip().lower()
+    if raw_mode in {"", "auto", "default"}:
+        return "auto"
     normalized = Fetcher._normalize_proxy_mode(mode)
     if normalized == "win" and not Fetcher._is_windows():
-        return "env"
+        return "auto"
     if normalized in {"env", "win", "custom", "no"}:
         return normalized
-    return "env"
+    return "auto"
+
+
+def get_web_proxy_override(mode):
+    """Return the Fetcher proxy override for a Web UI proxy mode."""
+    normalized = normalize_web_proxy_mode(mode)
+    return None if normalized == "auto" else normalized
 
 
 def resolve_web_proxy_mode_default(config, url=None):
     """
     Resolve Web UI default proxy mode.
 
-    Surf Web is commonly deployed on a server where direct outbound access is
-    expected. Keep proxy usage opt-in from the Web UI instead of inheriting CLI
-    or special-site proxy defaults such as V2EX's local-machine preference.
+    Web UI commonly runs on a server where public sites are directly reachable,
+    unlike the Windows-heavy CLI environment where implicit proxy discovery is
+    often helpful. Keep Web's default direct and make auto an explicit choice.
     """
     return "no"
 
@@ -1346,7 +1361,11 @@ def resolve_web_site_defaults(config, url=None):
 
     args = SimpleNamespace(ocr_images=False, no_ocr_images=False)
     ocr_enabled = OcrHandler._is_enabled_for_site(site_name, site_config, args, config)
-    lang_mode = "raw" if site_config and site_config.get("default_no_translate") else "trans"
+    lang_mode = (
+        "raw"
+        if (site_config and site_config.get("default_no_translate")) or site_name in WEB_DEFAULT_RAW_SITES
+        else "trans"
+    )
 
     return {
         "site_name": site_name,
@@ -1408,7 +1427,8 @@ def process_url():
         translation_performed = False
 
         # Fetch content
-        proxy_mode = normalize_web_proxy_mode(data.get("proxy", "env"))
+        proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
+        proxy_override = get_web_proxy_override(proxy_mode)
         custom_proxy = (data.get("custom_proxy") or "").strip() or None
         if proxy_mode == "custom" and not custom_proxy:
             return jsonify({"success": False, "error": "custom 代理模式需要填写自定义代理地址"})
@@ -1432,14 +1452,14 @@ def process_url():
             url = Fetcher._resolve_common_short_url(
                 url,
                 config,
-                proxy_mode_override=proxy_mode,
+                proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
             )
             _, site_name, site_config = _get_handler_for_url(url)
             fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
             if site_config:
                 if (
-                    site_config.get("default_no_translate")
+                    (site_config.get("default_no_translate") or site_name in WEB_DEFAULT_RAW_SITES)
                     and lang_mode == "trans"
                     and not data.get("lang_touched", False)
                 ):
@@ -1450,7 +1470,7 @@ def process_url():
                 url,
                 config=config,
                 use_browser=data.get("browser", False),
-                proxy_mode_override=proxy_mode,
+                proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
                 fetch_thread=fetch_thread,
             )
@@ -1481,7 +1501,7 @@ def process_url():
                         site_config=site_config,
                         args=build_web_ocr_args(data),
                         config=config,
-                        proxy_mode_override=proxy_mode,
+                        proxy_mode_override=proxy_override,
                         custom_proxy_override=custom_proxy,
                     )
                 except Exception as e:
@@ -1550,7 +1570,7 @@ def process_url():
             archive_url = Fetcher.save_wayback_snapshot(
                 source_url,
                 config=config,
-                proxy_mode_override=proxy_mode,
+                proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
             )
 
