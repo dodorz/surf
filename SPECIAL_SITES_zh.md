@@ -273,7 +273,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 - 不带分支的 Markdown 文件 URL（如 `https://github.com/USER/REPO/PATH/TO/FILE.md`）会尝试从 `main` / `master` 分支抓取实际文件，但 front matter 的 `source` 保留用户输入的无分支 URL
 - 直接抓取到的 Markdown 中若包含内嵌 HTML 片段，会继续转换为 Markdown；代码围栏中的 HTML 示例保持原样
 - Markdown 正文中的相对链接仍按实际抓取的 blob 文件 URL 解析，不受 `source` 保留策略影响
-- **Web 默认保留原文**: Surf Web 中 GitHub 仓库页和 Markdown 文件 URL 默认使用 `raw`，避免较长 README 的默认翻译阻塞同步 Web 请求；CLI 默认语言策略不变
+- **Web 语言默认值**: Surf Web 中 GitHub 仓库页和 Markdown 文件 URL 使用普通语言默认值，非中文 Markdown 默认翻译为中文；如需保留原文，可手动选择 `raw`
 - **标题不翻译**: 仓库名称保持原文（通过 `skip_title_translation` 配置），README 内容可以翻译
 - **文件名策略**: 保存 Markdown 文件时，GitHub URL 使用页面 `<title>` 作为文件名基准
 

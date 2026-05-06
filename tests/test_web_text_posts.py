@@ -245,7 +245,7 @@ def test_web_process_without_proxy_uses_no_proxy_override(monkeypatch):
     assert seen["proxy_mode_override"] == "no"
 
 
-def test_web_github_defaults_to_raw_language():
+def test_web_github_defaults_to_translation_language():
     client = surf_web.app.test_client()
     response = client.get("/api/site-defaults?url=https://github.com/USER/PROJECT")
 
@@ -253,10 +253,10 @@ def test_web_github_defaults_to_raw_language():
     payload = response.get_json()
     assert payload["success"] is True
     assert payload["site_name"] == "github"
-    assert payload["lang_mode"] == "raw"
+    assert payload["lang_mode"] == "trans"
 
 
-def test_web_github_untouched_translation_mode_skips_translation(monkeypatch):
+def test_web_github_untouched_translation_mode_checks_translation(monkeypatch):
     monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
 
     def fake_fetch(*args, **kwargs):
@@ -268,11 +268,12 @@ def test_web_github_untouched_translation_mode_skips_translation(monkeypatch):
             base_url="https://github.com/USER/PROJECT/blob/main/README.md",
         )
 
-    def should_not_translate(*args, **kwargs):
-        raise AssertionError("GitHub Web default should keep README content raw")
+    def fake_translate(text, *args, **kwargs):
+        assert text == "English README"
+        return "中文 README", "PROJECT"
 
     monkeypatch.setattr(surf_web.Fetcher, "fetch", fake_fetch)
-    monkeypatch.setattr(surf_web.ContentProcessor, "translate_if_needed", should_not_translate)
+    monkeypatch.setattr(surf_web.ContentProcessor, "translate_if_needed", fake_translate)
 
     client = surf_web.app.test_client()
     response = client.post(
@@ -288,4 +289,4 @@ def test_web_github_untouched_translation_mode_skips_translation(monkeypatch):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["success"] is True
-    assert payload["markdown"] == "English README"
+    assert payload["markdown"] == "中文 README"

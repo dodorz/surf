@@ -80,9 +80,6 @@ from surf import (
 
 app = Flask(__name__)
 
-WEB_DEFAULT_RAW_SITES = {"github"}
-
-
 @app.errorhandler(Exception)
 def handle_api_error(error):
     """Return JSON errors for API routes instead of Flask HTML error pages."""
@@ -1364,7 +1361,7 @@ def resolve_web_site_defaults(config, url=None):
     ocr_enabled = OcrHandler._is_enabled_for_site(site_name, site_config, args, config)
     lang_mode = (
         "raw"
-        if (site_config and site_config.get("default_no_translate")) or site_name in WEB_DEFAULT_RAW_SITES
+        if site_config and site_config.get("default_no_translate")
         else "trans"
     )
 
@@ -1460,7 +1457,7 @@ def process_url():
             fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
             if site_config:
                 if (
-                    (site_config.get("default_no_translate") or site_name in WEB_DEFAULT_RAW_SITES)
+                    site_config.get("default_no_translate")
                     and lang_mode == "trans"
                     and not data.get("lang_touched", False)
                 ):

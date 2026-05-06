@@ -71,7 +71,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Branchless Markdown URLs such as `https://github.com/USER/REPO/PATH/TO/FILE.md` fetch from `main`/`master` candidates, while front matter `source` remains the branchless URL.
 - Embedded HTML fragments inside directly fetched Markdown are converted back to Markdown while fenced code examples are preserved.
 - Relative links inside fetched Markdown are resolved against the actual blob URL used for content, not the preserved source URL.
-- Surf Web defaults GitHub repo and Markdown URLs to raw language to avoid long README translations blocking the synchronous Web request. CLI language defaults are unchanged.
+- Surf Web uses the normal language default for GitHub repo and Markdown URLs: non-Chinese Markdown is translated to Chinese unless raw mode is selected manually.
 
 ### NCPSSD
 - Scope: `.../Literature/secure/articleinfo?params=...` pages.
