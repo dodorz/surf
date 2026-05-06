@@ -1,5 +1,10 @@
 import surf_web
-from surf import Fetcher, _build_direct_markdown_payload, _translation_was_performed
+from surf import (
+    Fetcher,
+    _build_direct_markdown_payload,
+    _convert_embedded_html_in_markdown,
+    _translation_was_performed,
+)
 
 
 class _FakeConfig:
@@ -146,6 +151,23 @@ def test_process_url_preserves_direct_markdown_payload(monkeypatch):
     assert payload["title"] == "guide.md"
     assert payload["markdown"] == "[Next](https://github.com/USER/PROJECT/blob/main/docs/other.md)"
     assert payload["metadata"]["source_url"] == "https://github.com/USER/PROJECT/docs/guide.md"
+
+
+def test_direct_markdown_converts_embedded_html_but_preserves_fenced_code():
+    markdown = """# Guide
+
+<p>Hello <strong>reader</strong>. <a href="docs/more.md">More</a></p>
+
+```html
+<p>Keep this example as HTML.</p>
+```
+"""
+
+    converted = _convert_embedded_html_in_markdown(markdown)
+
+    assert "Hello **reader**. [More](docs/more.md)" in converted
+    assert "<p>Hello" not in converted
+    assert "<p>Keep this example as HTML.</p>" in converted
 
 
 def test_web_auto_proxy_uses_cli_implicit_proxy_resolution(monkeypatch):

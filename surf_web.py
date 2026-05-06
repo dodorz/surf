@@ -68,6 +68,7 @@ from surf import (
     OcrHandler,
     OutputHandler,
     TTSHandler,
+    _convert_embedded_html_in_markdown,
     _extract_direct_markdown_payload,
     _get_handler_for_url,
     _get_version,
@@ -1483,7 +1484,9 @@ def process_url():
 
             if direct_markdown_payload:
                 title = direct_markdown_payload.get("title") or "Untitled"
-                md_content = direct_markdown_payload.get("markdown") or ""
+                md_content = _convert_embedded_html_in_markdown(
+                    direct_markdown_payload.get("markdown") or ""
+                )
                 content_base_url = direct_markdown_payload.get("base_url") or source_url
                 cleaned_html = _render_markdown_to_html(md_content)
             else:

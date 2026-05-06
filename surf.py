@@ -99,6 +99,129 @@ def _render_markdown_to_html(markdown_text):
     return f"<article>{body}</article>"
 
 
+_EMBEDDED_HTML_TAGS = (
+    "a",
+    "abbr",
+    "article",
+    "aside",
+    "audio",
+    "b",
+    "blockquote",
+    "br",
+    "caption",
+    "cite",
+    "code",
+    "dd",
+    "del",
+    "details",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "figcaption",
+    "figure",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "hr",
+    "i",
+    "img",
+    "ins",
+    "kbd",
+    "li",
+    "mark",
+    "ol",
+    "p",
+    "picture",
+    "pre",
+    "q",
+    "s",
+    "section",
+    "source",
+    "span",
+    "strong",
+    "sub",
+    "summary",
+    "sup",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "u",
+    "ul",
+    "video",
+)
+_EMBEDDED_HTML_TAG_PATTERN = "|".join(sorted(_EMBEDDED_HTML_TAGS, key=len, reverse=True))
+_EMBEDDED_HTML_PAIR_RE = re.compile(
+    rf"<(?P<tag>{_EMBEDDED_HTML_TAG_PATTERN})\b[^>]*>.*?</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+_EMBEDDED_HTML_VOID_RE = re.compile(
+    rf"<(?:br|hr|img|source)\b[^>]*(?:/?>)",
+    re.IGNORECASE,
+)
+_MARKDOWN_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
+
+
+def _markdownify_embedded_html_fragment(html_fragment):
+    converted = markdownify.markdownify(html_fragment or "", heading_style="ATX")
+    converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
+    return converted
+
+
+def _convert_embedded_html_in_markdown_chunk(markdown_text):
+    def replace_pair(match):
+        return _markdownify_embedded_html_fragment(match.group(0))
+
+    def replace_void(match):
+        return _markdownify_embedded_html_fragment(match.group(0))
+
+    converted = _EMBEDDED_HTML_PAIR_RE.sub(replace_pair, markdown_text)
+    converted = _EMBEDDED_HTML_VOID_RE.sub(replace_void, converted)
+    return converted
+
+
+def _convert_embedded_html_in_markdown(markdown_text):
+    """Convert embedded HTML fragments in fetched markdown while preserving code fences."""
+    if not markdown_text or not re.search(r"<[A-Za-z][A-Za-z0-9:-]*(?:\s|>|/>)", markdown_text):
+        return markdown_text or ""
+
+    chunks = []
+    current = []
+    in_fence = False
+
+    def flush_current(convert_html):
+        if not current:
+            return
+        chunk = "".join(current)
+        if convert_html:
+            chunk = _convert_embedded_html_in_markdown_chunk(chunk)
+        chunks.append(chunk)
+        current.clear()
+
+    for line in markdown_text.splitlines(keepends=True):
+        if _MARKDOWN_FENCE_RE.match(line):
+            if in_fence:
+                current.append(line)
+                flush_current(False)
+                in_fence = False
+            else:
+                flush_current(True)
+                current.append(line)
+                in_fence = True
+            continue
+        current.append(line)
+
+    flush_current(not in_fence)
+    return "".join(chunks)
+
+
 def _translation_was_performed(
     original_text,
     translated_text,
@@ -9005,7 +9128,9 @@ Twitter/X Backend:
     _raise_if_interrupted()
     if direct_markdown_payload:
         title = direct_markdown_payload.get("title") or "Untitled"
-        md_content = direct_markdown_payload.get("markdown") or ""
+        md_content = _convert_embedded_html_in_markdown(
+            direct_markdown_payload.get("markdown") or ""
+        )
         content_base_url = direct_markdown_payload.get("base_url") or source_url
         cleaned_html = _render_markdown_to_html(md_content)
         logger.info(f"Using direct markdown payload. Title: {title}")

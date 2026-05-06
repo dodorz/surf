@@ -69,7 +69,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 
 输入 URL 时，Web UI 会动态应用匹配到的特殊站点默认值。例如默认保留原文的站点会隐藏 LLM Provider，除非手动选择翻译或双语；当前有效 OCR 默认为关闭时会隐藏 OCR 引擎，除非手动选择启用 OCR。
 
-GitHub 仓库页和 Markdown 文件 URL 在 Surf Web 中默认保留原文，避免较长 README 的默认翻译阻塞同步 Web 请求；如确实需要翻译，仍可手动选择翻译或双语模式。
+GitHub 仓库页和 Markdown 文件 URL 在 Surf Web 中默认保留原文，避免较长 README 的默认翻译阻塞同步 Web 请求；直接抓取到的 GitHub Markdown 仍会把内嵌 HTML 片段转换回 Markdown，并保留代码围栏中的 HTML 示例。如确实需要翻译，仍可手动选择翻译或双语模式。
 
 Web 界面的代理默认值规则与 CLI 有意不同：
 - CLI 默认使用隐式 `auto` 代理解析，因为它通常运行在 Windows 客户端机器上，很多网站需要本地代理才能访问。

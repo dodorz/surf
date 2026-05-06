@@ -92,7 +92,7 @@ The web form exposes the most commonly used Surf options directly, including:
 
 As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.
 
-GitHub repo and Markdown URLs default to raw language in Surf Web to avoid long README translations blocking the synchronous Web request. You can still manually select translation or bilingual mode when needed.
+GitHub repo and Markdown URLs default to raw language in Surf Web to avoid long README translations blocking the synchronous Web request. Directly fetched GitHub Markdown still has embedded HTML fragments converted back to Markdown, while fenced code examples are preserved. You can still manually select translation or bilingual mode when needed.
 
 Web proxy default selection is intentionally different from the CLI:
 - CLI defaults to implicit auto proxy resolution because it often runs on Windows client machines where many sites need a local proxy.
