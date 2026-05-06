@@ -1082,6 +1082,10 @@ HTML_TEMPLATE = """
                     }
                 }
                 showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
+                if (successCount && urlInput) {
+                    urlInput.value = '';
+                    urlInput.dispatchEvent(new Event('input', { bubbles: true }));
+                }
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
             } finally {
