@@ -311,6 +311,25 @@ HTML_TEMPLATE = """
             flex-wrap: wrap;
         }
 
+        .batch-save-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .batch-save-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .batch-save-label {
+            min-width: 72px;
+            font-weight: 600;
+            color: #495057;
+        }
+
         .play-btn {
             display: inline-flex;
             align-items: center;
@@ -479,7 +498,7 @@ HTML_TEMPLATE = """
                     <label for="url">URL 地址或纯文本</label>
                     <textarea id="url" name="url" class="url-input" rows="4"
                               placeholder="粘贴链接，或直接输入一段没有 URL 的文字"></textarea>
-                    <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
+                    <div class="field-hint">如果包含链接，Surf 会自动提取所有 http/https URL 并逐个生成结果卡；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
                 </div>
                 
                 <div class="section-title">获取内容</div>
@@ -941,6 +960,101 @@ HTML_TEMPLATE = """
             }
         }
 
+        function escapeHtml(value) {
+            return String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function getResultSource(result) {
+            return result?.metadata?.source_url || result?.input_url || '';
+        }
+
+        function buildMergedResultData(results) {
+            const title = `Surf Batch ${new Date().toISOString().slice(0, 10)}`;
+            const markdown = results.map((result, index) => {
+                const itemTitle = result.title || `Untitled ${index + 1}`;
+                const source = getResultSource(result);
+                const sourceLine = source ? `\n\nSource: ${source}` : '';
+                return `# ${index + 1}. ${itemTitle}${sourceLine}\n\n${result.markdown || ''}`.trim();
+            }).join('\n\n---\n\n');
+            const html = `<article class="surf-batch-results">${results.map((result, index) => {
+                const itemTitle = result.title || `Untitled ${index + 1}`;
+                const source = getResultSource(result);
+                return `<section><h1>${index + 1}. ${escapeHtml(itemTitle)}</h1>${source ? `<p><a href="${escapeHtml(source)}">${escapeHtml(source)}</a></p>` : ''}${result.html || ''}</section>`;
+            }).join('\n<hr>\n')}</article>`;
+            const raw = results.map((result, index) => {
+                const itemTitle = result.title || `Untitled ${index + 1}`;
+                const source = getResultSource(result);
+                return `# ${index + 1}. ${itemTitle}${source ? `\n\nSource: ${source}` : ''}\n\n${result.raw || result.markdown || ''}`.trim();
+            }).join('\n\n---\n\n');
+            return {
+                title,
+                markdown,
+                html,
+                raw,
+                defaultDirs: results[0]?.defaultDirs || window.defaultDirs || {},
+                metadata: {
+                    title,
+                    html_content: html,
+                    add_front_matter: true,
+                    translated_title: null,
+                    source_url: null,
+                    archive_url: null,
+                    translator: null,
+                    html_inline: results.some(result => result?.metadata?.html_inline),
+                },
+            };
+        }
+
+        function renderBatchSaveControls(results) {
+            if (!results || results.length < 2) {
+                return;
+            }
+            const container = document.getElementById('resultsContainer');
+            const card = document.createElement('div');
+            card.className = 'card result-card show';
+            card.innerHTML = `
+                <div class="result-header">
+                    <h2 class="result-title">批量保存 ${results.length} 个结果</h2>
+                </div>
+                <div class="batch-save-panel">
+                    <div class="batch-save-row" data-batch-mode="separate">
+                        <span class="batch-save-label">逐个保存</span>
+                    </div>
+                    <div class="batch-save-row" data-batch-mode="merged">
+                        <span class="batch-save-label">合并保存</span>
+                    </div>
+                </div>
+            `;
+
+            const separateRow = card.querySelector('[data-batch-mode="separate"]');
+            const mergedRow = card.querySelector('[data-batch-mode="merged"]');
+            const batchButtons = [
+                ['md', 'save-md', 'Markdown'],
+                ['html', 'save-html', 'HTML'],
+                ['pdf', 'save-pdf', 'PDF'],
+                ['audio', 'save-audio', 'Audio'],
+            ];
+            for (const [fileType, className, label] of batchButtons) {
+                const separateBtn = document.createElement('button');
+                separateBtn.className = 'save-btn ' + className;
+                separateBtn.textContent = label;
+                separateBtn.onclick = () => saveBatchFiles(fileType, { merge: false });
+                separateRow.appendChild(separateBtn);
+
+                const mergedBtn = document.createElement('button');
+                mergedBtn.className = 'save-btn ' + className;
+                mergedBtn.textContent = label;
+                mergedBtn.onclick = () => saveBatchFiles(fileType, { merge: true });
+                mergedRow.appendChild(mergedBtn);
+            }
+            container.insertBefore(card, container.firstChild);
+        }
+
         function wireResultTabs(card) {
             card.querySelectorAll('.tab').forEach(tab => {
                 tab.addEventListener('click', function() {
@@ -1081,6 +1195,7 @@ HTML_TEMPLATE = """
                         renderErrorCard(input, result.error, i, inputs.length);
                     }
                 }
+                renderBatchSaveControls(currentResults);
                 showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
                 if (successCount && urlInput) {
                     urlInput.value = '';
@@ -1117,45 +1232,48 @@ HTML_TEMPLATE = """
         // Store result data for saving
         let currentResults = [];
 
+        function promptForSaveDir(resultData, fileType) {
+            const defaultDir = (resultData.defaultDirs || window.defaultDirs || {})[fileType] || '';
+            return prompt(
+                `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
+                ''
+            );
+        }
+
+        async function requestSaveFile(resultData, fileType, options = {}) {
+            const response = await fetch('/api/save', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    fileType,
+                    saveDir: (options.saveDir || '').trim(),
+                    data: resultData,
+                    speak: !!options.speak
+                })
+            });
+
+            return parseJsonResponse(response);
+        }
+
         async function saveFile(resultData, fileType, options = {}) {
             if (!resultData) {
                 showStatus('error', '没有可保存的内容');
                 return;
             }
 
-            // Get default directory from config
-            const defaultDir = (resultData.defaultDirs || window.defaultDirs || {})[fileType] || '';
-            const promptForDir = options.promptForDir !== false;
             const speak = !!options.speak;
-
             let saveDir = '';
-            if (promptForDir) {
-                saveDir = prompt(
-                    `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
-                    ''
-                );
-
-                // If user cancelled
+            if (options.promptForDir !== false) {
+                saveDir = promptForSaveDir(resultData, fileType);
                 if (saveDir === null) {
                     return;
                 }
             }
 
             try {
-                const response = await fetch('/api/save', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        fileType,
-                        saveDir: saveDir.trim(),
-                        data: resultData,
-                        speak
-                    })
-                });
-
-                const result = await parseJsonResponse(response);
+                const result = await requestSaveFile(resultData, fileType, { saveDir, speak });
 
                 if (result.success) {
                     if (speak) {
@@ -1165,6 +1283,52 @@ HTML_TEMPLATE = """
                     }
                 } else {
                     showStatus('error', '保存失败: ' + result.error);
+                }
+            } catch (error) {
+                showStatus('error', '请求失败: ' + error.message);
+            }
+        }
+
+        async function saveBatchFiles(fileType, options = {}) {
+            const results = currentResults || [];
+            if (!results.length) {
+                showStatus('error', '没有可保存的内容');
+                return;
+            }
+
+            const merge = !!options.merge;
+            const resultData = merge ? buildMergedResultData(results) : results[0];
+            const saveDir = promptForSaveDir(resultData, fileType);
+            if (saveDir === null) {
+                return;
+            }
+
+            try {
+                if (merge) {
+                    const result = await requestSaveFile(resultData, fileType, { saveDir });
+                    if (result.success) {
+                        showStatus('success', `合并 ${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
+                    } else {
+                        showStatus('error', '合并保存失败: ' + result.error);
+                    }
+                    return;
+                }
+
+                let successCount = 0;
+                const errors = [];
+                for (const item of results) {
+                    const result = await requestSaveFile(item, fileType, { saveDir });
+                    if (result.success) {
+                        successCount += 1;
+                    } else {
+                        errors.push(result.error || item.title || 'Unknown error');
+                    }
+                }
+
+                if (errors.length) {
+                    showStatus('error', `逐个保存完成：成功 ${successCount}/${results.length}，失败 ${errors.length}: ${errors.join('; ')}`);
+                } else {
+                    showStatus('success', `逐个保存完成：成功 ${successCount}/${results.length}`);
                 }
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);

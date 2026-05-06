@@ -88,7 +88,8 @@ The web form exposes the most commonly used Surf options directly, including:
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`forward` / `backward` / `both` / off; V2EX uses this as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
-- free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
+- free-form URL or text input: you can paste share text and Surf will extract all `http/https` URLs, process each URL, and render one result card per URL. If no URL is present, the text is saved as a post and the first sentence becomes the title.
+- batch save: for multiple successful cards, use the batch save panel to save cards as separate files or merge them into one Markdown, HTML, PDF, or Audio file.
 
 As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.
 
