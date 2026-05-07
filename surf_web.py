@@ -911,7 +911,7 @@ HTML_TEMPLATE = """
             const seen = new Set();
             const urls = [];
             for (const match of matches) {
-                const cleaned = match.replace(/[),.;!?，。；！？、）】》]+$/g, '');
+                const cleaned = match.replace(/[`'")\\]}>,.;!?，。；！？、）】》]+$/g, '');
                 if (cleaned && !seen.has(cleaned)) {
                     seen.add(cleaned);
                     urls.push(cleaned);
@@ -1225,7 +1225,7 @@ def extract_url_from_text(value):
         return None
 
     candidate = match.group(0).strip()
-    candidate = candidate.rstrip('\'"<>)]}.,;!?:')
+    candidate = candidate.rstrip('`\'"<>)]}.,;!?:')
     return candidate or None
 
 

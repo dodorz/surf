@@ -6479,6 +6479,34 @@ def _get_handler_for_url(url):
 
 class ContentProcessor:
     @staticmethod
+    def _text_appears_to_match_target_language(text, target_lang):
+        """Heuristic guard for mixed Markdown where langdetect sees badges/URLs first."""
+        normalized_target = (target_lang or "").lower()
+        if not normalized_target.startswith("zh"):
+            return False
+
+        sample = (text or "")[:4000]
+        if not sample:
+            return False
+
+        cjk_count = len(re.findall(r"[\u3400-\u9fff]", sample))
+        latin_count = len(re.findall(r"[A-Za-z]", sample))
+        kana_hangul_count = len(re.findall(r"[\u3040-\u30ff\uac00-\ud7af]", sample))
+        language_chars = cjk_count + latin_count + kana_hangul_count
+
+        if language_chars == 0:
+            return False
+
+        # Chinese Markdown often starts with badges, URLs and English project names.
+        # Require enough CJK text plus a modest share of the language-bearing sample
+        # so mixed Chinese docs do not get sent through a slow, unnecessary translation.
+        return (
+            cjk_count >= 80
+            and cjk_count / language_chars >= 0.10
+            and kana_hangul_count <= cjk_count
+        )
+
+    @staticmethod
     def _preprocess_html(html):
         """
         Preprocesses HTML to normalize complex image structures (like <picture> or lazy-loaded images)
@@ -6741,7 +6769,11 @@ class ContentProcessor:
             )
             lang = "unknown"
 
-        if target_lang.lower() in lang.lower() or lang == "zh-cn":
+        if (
+            target_lang.lower() in lang.lower()
+            or lang == "zh-cn"
+            or cls._text_appears_to_match_target_language(text, target_lang)
+        ):
             logger.info(
                 "Language matches target or is already Chinese. Skipping translation."
             )
