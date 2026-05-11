@@ -1,5 +1,6 @@
 #!/usr/bin/env -S uv run
 import argparse
+import base64
 import configparser
 import os
 import sys
@@ -143,6 +144,7 @@ _EMBEDDED_HTML_TAGS = (
     "source",
     "span",
     "strong",
+    "svg",
     "sub",
     "summary",
     "sup",
@@ -169,7 +171,188 @@ _EMBEDDED_HTML_VOID_RE = re.compile(
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 
 
+_SVG_ATTR_CASE_MAP = {
+    "viewbox": "viewBox",
+    "preserveaspectratio": "preserveAspectRatio",
+    "gradientunits": "gradientUnits",
+    "gradienttransform": "gradientTransform",
+    "patternunits": "patternUnits",
+    "patterncontentunits": "patternContentUnits",
+    "markerheight": "markerHeight",
+    "markerwidth": "markerWidth",
+    "refx": "refX",
+    "refy": "refY",
+}
+
+_SVG_BOARD_STYLE = """
+text{font-family:Arial,"Noto Sans",sans-serif}
+.t{fill:#444441;font-size:14px;font-weight:400}
+.ts{fill:#5f5e5a;font-size:12px;font-weight:400}
+.th{fill:#444441;font-size:14px;font-weight:500}
+.arr{stroke:#77736b;stroke-width:1.5px}
+.leader{stroke:#77736b;stroke-width:.5px;stroke-dasharray:3 3}
+.box rect{fill:#f7f6f2;stroke:#d8d4ca}
+.c-purple rect,.c-purple circle,.c-purple ellipse{fill:#eeedfe;stroke:#534ab7;stroke-width:.5px}
+.c-purple .th,.c-purple .t{fill:#3c3489}.c-purple .ts{fill:#534ab7}
+.c-teal rect,.c-teal circle,.c-teal ellipse{fill:#e1f5ee;stroke:#0f6e56;stroke-width:.5px}
+.c-teal .th,.c-teal .t{fill:#085041}.c-teal .ts{fill:#0f6e56}
+.c-coral rect,.c-coral circle,.c-coral ellipse{fill:#faece7;stroke:#993c1d;stroke-width:.5px}
+.c-coral .th,.c-coral .t{fill:#712b13}.c-coral .ts{fill:#993c1d}
+.c-pink rect,.c-pink circle,.c-pink ellipse{fill:#faeaf0;stroke:#993556;stroke-width:.5px}
+.c-pink .th,.c-pink .t{fill:#72243e}.c-pink .ts{fill:#993556}
+.c-gray rect,.c-gray circle,.c-gray ellipse{fill:#f1efe8;stroke:#5f5e5a;stroke-width:.5px}
+.c-gray .th,.c-gray .t{fill:#444441}.c-gray .ts{fill:#5f5e5a}
+.c-blue rect,.c-blue circle,.c-blue ellipse{fill:#e6f1fb;stroke:#185fa5;stroke-width:.5px}
+.c-blue .th,.c-blue .t{fill:#0c447c}.c-blue .ts{fill:#185fa5}
+.c-green rect,.c-green circle,.c-green ellipse{fill:#eaf3de;stroke:#3b6d11;stroke-width:.5px}
+.c-green .th,.c-green .t{fill:#27500a}.c-green .ts{fill:#3b6d11}
+.c-amber rect,.c-amber circle,.c-amber ellipse{fill:#fff3d7;stroke:#9b650d;stroke-width:.5px}
+.c-amber .th,.c-amber .t{fill:#714707}.c-amber .ts{fill:#9b650d}
+""".strip()
+
+
+def _tag_classes(tag):
+    classes = tag.get("class") if tag else []
+    if not classes:
+        return set()
+    if isinstance(classes, str):
+        return set(classes.split())
+    return {str(cls) for cls in classes}
+
+
+def _svg_numeric_size(svg):
+    def parse_dimension(value):
+        if value is None:
+            return None
+        match = re.match(r"\s*(\d+(?:\.\d+)?)", str(value))
+        return float(match.group(1)) if match else None
+
+    width = parse_dimension(svg.get("width"))
+    height = parse_dimension(svg.get("height"))
+    viewbox = svg.get("viewBox") or svg.get("viewbox")
+    if (width is None or height is None) and viewbox:
+        numbers = re.findall(r"-?\d+(?:\.\d+)?", str(viewbox))
+        if len(numbers) >= 4:
+            width = width if width is not None else float(numbers[2])
+            height = height if height is not None else float(numbers[3])
+    return width, height
+
+
+def _svg_alt_text(svg):
+    for attr in ("aria-label", "title", "alt"):
+        value = (svg.get(attr) or "").strip()
+        if value:
+            return re.sub(r"\s+", " ", value)
+
+    title = svg.find("title")
+    if title:
+        value = title.get_text(" ", strip=True)
+        if value:
+            return re.sub(r"\s+", " ", value)
+
+    text_parts = [
+        text.strip()
+        for text in svg.find_all(string=True)
+        if text.strip() and getattr(text, "parent", None) and text.parent.name not in {"style", "script"}
+    ]
+    text = " ".join(text_parts)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 120:
+        text = text[:117].rstrip() + "..."
+    return text or "inline SVG illustration"
+
+
+def _svg_is_decorative(svg):
+    classes = _tag_classes(svg)
+    text = svg.get_text(" ", strip=True)
+    width, height = _svg_numeric_size(svg)
+    if (svg.get("aria-hidden") or "").strip().lower() == "true":
+        return True
+    if "lucide" in classes:
+        return True
+    if width and height and width <= 32 and height <= 32 and not text:
+        return True
+    if not text and not svg.find(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "image"]):
+        return True
+    return False
+
+
+def _svg_is_content_illustration(svg):
+    if _svg_is_decorative(svg):
+        return False
+
+    parent = svg.find_parent(["figure", "div", "section", "article"])
+    parent_classes = _tag_classes(parent)
+    svg_classes = _tag_classes(svg)
+    if parent and parent.name == "figure":
+        return True
+    if parent_classes.intersection({"post-media", "post-media--svg-board"}):
+        return True
+    if svg_classes.intersection({"post-media", "post-media--svg-board"}):
+        return True
+
+    width, height = _svg_numeric_size(svg)
+    graphic_count = len(svg.find_all(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "image"]))
+    text_count = len([text for text in svg.find_all(string=True) if text.strip()])
+    area = (width or 0) * (height or 0)
+    return bool((area >= 10000 or width == 100) and (text_count >= 2 or graphic_count >= 6))
+
+
+def _normalize_svg_attribute_case(svg):
+    for tag in [svg] + list(svg.find_all(True)):
+        for lower_name, proper_name in _SVG_ATTR_CASE_MAP.items():
+            if lower_name in tag.attrs and proper_name not in tag.attrs:
+                tag.attrs[proper_name] = tag.attrs.pop(lower_name)
+
+
+def _sanitize_svg_for_markdown(svg):
+    for unsafe in svg.find_all(["script", "foreignObject", "iframe", "object", "embed"]):
+        unsafe.decompose()
+    if not svg.get("xmlns"):
+        svg["xmlns"] = "http://www.w3.org/2000/svg"
+    _normalize_svg_attribute_case(svg)
+
+    parent = svg.find_parent()
+    if parent and "post-media--svg-board" in _tag_classes(parent) and not svg.find("style"):
+        style_tag = BeautifulSoup("", "html.parser").new_tag("style")
+        style_tag.string = _SVG_BOARD_STYLE
+        svg.insert(0, style_tag)
+
+
+def _svg_to_data_uri(svg):
+    _sanitize_svg_for_markdown(svg)
+    svg_markup = str(svg)
+    encoded = base64.b64encode(svg_markup.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
+def _prepare_inline_svgs_for_markdown(html):
+    if not html or "<svg" not in html.lower():
+        return html
+
+    soup = BeautifulSoup(html, "html.parser")
+    changed = False
+    for svg in list(soup.find_all("svg")):
+        if _svg_is_content_illustration(svg):
+            alt_text = _svg_alt_text(svg)
+            title = svg.find("title")
+            title_text = title.get_text(" ", strip=True) if title else ""
+            img = soup.new_tag("img")
+            img["src"] = _svg_to_data_uri(svg)
+            img["alt"] = alt_text
+            if title_text:
+                img["title"] = title_text
+            svg.replace_with(img)
+            changed = True
+        elif _svg_is_decorative(svg):
+            svg.decompose()
+            changed = True
+
+    return str(soup) if changed else html
+
+
 def _markdownify_embedded_html_fragment(html_fragment):
+    html_fragment = _prepare_inline_svgs_for_markdown(html_fragment)
     converted = markdownify.markdownify(html_fragment or "", heading_style="ATX")
     converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
     return converted
@@ -242,11 +425,7 @@ def _get_version():
         with open("pyproject.toml", "r", encoding="utf-8") as f:
             content = f.read()
             # 匹配 [project] 小节后的 version = "..."
-            match = re.search(
-                r'\[project\].*?version\s*=\s*["\']([^"\']+)["\']',
-                content,
-                re.DOTALL
-            )
+            match = re.search(r'\[project\].*?version\s*=\s*["\']([^"\']+)["\']', content, re.DOTALL)
             return match.group(1) if match else "0.0.0"
     except Exception:
         return "0.0.0"
@@ -435,9 +614,7 @@ def setup_verbose_logging():
     logging.getLogger().setLevel(logging.INFO)
     # Update existing handlers
     for handler in logging.getLogger().handlers:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        )
+        handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 
 
 def resolve_user_path(path):
@@ -510,11 +687,7 @@ class Config:
 
     def _get_available_llm_providers(self):
         """Get a list of available LLM provider names from the config."""
-        return [
-            section.split(".")[1]
-            for section in self.config.sections()
-            if section.startswith("LLM.")
-        ]
+        return [section.split(".")[1] for section in self.config.sections() if section.startswith("LLM.")]
 
 
 class Fetcher:
@@ -542,12 +715,8 @@ class Fetcher:
         "xhslink.com",
     }
 
-    _HTML_META_CHARSET_RE = re.compile(
-        rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE
-    )
-    _HTML_CONTENT_CHARSET_RE = re.compile(
-        rb'content\s*=\s*["\'][^"\']*charset\s*=\s*([^"\';\s]+)', re.IGNORECASE
-    )
+    _HTML_META_CHARSET_RE = re.compile(rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE)
+    _HTML_CONTENT_CHARSET_RE = re.compile(rb'content\s*=\s*["\'][^"\']*charset\s*=\s*([^"\';\s]+)', re.IGNORECASE)
 
     @staticmethod
     def _sniff_html_charset(prefix: bytes):
@@ -607,10 +776,7 @@ class Fetcher:
             if not encoding:
                 continue
             # Unlabeled HTML: requests' ISO-8859-1 default is a poor first guess.
-            if (
-                not header_has_charset
-                and encoding.upper() == "ISO-8859-1"
-            ):
+            if not header_has_charset and encoding.upper() == "ISO-8859-1":
                 continue
             if encoding not in candidates:
                 candidates.append(encoding)
@@ -898,9 +1064,7 @@ class Fetcher:
             custom_proxy_override: Override custom_proxy from command line
         """
         mode_override = Fetcher._normalize_proxy_mode(proxy_mode_override)
-        config_mode = Fetcher._normalize_proxy_mode(
-            config.get("Network", "proxy_mode", fallback="env")
-        )
+        config_mode = Fetcher._normalize_proxy_mode(config.get("Network", "proxy_mode", fallback="env"))
         config_custom = (config.get("Network", "custom_proxy", fallback="") or "").strip()
         custom_override = (custom_proxy_override or "").strip()
 
@@ -1039,9 +1203,7 @@ class Fetcher:
                 logger.info(f"{site_name}: Special handler failed; skipping generic fallback")
                 return None
 
-        req_proxies, pw_proxy = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         if not use_browser:
             should_use_browser = False
@@ -1049,20 +1211,14 @@ class Fetcher:
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
                 }
-                logger.info(
-                    f"Requests Proxies: {req_proxies if req_proxies else 'None'}"
-                )
-                response = _requests_get_interruptibly(
-                    url, headers=headers, proxies=req_proxies, timeout=10
-                )
+                logger.info(f"Requests Proxies: {req_proxies if req_proxies else 'None'}")
+                response = _requests_get_interruptibly(url, headers=headers, proxies=req_proxies, timeout=10)
                 response.raise_for_status()
                 decoded_text = Fetcher._decode_response_text(response)
 
                 # Check if likely dynamic (heuristic: very short content or explicit noscript)
                 if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
-                    logger.info(
-                        "Content seems short or requires JS. Switching to browser..."
-                    )
+                    logger.info("Content seems short or requires JS. Switching to browser...")
                     should_use_browser = True
                 else:
                     return decoded_text
@@ -1073,13 +1229,9 @@ class Fetcher:
             if should_use_browser:
                 logger.info("Using browser fallback for dynamic content.")
 
-            return Fetcher.fetch_with_browser(
-                url, config, proxy_mode_override, custom_proxy_override
-            )
+            return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
         else:
-            return Fetcher.fetch_with_browser(
-                url, config, proxy_mode_override, custom_proxy_override
-            )
+            return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
 
     @staticmethod
     def _is_twitter_article_only_link(html_content):
@@ -1134,9 +1286,7 @@ class Fetcher:
     ):
         """Resolve Twitter backend options from CLI overrides and config."""
         return {
-            "backend": (
-                backend or config.get("Twitter", "backend", fallback="cli") or "cli"
-            ).strip().lower(),
+            "backend": (backend or config.get("Twitter", "backend", fallback="cli") or "cli").strip().lower(),
             "cli_bin": (cli_bin or config.get("Twitter", "cli_bin", fallback="") or "").strip(),
             "browser": (browser or config.get("Twitter", "browser", fallback="") or "").strip(),
             "profile": (profile or config.get("Twitter", "profile", fallback="") or "").strip(),
@@ -1274,12 +1424,7 @@ class Fetcher:
         author = data.get("author") or data.get("user") or data.get("account") or {}
         if not isinstance(author, dict):
             author = {}
-        name = (
-            author.get("name")
-            or data.get("authorName")
-            or data.get("userName")
-            or ""
-        )
+        name = author.get("name") or data.get("authorName") or data.get("userName") or ""
         screen_name = (
             author.get("screen_name")
             or author.get("screenName")
@@ -1343,10 +1488,7 @@ class Fetcher:
                 marks.setdefault(end, []).append("</em>")
 
             link_url = (
-                entity.get("expanded_url")
-                or entity.get("expandedUrl")
-                or entity.get("url")
-                or entity.get("href")
+                entity.get("expanded_url") or entity.get("expandedUrl") or entity.get("url") or entity.get("href")
             )
             if isinstance(link_url, str) and link_url.strip():
                 link_ranges[(start, end)] = link_url.strip()
@@ -1424,10 +1566,7 @@ class Fetcher:
             value = node.get(key)
             if isinstance(value, str) and value.strip():
                 entities = (
-                    node.get("entities")
-                    or node.get("facets")
-                    or node.get("annotations")
-                    or node.get("formatting")
+                    node.get("entities") or node.get("facets") or node.get("annotations") or node.get("formatting")
                 )
                 return value, entities
             if isinstance(value, dict):
@@ -1509,12 +1648,7 @@ class Fetcher:
                 entity_type = str(entity.get("type", "")).strip().upper()
                 data = entity.get("data") or {}
                 if entity_type == "LINK":
-                    href = (
-                        data.get("url")
-                        or data.get("href")
-                        or data.get("expanded_url")
-                        or data.get("expandedUrl")
-                    )
+                    href = data.get("url") or data.get("href") or data.get("expanded_url") or data.get("expandedUrl")
                     if isinstance(href, str) and href.strip():
                         add_open(offset, f"<a href='{escape(href.strip())}'>")
                         add_close(end, "</a>")
@@ -1669,7 +1803,7 @@ class Fetcher:
     def _extract_fx_block_sequence(article, tweet):
         blocks_html = []
         seen_images = set()
-        entity_map = ((article.get("content") or {}).get("entityMap") or {})
+        entity_map = (article.get("content") or {}).get("entityMap") or {}
         ordered_media_queue = []
 
         def enqueue_media_from(node):
@@ -1687,9 +1821,7 @@ class Fetcher:
             for media_url in media_urls:
                 if media_url not in seen_images:
                     seen_images.add(media_url)
-                    blocks_html.append(
-                        f"<p><img src='{escape(media_url)}' alt='tweet media'></p>"
-                    )
+                    blocks_html.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
 
         content = article.get("content") or {}
         blocks = content.get("blocks") or []
@@ -1698,9 +1830,7 @@ class Fetcher:
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
-                block_fragments, media_refs = Fetcher._render_fx_block_html(
-                    block, entity_map=entity_map
-                )
+                block_fragments, media_refs = Fetcher._render_fx_block_html(block, entity_map=entity_map)
                 if block_fragments:
                     for fragment in block_fragments:
                         if fragment.startswith("<li "):
@@ -1736,9 +1866,7 @@ class Fetcher:
                             next_url = ordered_media_queue.pop(0)
                             if next_url not in seen_images:
                                 seen_images.add(next_url)
-                                blocks_html.append(
-                                    f"<p><img src='{escape(next_url)}' alt='tweet media'></p>"
-                                )
+                                blocks_html.append(f"<p><img src='{escape(next_url)}' alt='tweet media'></p>")
                                 break
                     continue
 
@@ -1821,7 +1949,11 @@ class Fetcher:
         if any(token in alt for token in ("avatar", "profile photo", "emoji", "icon")):
             return True
         parent_link = img.find_parent("a", href=True)
-        if parent_link and "/photo/" not in parent_link.get("href", "") and "/status/" not in parent_link.get("href", ""):
+        if (
+            parent_link
+            and "/photo/" not in parent_link.get("href", "")
+            and "/status/" not in parent_link.get("href", "")
+        ):
             if "pbs.twimg.com/media/" not in src and "video_thumb" not in src:
                 return True
         return False
@@ -1878,11 +2010,7 @@ class Fetcher:
         if indented >= 2:
             return True
 
-        punctuated = sum(
-            1
-            for line in non_empty
-            if re.search(r"[{}();=<>\[\]]", line) and len(line.strip()) <= 160
-        )
+        punctuated = sum(1 for line in non_empty if re.search(r"[{}();=<>\[\]]", line) and len(line.strip()) <= 160)
         if punctuated >= max(2, len(non_empty) // 2):
             return True
 
@@ -1927,14 +2055,11 @@ class Fetcher:
             classes = " ".join(tag.get("class") or []).lower()
             is_bold = (
                 tag.name in {"strong", "b"}
-                or "font-weight" in style and any(token in style for token in ("bold", "600", "700", "800", "900"))
+                or "font-weight" in style
+                and any(token in style for token in ("bold", "600", "700", "800", "900"))
                 or any(token in classes for token in ("bold", "semibold", "fontbold", "font-semibold"))
             )
-            is_italic = (
-                tag.name in {"em", "i"}
-                or "font-style:italic" in style
-                or "italic" in classes
-            )
+            is_italic = tag.name in {"em", "i"} or "font-style:italic" in style or "italic" in classes
 
             if tag.name == "span":
                 if is_bold:
@@ -1991,7 +2116,11 @@ class Fetcher:
                 is_text_candidate = True
             elif node.name in {"p", "blockquote", "pre", "li", "h1", "h2", "h3"}:
                 is_text_candidate = True
-            elif node.name == "div" and node.get_text(" ", strip=True) and not Fetcher._twitter_node_has_block_children(node):
+            elif (
+                node.name == "div"
+                and node.get_text(" ", strip=True)
+                and not Fetcher._twitter_node_has_block_children(node)
+            ):
                 is_text_candidate = True
 
             if not is_text_candidate:
@@ -2006,9 +2135,7 @@ class Fetcher:
             if text.lower() in seen_text:
                 continue
 
-            html = Fetcher._normalize_twitter_markup_fragment(
-                node, normalize_pre_blocks=normalize_pre_blocks
-            )
+            html = Fetcher._normalize_twitter_markup_fragment(node, normalize_pre_blocks=normalize_pre_blocks)
             if not html:
                 continue
 
@@ -2062,9 +2189,7 @@ class Fetcher:
         if not best_article:
             return None
 
-        blocks = Fetcher._extract_twitter_dom_sequence(
-            best_article, normalize_pre_blocks=(kind == "article")
-        )
+        blocks = Fetcher._extract_twitter_dom_sequence(best_article, normalize_pre_blocks=(kind == "article"))
         if not blocks:
             return None
         text_length = sum(len(re.sub(r"<[^>]+>", "", value)) for kind, value in blocks if kind == "html")
@@ -2113,19 +2238,10 @@ class Fetcher:
         if not isinstance(data, dict):
             return None
 
-        article_title = (
-            data.get("articleTitle")
-            or data.get("article_title")
-            or data.get("title")
-            or ""
-        )
+        article_title = data.get("articleTitle") or data.get("article_title") or data.get("title") or ""
         author_name, screen_name = Fetcher._extract_twitter_author_info(data)
         kind = "article" if str(article_title).strip() else "tweet"
-        title_base = (
-            str(article_title).strip()
-            or author_name
-            or (f"@{screen_name}" if screen_name else "X Post")
-        )
+        title_base = str(article_title).strip() or author_name or (f"@{screen_name}" if screen_name else "X Post")
         doc_title = title_base if kind == "article" else f"{title_base} - X Post"
 
         lines = []
@@ -2181,9 +2297,7 @@ class Fetcher:
             logger.info("uvx not found; skipping twitter-cli backend")
             return None
 
-        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
         proxy_url = None
         if req_proxies:
             proxy_url = req_proxies.get("https") or req_proxies.get("http")
@@ -2206,9 +2320,7 @@ class Fetcher:
             tmp_path = None
             completed = None
             try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".json", delete=False, encoding="utf-8"
-                ) as tmp_file:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tmp_file:
                     tmp_path = tmp_file.name
                 command_with_output = command + ["--output", tmp_path]
                 logger.info("Trying twitter-cli backend: %s", " ".join(command))
@@ -2225,9 +2337,7 @@ class Fetcher:
                 logger.warning(f"twitter-cli execution failed: {e}")
                 return None
             finally:
-                if tmp_path and os.path.exists(tmp_path) and (
-                    completed is None or completed.returncode != 0
-                ):
+                if tmp_path and os.path.exists(tmp_path) and (completed is None or completed.returncode != 0):
                     try:
                         os.remove(tmp_path)
                     except OSError:
@@ -2306,25 +2416,17 @@ class Fetcher:
                     profile=options["profile"],
                 )
             else:
-                html = Fetcher._fetch_twitter_oembed(
-                    url, config, proxy_mode_override, custom_proxy_override
-                )
+                html = Fetcher._fetch_twitter_oembed(url, config, proxy_mode_override, custom_proxy_override)
             if html:
                 thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
                 if thread_mode and Fetcher._extract_twitter_status_id(url):
                     thread_items, thread_current_index = Fetcher._get_twitter_thread_items(
                         url, config, proxy_mode_override, custom_proxy_override, thread_mode
                     )
-                    html = Fetcher._merge_thread_context_into_html(
-                        html, "twitter", thread_items, thread_current_index
-                    )
+                    html = Fetcher._merge_thread_context_into_html(html, "twitter", thread_items, thread_current_index)
                 return html
-        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
-        fallback_html = Fetcher._fetch_twitter_status_fallbacks(
-            url, proxies=req_proxies
-        )
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
+        fallback_html = Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies)
         if fallback_html:
             thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
             if thread_mode and Fetcher._extract_twitter_status_id(url):
@@ -2441,17 +2543,9 @@ class Fetcher:
         if not html_content:
             return True
         raw = html_content.lower()
-        raw = (
-            raw.replace("\u2019", "'")
-            .replace("&#39;", "'")
-            .replace("&rsquo;", "'")
-            .replace("&apos;", "'")
-        )
+        raw = raw.replace("\u2019", "'").replace("&#39;", "'").replace("&rsquo;", "'").replace("&apos;", "'")
         raw = re.sub(r"\s+", " ", raw)
-        if (
-            re.search(r"don'?t miss what'?s happening", raw)
-            and "people on x are the first to know" in raw
-        ):
+        if re.search(r"don'?t miss what'?s happening", raw) and "people on x are the first to know" in raw:
             return True
         soup = BeautifulSoup(html_content, "html.parser")
         text = soup.get_text(" ", strip=True)
@@ -2511,12 +2605,8 @@ class Fetcher:
         if not Fetcher._is_common_short_url(url):
             return url
 
-        req_proxies, _ = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
-        resolved = Fetcher._resolve_url_with_redirects(
-            url, proxies=req_proxies, timeout=timeout
-        )
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        resolved = Fetcher._resolve_url_with_redirects(url, proxies=req_proxies, timeout=timeout)
         if resolved and resolved != url:
             logger.info(f"Resolved short URL for processing: {url} -> {resolved}")
             return resolved
@@ -2538,9 +2628,7 @@ class Fetcher:
 
         proxies = None
         if config is not None:
-            proxies, _ = Fetcher._get_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         save_url = f"https://web.archive.org/save/{quote(url, safe=':/')}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -2829,9 +2917,7 @@ class Fetcher:
         return "".join(html_parts)
 
     @staticmethod
-    def _get_twitter_forced_proxies(
-        config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def _get_twitter_forced_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Get preferred proxies for Twitter/X.
         Priority: explicit mode > env vars > INI > WinHTTP.
@@ -2840,9 +2926,7 @@ class Fetcher:
         Returns:
             tuple: (req_proxies, pw_proxy)
         """
-        req_proxies, pw_proxy = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         if req_proxies or pw_proxy:
             return req_proxies, pw_proxy
 
@@ -2995,12 +3079,8 @@ class Fetcher:
 
         # Add styling for avatar images (60x60 size)
         # Avatar images are from sns-avatar-qc.xhscdn.com
-        for img in soup.find_all(
-            "img", src=re.compile(r"sns-avatar-qc\.xhscdn\.com", re.IGNORECASE)
-        ):
-            img["style"] = (
-                "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
-            )
+        for img in soup.find_all("img", src=re.compile(r"sns-avatar-qc\.xhscdn\.com", re.IGNORECASE)):
+            img["style"] = "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
             logger.debug(f"Applied 60x60 styling to avatar: {img.get('src', '')}")
 
         # Fix images with 403 errors by adding proper referrer meta tag
@@ -3118,11 +3198,7 @@ class Fetcher:
 
         soup = BeautifulSoup(html_content, "html.parser")
         page_text = soup.get_text(" ", strip=True)
-        if (
-            "安全验证" in page_text
-            or "验证你是否是真人" in page_text
-            or "captcha" in page_text.lower()
-        ):
+        if "安全验证" in page_text or "验证你是否是真人" in page_text or "captcha" in page_text.lower():
             logger.warning("Zhihu browser fallback returned a security verification page")
             return None
 
@@ -3210,9 +3286,7 @@ class Fetcher:
 
         for candidate_url in candidate_urls:
             try:
-                response = _requests_get_interruptibly(
-                    candidate_url, headers=headers, proxies=proxies, timeout=20
-                )
+                response = _requests_get_interruptibly(candidate_url, headers=headers, proxies=proxies, timeout=20)
                 response.raise_for_status()
                 decoded_text = Fetcher._decode_response_text(response)
                 if len(decoded_text) < 500:
@@ -3226,9 +3300,7 @@ class Fetcher:
         return None
 
     @staticmethod
-    def _fetch_zhihu_content(
-        url, config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def _fetch_zhihu_content(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Zhihu answer/article content via public API first.
         Falls back to browser-rendered DOM extraction when the API is blocked.
@@ -3238,9 +3310,7 @@ class Fetcher:
             custom_proxy_override = None
             logger.info("zhihu: Forcing 'no proxy' inside special handler")
 
-        req_proxies, _ = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         headers = Fetcher._get_zhihu_headers(url)
         cookie_header = AuthHandler.cookie_header_for_zhihu()
         if cookie_header:
@@ -3257,9 +3327,7 @@ class Fetcher:
                     f"{answer_id}?include=content,comment_count,voteup_count,"
                     "created_time,updated_time,author.headline,question.title"
                 )
-                response = _requests_get_interruptibly(
-                    api_url, headers=headers, proxies=req_proxies, timeout=30
-                )
+                response = _requests_get_interruptibly(api_url, headers=headers, proxies=req_proxies, timeout=30)
                 response.raise_for_status()
                 payload = response.json()
                 html_content = Fetcher._build_zhihu_html(
@@ -3282,9 +3350,7 @@ class Fetcher:
                     f"{article_id}?include=title,content,comment_count,voteup_count,"
                     "created,updated,author.name"
                 )
-                response = _requests_get_interruptibly(
-                    api_url, headers=headers, proxies=req_proxies, timeout=30
-                )
+                response = _requests_get_interruptibly(api_url, headers=headers, proxies=req_proxies, timeout=30)
                 response.raise_for_status()
                 payload = response.json()
                 html_content = Fetcher._build_zhihu_html(
@@ -3325,18 +3391,14 @@ class Fetcher:
             return alt_html
 
         try:
-            browser_html = Fetcher.fetch_with_browser(
-                url, config, proxy_mode_override, custom_proxy_override
-            )
+            browser_html = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
             return Fetcher._extract_zhihu_dom_content(browser_html, url)
         except Exception as e:
             logger.warning(f"Zhihu browser fallback failed: {e}")
             return None
 
     @staticmethod
-    def _fetch_twitter_oembed(
-        url, config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def _fetch_twitter_oembed(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Twitter/X tweet using the official oEmbed API.
         Returns HTML content from the oEmbed response.
@@ -3354,9 +3416,7 @@ class Fetcher:
         """
         article_url = Fetcher._normalize_twitter_article_url(url)
         if Fetcher._is_twitter_article_url(url):
-            logger.info(
-                "Direct Twitter Article URL detected; skipping oEmbed and fetching canonical article URL"
-            )
+            logger.info("Direct Twitter Article URL detected; skipping oEmbed and fetching canonical article URL")
             try:
                 article_html = Fetcher.fetch_with_browser(
                     article_url,
@@ -3370,12 +3430,8 @@ class Fetcher:
                     "Twitter Article browser fetch failed, trying status-id fallbacks: %s",
                     e,
                 )
-                req_proxies, _ = Fetcher._get_twitter_forced_proxies(
-                    config, proxy_mode_override, custom_proxy_override
-                )
-                return Fetcher._fetch_twitter_status_fallbacks(
-                    url, proxies=req_proxies, article_target_url=article_url
-                )
+                req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
+                return Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies, article_target_url=article_url)
             if article_html and not Fetcher._is_twitter_placeholder_content(article_html):
                 return Fetcher._tag_twitter_html_content(article_html, "article")
             return article_html
@@ -3386,18 +3442,12 @@ class Fetcher:
         logger.info(f"Fetching Twitter content via oEmbed API: {oembed_url}")
 
         # Prefer configured proxy for Twitter/X, but callers may still fall back to direct access.
-        req_proxies, _ = Fetcher._get_twitter_forced_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
         try:
-            response = _requests_get_interruptibly(
-                oembed_url, headers=headers, proxies=req_proxies, timeout=30
-            )
+            response = _requests_get_interruptibly(oembed_url, headers=headers, proxies=req_proxies, timeout=30)
             response.raise_for_status()
 
             data = response.json()
@@ -3407,24 +3457,16 @@ class Fetcher:
             author_name = data.get("author_name", "")
             provider_name = data.get("provider_name", "")
 
-            logger.info(
-                f"oEmbed response: author={author_name}, provider={provider_name}"
-            )
+            logger.info(f"oEmbed response: author={author_name}, provider={provider_name}")
 
             # oEmbed occasionally returns login-wall placeholder copy; do not trust it.
             if Fetcher._is_twitter_placeholder_content(html_content):
-                logger.info(
-                    "oEmbed returned placeholder/login text, trying syndication fallback"
-                )
-                fallback_html = Fetcher._fetch_twitter_status_fallbacks(
-                    url, proxies=req_proxies
-                )
+                logger.info("oEmbed returned placeholder/login text, trying syndication fallback")
+                fallback_html = Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies)
                 if fallback_html:
                     return fallback_html
 
-                logger.info(
-                    "Syndication fallback unavailable, falling back to browser fetch"
-                )
+                logger.info("Syndication fallback unavailable, falling back to browser fetch")
                 try:
                     browser_html = Fetcher.fetch_with_browser(
                         url,
@@ -3439,28 +3481,18 @@ class Fetcher:
                         e,
                     )
                     browser_html = None
-                if browser_html and not Fetcher._is_twitter_placeholder_content(
-                    browser_html
-                ):
+                if browser_html and not Fetcher._is_twitter_placeholder_content(browser_html):
                     return Fetcher._tag_twitter_html_content(browser_html, "article")
-                fallback_html = Fetcher._fetch_twitter_status_fallbacks(
-                    url, proxies=req_proxies
-                )
+                fallback_html = Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies)
                 if fallback_html:
                     return fallback_html
-                logger.warning(
-                    "Browser fallback still returned placeholder/empty content for Twitter/X"
-                )
+                logger.warning("Browser fallback still returned placeholder/empty content for Twitter/X")
                 return None
 
             # Check if this is a Twitter Article (oEmbed only returns link)
             if Fetcher._is_twitter_article_only_link(html_content):
-                logger.info(
-                    "oEmbed returned link-only content (Twitter Article), fetching with browser..."
-                )
-                article_target_url = Fetcher._extract_twitter_article_target(
-                    url, html_content, proxies=req_proxies
-                )
+                logger.info("oEmbed returned link-only content (Twitter Article), fetching with browser...")
+                article_target_url = Fetcher._extract_twitter_article_target(url, html_content, proxies=req_proxies)
                 # Fetch directly with browser and clean content
                 try:
                     article_html = Fetcher.fetch_with_browser(
@@ -3476,9 +3508,7 @@ class Fetcher:
                         e,
                     )
                     article_html = None
-                if article_html and not Fetcher._is_twitter_placeholder_content(
-                    article_html
-                ):
+                if article_html and not Fetcher._is_twitter_placeholder_content(article_html):
                     return Fetcher._tag_twitter_html_content(article_html, "article")
                 fallback_html = Fetcher._fetch_twitter_status_fallbacks(
                     url,
@@ -3491,12 +3521,8 @@ class Fetcher:
 
             return html_content
         except requests.exceptions.RequestException as e:
-            if Fetcher._should_retry_twitter_without_proxy(
-                proxy_mode_override, req_proxies, e
-            ):
-                logger.warning(
-                    f"oEmbed proxy request failed; retrying Twitter/X without proxy: {e}"
-                )
+            if Fetcher._should_retry_twitter_without_proxy(proxy_mode_override, req_proxies, e):
+                logger.warning(f"oEmbed proxy request failed; retrying Twitter/X without proxy: {e}")
                 return Fetcher._fetch_twitter_oembed(
                     url,
                     config,
@@ -3504,29 +3530,19 @@ class Fetcher:
                     custom_proxy_override=None,
                 )
             logger.warning(f"oEmbed API failed ({e}), trying status-id fallbacks")
-            fallback_html = Fetcher._fetch_twitter_status_fallbacks(
-                url, proxies=req_proxies
-            )
+            fallback_html = Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies)
             if fallback_html:
                 return fallback_html
             logger.warning("Status-id fallbacks unavailable, falling back to browser fetch")
             return None
 
     @staticmethod
-    def _fetch_wechat_article(
-        url, config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def _fetch_wechat_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
         from playwright.sync_api import sync_playwright
 
-        req_proxies, pw_proxy = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         with sync_playwright() as p:
-            browser = (
-                p.chromium.launch(headless=True, proxy=pw_proxy)
-                if pw_proxy
-                else p.chromium.launch(headless=True)
-            )
+            browser = p.chromium.launch(headless=True, proxy=pw_proxy) if pw_proxy else p.chromium.launch(headless=True)
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile MicroMessenger/8.0.30"
             )
@@ -3572,9 +3588,7 @@ class Fetcher:
     @staticmethod
     def _is_twitter_url(url):
         """Check if URL is from Twitter/X."""
-        return bool(
-            re.match(r"^https?://(www\.)?(twitter|x)\.com/", url, re.IGNORECASE)
-        )
+        return bool(re.match(r"^https?://(www\.)?(twitter|x)\.com/", url, re.IGNORECASE))
 
     @staticmethod
     def _create_stealth_context(browser, url=None, auth_site_name=None):
@@ -3626,9 +3640,7 @@ class Fetcher:
 
         # If auth state is available for this site, use it; otherwise fallback to clean context.
         if auth_site_name:
-            context = AuthHandler.create_context_with_auth(
-                browser, auth_site_name, **context_options
-            )
+            context = AuthHandler.create_context_with_auth(browser, auth_site_name, **context_options)
         else:
             context = browser.new_context(**context_options)
 
@@ -3662,21 +3674,15 @@ class Fetcher:
             else url
         )
 
-        is_zhihu_url = bool(
-            re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
-        )
+        is_zhihu_url = bool(re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE))
 
         # For Twitter/X URLs, prefer detected proxy settings first and retry direct if needed.
         is_twitter_url = Fetcher._is_twitter_url(url)
         if is_twitter_url:
-            _, pw_proxy = Fetcher._get_twitter_forced_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            _, pw_proxy = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
             logger.info("Twitter/X URL detected - using preferred proxy settings")
         else:
-            _, pw_proxy = Fetcher._get_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         if pw_proxy:
             logger.info(f"Playwright Proxy: {pw_proxy}")
@@ -3686,9 +3692,7 @@ class Fetcher:
         with sync_playwright() as p:
             browser = None
             profile_context = None
-            twitter_profile_dir = (
-                AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
-            )
+            twitter_profile_dir = AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
 
             # Prefer persistent Twitter profile if it exists (more reliable than storage_state alone).
             if (
@@ -3705,12 +3709,8 @@ class Fetcher:
                         twitter_profile_dir, channel="chrome", **persistent_args
                     )
                 except Exception as e:
-                    logger.info(
-                        f"Chrome channel unavailable for twitter profile fetch, fallback to Chromium: {e}"
-                    )
-                    profile_context = p.chromium.launch_persistent_context(
-                        twitter_profile_dir, **persistent_args
-                    )
+                    logger.info(f"Chrome channel unavailable for twitter profile fetch, fallback to Chromium: {e}")
+                    profile_context = p.chromium.launch_persistent_context(twitter_profile_dir, **persistent_args)
                 context = profile_context
                 page = context.pages[0] if context.pages else context.new_page()
             else:
@@ -3735,9 +3735,7 @@ class Fetcher:
                     auth_site_name = "twitter"
                 elif is_zhihu_url:
                     auth_site_name = "zhihu"
-                context = Fetcher._create_stealth_context(
-                    browser, url, auth_site_name=auth_site_name
-                )
+                context = Fetcher._create_stealth_context(browser, url, auth_site_name=auth_site_name)
                 page = context.new_page()
 
             try:
@@ -3773,9 +3771,7 @@ class Fetcher:
 
                 if is_twitter_url:
                     if Fetcher._is_twitter_placeholder_content(content):
-                        logger.info(
-                            "Browser returned placeholder/login content, trying syndication fallback"
-                        )
+                        logger.info("Browser returned placeholder/login content, trying syndication fallback")
                         req_proxies, _ = Fetcher._get_twitter_forced_proxies(
                             config, proxy_mode_override, custom_proxy_override
                         )
@@ -3785,9 +3781,7 @@ class Fetcher:
                         if syndication_html:
                             logger.info("Using Twitter/X syndication fallback content")
                             return syndication_html
-                        fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                            twitter_target_url, proxies=req_proxies
-                        )
+                        fxapi_html = Fetcher._fetch_twitter_fxapi_html(twitter_target_url, proxies=req_proxies)
                         if fxapi_html:
                             logger.info("Using fxTwitter API fallback content")
                             return fxapi_html
@@ -3801,16 +3795,12 @@ class Fetcher:
                         logger.info("Cleaning Twitter Article content...")
                         content = Fetcher._clean_twitter_article_content(content)
 
-                    dom_content = Fetcher._extract_twitter_dom_content(
-                        content, source_url=twitter_target_url
-                    )
+                    dom_content = Fetcher._extract_twitter_dom_content(content, source_url=twitter_target_url)
                     if dom_content:
                         logger.info("Using preserved Twitter/X DOM content")
                         return dom_content
 
-                    structured = Fetcher._extract_twitter_structured_content(
-                        content, source_url=twitter_target_url
-                    )
+                    structured = Fetcher._extract_twitter_structured_content(content, source_url=twitter_target_url)
                     if structured:
                         logger.info("Using structured Twitter/X content extraction")
                         return Fetcher._tag_twitter_html_content(
@@ -3820,9 +3810,7 @@ class Fetcher:
                 return content
             except Exception as e:
                 if is_twitter_url:
-                    if Fetcher._should_retry_twitter_without_proxy(
-                        proxy_mode_override, pw_proxy, e
-                    ):
+                    if Fetcher._should_retry_twitter_without_proxy(proxy_mode_override, pw_proxy, e):
                         logger.warning(
                             "Browser fetch failed through Twitter/X proxy; retrying without proxy: %s",
                             e,
@@ -3834,15 +3822,11 @@ class Fetcher:
                             custom_proxy_override=None,
                             is_twitter_article=is_twitter_article,
                         )
-                    logger.warning(
-                        f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}"
-                    )
+                    logger.warning(f"Browser fetch failed for Twitter/X, trying fxTwitter fallback: {e}")
                     req_proxies, _ = Fetcher._get_twitter_forced_proxies(
                         config, proxy_mode_override, custom_proxy_override
                     )
-                    fxapi_html = Fetcher._fetch_twitter_fxapi_html(
-                        twitter_target_url, proxies=req_proxies
-                    )
+                    fxapi_html = Fetcher._fetch_twitter_fxapi_html(twitter_target_url, proxies=req_proxies)
                     if fxapi_html:
                         logger.info("Using fxTwitter API fallback content")
                         return fxapi_html
@@ -3927,12 +3911,7 @@ class Fetcher:
                 for image in embed_data.get("images", []) or []:
                     if not isinstance(image, dict):
                         continue
-                    image_url = (
-                        image.get("fullsize")
-                        or image.get("thumb")
-                        or image.get("url")
-                        or image.get("src")
-                    )
+                    image_url = image.get("fullsize") or image.get("thumb") or image.get("url") or image.get("src")
                     if not image_url:
                         image_obj = image.get("image") or {}
                         image_url = (
@@ -3945,8 +3924,7 @@ class Fetcher:
                             image_ref = image_obj.get("ref", {}).get("$link", "")
                             if image_ref and fallback_did:
                                 image_url = (
-                                    "https://cdn.bsky.app/img/feed_fullsize/plain/"
-                                    f"{fallback_did}/{image_ref}@jpeg"
+                                    "https://cdn.bsky.app/img/feed_fullsize/plain/" f"{fallback_did}/{image_ref}@jpeg"
                                 )
                     append_image(image_url, image.get("alt") or "")
                 return
@@ -3993,7 +3971,7 @@ class Fetcher:
                 alt_text = escape(block.get("alt") or "")
                 html_parts.append(
                     "<p class='surf-thread-image'>"
-                    f"<img src=\"{image_url}\" alt=\"{alt_text}\" style=\"max-width: 100%; margin: 0.5em 0;\">"
+                    f'<img src="{image_url}" alt="{alt_text}" style="max-width: 100%; margin: 0.5em 0;">'
                     "</p>"
                 )
             elif block_type == "external":
@@ -4007,12 +3985,10 @@ class Fetcher:
                 if thumb:
                     html_parts.append(
                         "<p class='surf-thread-image'>"
-                        f"<img src=\"{thumb}\" alt=\"{title}\" style=\"max-width: 100%; margin: 0.5em 0;\">"
+                        f'<img src="{thumb}" alt="{title}" style="max-width: 100%; margin: 0.5em 0;">'
                         "</p>"
                     )
-                html_parts.append(
-                    f"<p><strong>Link:</strong> <a href=\"{uri}\">{title}</a></p>"
-                )
+                html_parts.append(f'<p><strong>Link:</strong> <a href="{uri}">{title}</a></p>')
                 if description:
                     html_parts.append(f"<p>{description}</p>")
                 html_parts.append("</div>")
@@ -4026,9 +4002,7 @@ class Fetcher:
                         "</p>"
                     )
                 if playlist:
-                    html_parts.append(
-                        f"<p><a href=\"{playlist}\">View video playlist</a></p>"
-                    )
+                    html_parts.append(f'<p><a href="{playlist}">View video playlist</a></p>')
         html_parts.append("</div>")
         return "".join(html_parts)
 
@@ -4054,7 +4028,7 @@ class Fetcher:
         if media_html:
             html_parts.append(media_html)
         if permalink:
-            html_parts.append(f"<p><a href=\"{permalink}\">View post</a></p>")
+            html_parts.append(f'<p><a href="{permalink}">View post</a></p>')
         html_parts.append("</section>")
         return "".join(html_parts)
 
@@ -4167,10 +4141,10 @@ class Fetcher:
 
         html_parts = [
             "<!DOCTYPE html>",
-            "<html lang=\"en\"><head>",
-            "<meta charset=\"utf-8\">",
+            '<html lang="en"><head>',
+            '<meta charset="utf-8">',
             f"<title>{site_label} Post by {author}</title>",
-            f"<meta name=\"surf-source-site\" content=\"{escape(site_name)}\">",
+            f'<meta name="surf-source-site" content="{escape(site_name)}">',
             "</head><body><article>",
             f"<h1>{site_label} Post</h1>",
         ]
@@ -4187,7 +4161,7 @@ class Fetcher:
             for item in after_items:
                 html_parts.append(Fetcher._render_thread_post_block(item, "Later Reply"))
             html_parts.append("</section>")
-        html_parts.append(f"<p><a href=\"{escape(page_url)}\">View on {site_label}</a></p>")
+        html_parts.append(f'<p><a href="{escape(page_url)}">View on {site_label}</a></p>')
         html_parts.append("</article></body></html>")
         return "".join(html_parts)
 
@@ -4378,9 +4352,7 @@ class Fetcher:
         try:
             from playwright.sync_api import sync_playwright
 
-            _, pw_proxy = Fetcher._get_twitter_forced_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            _, pw_proxy = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
 
             with sync_playwright() as p:
                 launch_args = {
@@ -4391,9 +4363,7 @@ class Fetcher:
                     launch_args["proxy"] = pw_proxy
 
                 browser = p.chromium.launch(**launch_args)
-                context = Fetcher._create_stealth_context(
-                    browser, url, auth_site_name="twitter"
-                )
+                context = Fetcher._create_stealth_context(browser, url, auth_site_name="twitter")
                 page = context.new_page()
 
                 try:
@@ -4443,9 +4413,7 @@ class Fetcher:
                     if current_index is None or current_index < 0:
                         current_index = len(items) - 1
 
-                    return Fetcher._extract_same_author_thread_items(
-                        items, current_index, thread_mode
-                    )
+                    return Fetcher._extract_same_author_thread_items(items, current_index, thread_mode)
                 finally:
                     context.close()
                     browser.close()
@@ -4488,8 +4456,7 @@ class Fetcher:
             session = requests.Session()
             # Don't use allow_redirects=True initially to see the redirect chain
             response = _session_get_interruptibly(
-                session,
-                url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
+                session, url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
             )
             final_url = response.url
 
@@ -4501,7 +4468,9 @@ class Fetcher:
                 # The URL might still be a redirect page, let's check the response content
                 response_text_lower = response.text.lower()
                 if "xiaohongshu" in response_text_lower or "redirect" in response_text_lower:
-                    logger.warning("Response appears to contain xiaohongshu or redirect, trying to extract URL from content")
+                    logger.warning(
+                        "Response appears to contain xiaohongshu or redirect, trying to extract URL from content"
+                    )
                     # Try to find redirect URL in the HTML - look for various patterns
                     patterns = [
                         r'https://[^"\s<>]+xiaohongshu\.com/explore/[^"\s<>]*',
@@ -4526,9 +4495,7 @@ class Fetcher:
 
             # Rebuild the URL with only xsec_token
             cleaned_query = urlencode(cleaned_params, doseq=True)
-            cleaned_url = urlunparse(
-                parsed._replace(query=cleaned_query)
-            )
+            cleaned_url = urlunparse(parsed._replace(query=cleaned_query))
 
             logger.info(f"Cleaned URL: {cleaned_url}")
             return final_url, cleaned_url
@@ -4536,6 +4503,7 @@ class Fetcher:
         except Exception as e:
             logger.warning(f"Failed to resolve xhslink URL {url}: {e}")
             import traceback
+
             logger.debug(f"Traceback: {traceback.format_exc()}")
             return None, None
 
@@ -4604,9 +4572,7 @@ class Fetcher:
         return image_urls[1:] + image_urls[:1]
 
     @staticmethod
-    def _fetch_xiaohongshu(
-        url, config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def _fetch_xiaohongshu(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Xiaohongshu (小红书) content with authentication support.
         Supports both direct URLs and xhslink.com short URLs.
@@ -4614,9 +4580,7 @@ class Fetcher:
         """
         from playwright.sync_api import sync_playwright
 
-        req_proxies, pw_proxy = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         # Check if this is a short link and resolve it
         original_short_url = None
@@ -4640,11 +4604,7 @@ class Fetcher:
             return None
 
         with sync_playwright() as p:
-            browser = (
-                p.chromium.launch(headless=True, proxy=pw_proxy)
-                if pw_proxy
-                else p.chromium.launch(headless=True)
-            )
+            browser = p.chromium.launch(headless=True, proxy=pw_proxy) if pw_proxy else p.chromium.launch(headless=True)
 
             # Try to use saved auth state
             context = AuthHandler.create_context_with_auth(
@@ -4951,15 +4911,8 @@ class Fetcher:
                 content_image_key_map = {}
                 content_image_list = []
                 for img in content_soup.find_all("img"):
-                    img_url = (
-                        img.get("src")
-                        or img.get("data-src")
-                        or img.get("data-original")
-                        or ""
-                    ).strip()
-                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                        img_url
-                    )
+                    img_url = (img.get("src") or img.get("data-src") or img.get("data-original") or "").strip()
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(img_url)
                     if (
                         canonical_img_url
                         and "xhscdn.com" in canonical_img_url
@@ -4975,9 +4928,7 @@ class Fetcher:
                 ordered_content_images = []
                 seen_ordered_images = set()
                 for img_url in images:
-                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                        img_url
-                    )
+                    canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(img_url)
                     match_key = Fetcher._xiaohongshu_image_match_key(img_url)
                     if (
                         canonical_img_url
@@ -4986,16 +4937,9 @@ class Fetcher:
                     ):
                         ordered_content_images.append(content_image_map[canonical_img_url])
                         seen_ordered_images.add(canonical_img_url)
-                    elif (
-                        match_key
-                        and match_key in content_image_key_map
-                    ):
+                    elif match_key and match_key in content_image_key_map:
                         matched_content_url = content_image_key_map[match_key]
-                        matched_canonical = (
-                            Fetcher._canonicalize_xiaohongshu_image_url(
-                                matched_content_url
-                            )
-                        )
+                        matched_canonical = Fetcher._canonicalize_xiaohongshu_image_url(matched_content_url)
                         if matched_canonical and matched_canonical not in seen_ordered_images:
                             ordered_content_images.append(matched_content_url)
                             seen_ordered_images.add(matched_canonical)
@@ -5006,42 +4950,26 @@ class Fetcher:
                     # This avoids unrelated JSON images and duplicate re-insertion.
                     gallery_images = content_image_list[:]
                     for img_url in gallery_images:
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(img_url)
                         if canonical_img_url:
                             seen_ordered_images.add(canonical_img_url)
 
                 if not gallery_images:
                     seen_gallery_images = set()
                     for img_url in images:
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
-                        if (
-                            canonical_img_url
-                            and canonical_img_url not in seen_gallery_images
-                        ):
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(img_url)
+                        if canonical_img_url and canonical_img_url not in seen_gallery_images:
                             gallery_images.append(img_url)
                             seen_gallery_images.add(canonical_img_url)
 
-                gallery_images = Fetcher._normalize_xiaohongshu_gallery_order(
-                    gallery_images
-                )
+                gallery_images = Fetcher._normalize_xiaohongshu_gallery_order(gallery_images)
 
                 if gallery_images:
                     # Rebuild note images once and remove original in-content copies
                     # so the note body keeps exactly one gallery.
                     for img in content_soup.find_all("img"):
-                        img_url = (
-                            img.get("src")
-                            or img.get("data-src")
-                            or img.get("data-original")
-                            or ""
-                        ).strip()
-                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(
-                            img_url
-                        )
+                        img_url = (img.get("src") or img.get("data-src") or img.get("data-original") or "").strip()
+                        canonical_img_url = Fetcher._canonicalize_xiaohongshu_image_url(img_url)
                         if (
                             canonical_img_url
                             and "xhscdn.com" in canonical_img_url
@@ -5080,6 +5008,7 @@ class Fetcher:
             except Exception as e:
                 logger.error(f"Xiaohongshu handler failed: {e}")
                 import traceback
+
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
             finally:
@@ -5150,6 +5079,7 @@ class Fetcher:
             page = context.new_page()
 
             try:
+
                 def _normalize_ncpssd_text(raw):
                     text = re.sub(r"\s+", " ", str(raw or "")).strip()
                     text = re.sub(r"^(作\s*者\s*[：:])", "", text)
@@ -5192,11 +5122,7 @@ class Fetcher:
                     preferred = OutputHandler._safe_filename_title(preferred_basename) if preferred_basename else None
                     safe_name = f"{(preferred or derived_stem)}.pdf"
 
-                    resolved_output = (
-                        resolve_user_path(output_path)
-                        if output_path
-                        else None
-                    )
+                    resolved_output = resolve_user_path(output_path) if output_path else None
                     if resolved_output == "-":
                         logger.warning(
                             "NCPSSD direct PDF download does not support stdout output. "
@@ -5205,10 +5131,7 @@ class Fetcher:
                         resolved_output = None
 
                     if resolved_output:
-                        is_dir_target = (
-                            resolved_output.endswith(("/", "\\"))
-                            or os.path.isdir(resolved_output)
-                        )
+                        is_dir_target = resolved_output.endswith(("/", "\\")) or os.path.isdir(resolved_output)
                         if is_dir_target:
                             os.makedirs(resolved_output, exist_ok=True)
                             return os.path.join(resolved_output, safe_name)
@@ -5230,36 +5153,30 @@ class Fetcher:
                 page.goto(effective_url, wait_until="networkidle", timeout=60000)
                 page.wait_for_timeout(2000)
                 try:
-                    page_meta = page.evaluate(
-                        """() => ({
+                    page_meta = page.evaluate("""() => ({
                             title: (document.querySelector('#h2_title_c') || document.querySelector('h1') || {}).innerText || '',
                             creator: (document.querySelector('#p_creator') || {}).innerText || '',
                             media: (document.querySelector('#p_media') || {}).innerText || '',
                             typeName: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
                             lngid: (document.querySelector('#ftl_urlId') || {}).value || '',
                             pageType: window.pageType || 2,
-                        })"""
-                    )
+                        })""")
                     if not any((page_meta or {}).get(k) for k in ("title", "creator", "media")):
                         page.wait_for_timeout(1200)
-                        page_meta = page.evaluate(
-                            """() => ({
+                        page_meta = page.evaluate("""() => ({
                                 title: (document.querySelector('#h2_title_c') || document.querySelector('h1') || {}).innerText || '',
                                 creator: (document.querySelector('#p_creator') || {}).innerText || '',
                                 media: (document.querySelector('#p_media') || {}).innerText || '',
                                 typeName: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
                                 lngid: (document.querySelector('#ftl_urlId') || {}).value || '',
                                 pageType: window.pageType || 2,
-                            })"""
-                        )
+                            })""")
                     # Some article pages populate metadata via async API only; fallback to that endpoint.
                     if not any((page_meta or {}).get(k) for k in ("title", "creator", "media")):
                         try:
                             lngid = str((page_meta or {}).get("lngid") or "").strip()
                             if lngid:
-                                table_endpoint = (
-                                    f"https://{urlparse(effective_url).netloc}/articleinfoHandler/getjournalarticletable"
-                                )
+                                table_endpoint = f"https://{urlparse(effective_url).netloc}/articleinfoHandler/getjournalarticletable"
                                 table_payload = {
                                     "lngid": lngid,
                                     "type": (page_meta.get("typeName") or "中文期刊文章"),
@@ -5300,7 +5217,9 @@ class Fetcher:
                         timeout=15000,
                     )
                 except Exception:
-                    logger.info("NCPSSD: a_down click handler not observed before timeout; continuing with best effort click")
+                    logger.info(
+                        "NCPSSD: a_down click handler not observed before timeout; continuing with best effort click"
+                    )
 
                 # The site binds a click handler to the visible "全文下载" control.
                 button = page.locator("a:has-text('全文下载'), button:has-text('全文下载')").first
@@ -5365,8 +5284,7 @@ class Fetcher:
                 # /Literature/readDownloadUrl -> ms.util.getMinioSign() -> GET data.url with sign/site/dotype headers
                 if not pdf_url:
                     try:
-                        download_meta = page.evaluate(
-                            """() => ({
+                        download_meta = page.evaluate("""() => ({
                                 type: (document.querySelector('#ftl_urlTypename') || {}).value || '中文期刊文章',
                                 articleid: (document.querySelector('#ftl_urlId') || {}).value || '',
                                 titleC: (document.querySelector('#h2_title_c') || {}).innerText || '',
@@ -5375,8 +5293,7 @@ class Fetcher:
                                 periodname: (((document.querySelector('#p_media') || {}).innerText || '')
                                     .replace('出 版 物：', '').trim()),
                                 pageType: window.pageType || 2,
-                            })"""
-                        )
+                            })""")
                         articleid = str((download_meta or {}).get("articleid") or "").strip()
                         if articleid:
                             rd_payload = {
@@ -5392,9 +5309,7 @@ class Fetcher:
                                 "showWriter": download_meta.get("showWriter") or "",
                                 "pageType": download_meta.get("pageType") or 2,
                             }
-                            rd_endpoint = (
-                                f"https://{urlparse(effective_url).netloc}/Literature/readDownloadUrl"
-                            )
+                            rd_endpoint = f"https://{urlparse(effective_url).netloc}/Literature/readDownloadUrl"
                             rd_resp = context.request.post(
                                 rd_endpoint,
                                 data=json.dumps(rd_payload, ensure_ascii=False),
@@ -5419,8 +5334,7 @@ class Fetcher:
                                 pdf_url = str(candidate).strip()
                                 logger.info(f"NCPSSD: readDownloadUrl (explicit) url = {pdf_url}")
 
-                                sign = page.evaluate(
-                                    """() => new Promise((resolve) => {
+                                sign = page.evaluate("""() => new Promise((resolve) => {
                                         try {
                                             if (window.ms && ms.util && typeof ms.util.getMinioSign === 'function') {
                                                 ms.util.getMinioSign(function (s) { resolve(s || ''); });
@@ -5430,8 +5344,7 @@ class Fetcher:
                                         } catch (e) {
                                             resolve('');
                                         }
-                                    })"""
-                                )
+                                    })""")
                                 if sign:
                                     pdf_resp = context.request.get(
                                         pdf_url,
@@ -5461,9 +5374,7 @@ class Fetcher:
 
                 # Path B3: fallback path -> /Literature/readurl?id=... -> final PDF URL.
                 article_id = (
-                    page.locator("#ftl_urlId").input_value().strip()
-                    if page.locator("#ftl_urlId").count() > 0
-                    else ""
+                    page.locator("#ftl_urlId").input_value().strip() if page.locator("#ftl_urlId").count() > 0 else ""
                 )
                 logger.info(f"NCPSSD: article id = {article_id or '<empty>'}")
                 if not article_id:
@@ -5670,9 +5581,7 @@ class Fetcher:
         Prefers language-specific READMEs (e.g., README_zh.md) if available.
         Removes permalink anchors (aria-label^="Permalink:") to clean up output.
         """
-        direct_markdown = Fetcher._fetch_github_markdown(
-            url, config, proxy_mode_override, custom_proxy_override
-        )
+        direct_markdown = Fetcher._fetch_github_markdown(url, config, proxy_mode_override, custom_proxy_override)
         if direct_markdown:
             return direct_markdown
 
@@ -5805,8 +5714,8 @@ class Fetcher:
 
                 html_parts = [
                     "<!DOCTYPE html>",
-                    "<html lang=\"en\"><head>",
-                    "<meta charset=\"utf-8\">",
+                    '<html lang="en"><head>',
+                    '<meta charset="utf-8">',
                     f"<title>{title}</title>",
                     "</head><body>",
                     f"<h1>{title}</h1>",
@@ -5815,7 +5724,7 @@ class Fetcher:
                 if description:
                     html_parts.append(f"<p><strong>Description:</strong> {description}</p>")
 
-                html_parts.append(f"<p><strong>Repository:</strong> <a href=\"{url}\">{url}</a></p>")
+                html_parts.append(f'<p><strong>Repository:</strong> <a href="{url}">{url}</a></p>')
                 html_parts.append(html_content)
                 html_parts.append("</body></html>")
 
@@ -5943,8 +5852,8 @@ class Fetcher:
 
                 html_parts = [
                     "<!DOCTYPE html>",
-                    "<html lang=\"en\"><head>",
-                    "<meta charset=\"utf-8\">",
+                    '<html lang="en"><head>',
+                    '<meta charset="utf-8">',
                     f"<title>{title}</title>",
                     "<style>",
                     "table { border-collapse: collapse; margin: 1em 0; }",
@@ -6002,7 +5911,7 @@ class Fetcher:
 
             headers = {
                 "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             }
 
             # Resolve handle to DID
@@ -6039,12 +5948,7 @@ class Fetcher:
                 return None
 
             author = post.get("author", {})
-            original_author_key = (
-                author.get("did")
-                or author.get("handle")
-                or author.get("displayName")
-                or "unknown"
-            )
+            original_author_key = author.get("did") or author.get("handle") or author.get("displayName") or "unknown"
 
             thread_items = []
 
@@ -6104,10 +6008,7 @@ class Fetcher:
                     reply_post = cursor.get("post", {})
                     reply_author = reply_post.get("author", {})
                     reply_author_key = (
-                        reply_author.get("did")
-                        or reply_author.get("handle")
-                        or reply_author.get("displayName")
-                        or ""
+                        reply_author.get("did") or reply_author.get("handle") or reply_author.get("displayName") or ""
                     )
                     if reply_author_key != original_author_key:
                         break
@@ -6115,9 +6016,7 @@ class Fetcher:
                     nested_replies = cursor.get("replies", [])
                     cursor = nested_replies[0] if nested_replies else None
 
-            html_content = Fetcher._render_social_thread_html(
-                "bluesky", url, thread_items, current_index
-            )
+            html_content = Fetcher._render_social_thread_html("bluesky", url, thread_items, current_index)
 
             return html_content
 
@@ -6259,18 +6158,14 @@ class Fetcher:
             proxy_mode_override, custom_proxy_override = Fetcher._get_v2ex_proxy_overrides(
                 config, proxy_mode_override, custom_proxy_override
             )
-            req_proxies, _ = Fetcher._get_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
             include_replies = fetch_thread is not None and fetch_thread is not False
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             }
 
-            response = _requests_get_interruptibly(
-                url, headers=headers, proxies=req_proxies, timeout=20
-            )
+            response = _requests_get_interruptibly(url, headers=headers, proxies=req_proxies, timeout=20)
             response.raise_for_status()
             html_content = Fetcher._decode_response_text(response)
             first_page = Fetcher._extract_v2ex_topic_page(
@@ -6281,9 +6176,7 @@ class Fetcher:
 
             markdown_lines = first_page["markdown_lines"]
             replies = list(first_page["replies"])
-            seen_reply_keys = {
-                (reply["floor"], reply["author"], reply["markdown"]) for reply in replies
-            }
+            seen_reply_keys = {(reply["floor"], reply["author"], reply["markdown"]) for reply in replies}
 
             if include_replies and first_page["max_page"] > 1:
                 for page_number in range(2, first_page["max_page"] + 1):
@@ -6500,11 +6393,7 @@ class ContentProcessor:
         # Chinese Markdown often starts with badges, URLs and English project names.
         # Require enough CJK text plus a modest share of the language-bearing sample
         # so mixed Chinese docs do not get sent through a slow, unnecessary translation.
-        return (
-            cjk_count >= 80
-            and cjk_count / language_chars >= 0.10
-            and kana_hangul_count <= cjk_count
-        )
+        return cjk_count >= 80 and cjk_count / language_chars >= 0.10 and kana_hangul_count <= cjk_count
 
     @staticmethod
     def _preprocess_html(html):
@@ -6516,9 +6405,7 @@ class ContentProcessor:
         for img in soup.find_all("img"):
             # Normalize src
             src = img.get("src")
-            should_replace_src = not src or (
-                isinstance(src, str) and src.startswith("data:image")
-            )
+            should_replace_src = not src or (isinstance(src, str) and src.startswith("data:image"))
             if should_replace_src:
                 for attr in [
                     "data-src",
@@ -6572,9 +6459,7 @@ class ContentProcessor:
 
         # If not found in body, try in main/article/section containers
         if not node:
-            for container in preprocessed_soup.find_all(
-                ["article", "main", "section", "div"]
-            ):
+            for container in preprocessed_soup.find_all(["article", "main", "section", "div"]):
                 if container.get("id") and container.get("id").lower() in [
                     "content",
                     "main",
@@ -6595,12 +6480,8 @@ class ContentProcessor:
                 if node:
                     break
             if not node:
-                for container in preprocessed_soup.find_all(
-                    ["article", "main", "section"]
-                ):
-                    node = container.find(
-                        string=lambda t: fingerprint in t if t else False
-                    )
+                for container in preprocessed_soup.find_all(["article", "main", "section"]):
+                    node = container.find(string=lambda t: fingerprint in t if t else False)
                     if node:
                         break
 
@@ -6619,8 +6500,7 @@ class ContentProcessor:
 
             # Stop if we hit a semantic article boundary
             if curr.name in ["article", "main"] or (
-                curr.get("id")
-                and curr.get("id").lower() in ["main", "content", "article"]
+                curr.get("id") and curr.get("id").lower() in ["main", "content", "article"]
             ):
                 best_candidate = curr
                 break
@@ -6641,14 +6521,8 @@ class ContentProcessor:
         # Site-specific HTML that is already normalized should bypass Readability.
         # Xiaohongshu note pages are especially fragile here: short text + image galleries
         # often make Readability keep only a tiny text node and drop the images.
-        source_site_tag = preprocessed_soup.find(
-            "meta", attrs={"name": "surf-source-site"}
-        )
-        source_site = (
-            source_site_tag.get("content", "").strip().lower()
-            if source_site_tag
-            else ""
-        )
+        source_site_tag = preprocessed_soup.find("meta", attrs={"name": "surf-source-site"})
+        source_site = source_site_tag.get("content", "").strip().lower() if source_site_tag else ""
         if source_site in {"xiaohongshu", "twitter", "bluesky", "weibo", "threads"}:
             article = preprocessed_soup.find("article")
             preserved_html = str(article) if article else str(preprocessed_soup)
@@ -6667,14 +6541,10 @@ class ContentProcessor:
             logger.info(f"Readability summary length: {len(summary_html)}")
 
             # 2. Rescue uncleaned content using fingerprint
-            rescued_html = ContentProcessor._rescue_content(
-                preprocessed_soup, summary_html
-            )
+            rescued_html = ContentProcessor._rescue_content(preprocessed_soup, summary_html)
 
             img_count = rescued_html.count("<img")
-            logger.info(
-                f"Extracted {img_count} images. Rescued HTML length: {len(rescued_html)}"
-            )
+            logger.info(f"Extracted {img_count} images. Rescued HTML length: {len(rescued_html)}")
 
             # Debug: log first 200 chars of rescued HTML
             if rescued_html:
@@ -6682,20 +6552,14 @@ class ContentProcessor:
 
             return title, rescued_html
         except Exception as e:
-            logger.warning(
-                f"Readability/Rescue failed: {e}. Falling back to Trafilatura."
-            )
+            logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
 
         # Final Fallback: Trafilatura
         try:
-            content_html = trafilatura.extract(
-                str(preprocessed_soup), output_format="html", include_images=True
-            )
+            content_html = trafilatura.extract(str(preprocessed_soup), output_format="html", include_images=True)
             if content_html:
                 img_count = content_html.count("<img")
-                logger.info(
-                    f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}"
-                )
+                logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
                 logger.info(f"Trafilatura content preview: {content_html[:200]}")
                 return Document(html).title(), content_html
         except Exception as e:
@@ -6711,6 +6575,7 @@ class ContentProcessor:
         """
         logger.info("Converting to Markdown...")
         html = OutputHandler._strip_twitter_blockquote_wrapper(html)
+        html = _prepare_inline_svgs_for_markdown(html)
         # strip=['a'] can be used to remove links if desired, but usually we keep them.
         # heading_style='ATX' ensures # style headings
         return markdownify.markdownify(html, heading_style="ATX")
@@ -6744,9 +6609,7 @@ class ContentProcessor:
         return chunks
 
     @classmethod
-    def translate_if_needed(
-        cls, text, title=None, target_lang="zh-cn", config=None, llm_provider=None
-    ):
+    def translate_if_needed(cls, text, title=None, target_lang="zh-cn", config=None, llm_provider=None):
         """
         Detects language and translates (content + title) if necessary using chunking.
 
@@ -6764,9 +6627,7 @@ class ContentProcessor:
             lang = detect(text[:1000])  # Detect based on first 1000 chars
             logger.info(f"Detected language: {lang}")
         except Exception as e:
-            logger.warning(
-                f"Language detection failed: {e}. Assuming translation needed."
-            )
+            logger.warning(f"Language detection failed: {e}. Assuming translation needed.")
             lang = "unknown"
 
         if (
@@ -6774,9 +6635,7 @@ class ContentProcessor:
             or lang == "zh-cn"
             or cls._text_appears_to_match_target_language(text, target_lang)
         ):
-            logger.info(
-                "Language matches target or is already Chinese. Skipping translation."
-            )
+            logger.info("Language matches target or is already Chinese. Skipping translation.")
             return text, title
 
         logger.info(f"Translating to {target_lang} using LLM...")
@@ -6796,9 +6655,7 @@ class ContentProcessor:
                 logger.error(f"LLM configuration error: {e}")
                 return text, title
 
-            client = OpenAI(
-                base_url=llm_config["base_url"], api_key=llm_config["api_key"]
-            )
+            client = OpenAI(base_url=llm_config["base_url"], api_key=llm_config["api_key"])
 
             # 1. Translate Title (if provided)
             translated_title = title
@@ -6828,9 +6685,7 @@ class ContentProcessor:
             logger.info(f"Content split into {total_chunks} chunks for translation.")
 
             for i, chunk in enumerate(chunks):
-                logger.info(
-                    f"Translating chunk {i + 1}/{total_chunks} ({len(chunk)} chars)..."
-                )
+                logger.info(f"Translating chunk {i + 1}/{total_chunks} ({len(chunk)} chars)...")
                 completion = client.chat.completions.create(
                     model=llm_config["model"],
                     messages=[
@@ -6874,9 +6729,7 @@ class OcrHandler:
 
     @staticmethod
     def _get_engine_setting(args, config):
-        value = getattr(args, "ocr_engine", None) or config.get(
-            "OCR", "engine", fallback="rapidocr"
-        )
+        value = getattr(args, "ocr_engine", None) or config.get("OCR", "engine", fallback="rapidocr")
         value = str(value).strip().lower()
         return value or "rapidocr"
 
@@ -6995,9 +6848,7 @@ class OcrHandler:
         for lang in lang_candidates:
             for tesseract_config in configs:
                 try:
-                    text = pytesseract_module.image_to_string(
-                        image, lang=lang, config=tesseract_config
-                    )
+                    text = pytesseract_module.image_to_string(image, lang=lang, config=tesseract_config)
                 except Exception as e:
                     logger.debug(
                         "OCR attempt failed for lang=%s config=%s: %s",
@@ -7036,9 +6887,7 @@ class OcrHandler:
             "available": {},
         }
 
-        ocr_lang = getattr(args, "ocr_lang", None) or config.get(
-            "OCR", "lang", fallback="chi_sim+eng"
-        )
+        ocr_lang = getattr(args, "ocr_lang", None) or config.get("OCR", "lang", fallback="chi_sim+eng")
 
         for engine_name in runtime["chain"]:
             if engine_name == "rapidocr":
@@ -7052,9 +6901,7 @@ class OcrHandler:
                     pytesseract = OcrHandler._init_tesseract(config)
                     runtime["available"]["tesseract"] = {
                         "module": pytesseract,
-                        "langs": OcrHandler._resolve_ocr_languages(
-                            pytesseract, ocr_lang
-                        ),
+                        "langs": OcrHandler._resolve_ocr_languages(pytesseract, ocr_lang),
                     }
                     logger.info("OCR engine ready: tesseract")
                 except Exception as e:
@@ -7073,9 +6920,7 @@ class OcrHandler:
                 if engine_name == "rapidocr":
                     text = OcrHandler._extract_text_with_rapidocr(engine, prepared_image)
                 elif engine_name == "tesseract":
-                    text = OcrHandler._run_ocr(
-                        engine["module"], prepared_image, engine["langs"]
-                    )
+                    text = OcrHandler._run_ocr(engine["module"], prepared_image, engine["langs"])
                 else:
                     continue
 
@@ -7155,9 +7000,7 @@ class OcrHandler:
             )
             return html_content
 
-        req_proxies, _ = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         max_images = OcrHandler._get_int_config(config, "max_images", 8)
         min_width = OcrHandler._get_int_config(config, "min_width", 240)
         min_height = OcrHandler._get_int_config(config, "min_height", 120)
@@ -7174,12 +7017,7 @@ class OcrHandler:
             if img.find_next_sibling(class_="surf-ocr"):
                 continue
 
-            img_url = (
-                img.get("src")
-                or img.get("data-src")
-                or img.get("data-original")
-                or ""
-            ).strip()
+            img_url = (img.get("src") or img.get("data-src") or img.get("data-original") or "").strip()
             if (
                 not img_url
                 or img_url.startswith("data:")
@@ -7190,18 +7028,14 @@ class OcrHandler:
             seen_urls.add(img_url)
 
             try:
-                image_bytes = OcrHandler._download_image(
-                    img_url, source_url, req_proxies
-                )
+                image_bytes = OcrHandler._download_image(img_url, source_url, req_proxies)
                 image = Image.open(io.BytesIO(image_bytes))
                 image.load()
                 width, height = image.size
                 if width < min_width or height < min_height:
                     continue
                 prepared_image = OcrHandler._prepare_image_for_ocr(image)
-                ocr_text, engine_used = OcrHandler._run_ocr_with_engines(
-                    runtime, prepared_image, img_url
-                )
+                ocr_text, engine_used = OcrHandler._run_ocr_with_engines(runtime, prepared_image, img_url)
                 if len(ocr_text) < min_text_length:
                     logger.info(
                         "OCR produced too little text for image: %s",
@@ -7236,9 +7070,7 @@ class OutputHandler:
         if not text:
             return 0
 
-        suspicious_pairs = (
-            "Ã©", "Ã¨", "Ã ", "Â ", "â€™", "â€œ", "â€", "å", "æ", "ç", "ï", "ð"
-        )
+        suspicious_pairs = ("Ã©", "Ã¨", "Ã ", "Â ", "â€™", "â€œ", "â€", "å", "æ", "ç", "ï", "ð")
         char_score = sum(text.count(ch) for ch in OutputHandler._MOJIBAKE_CHARS)
         pair_score = sum(text.count(pair) * 2 for pair in suspicious_pairs)
         replacement_penalty = text.count("\ufffd") * 3
@@ -7284,9 +7116,7 @@ class OutputHandler:
 
     @staticmethod
     def _sanitize_filename(filename):
-        return "".join(
-            [c for c in filename if c.alpha() or c.isdigit() or c in " ._-"]
-        ).rstrip()
+        return "".join([c for c in filename if c.alpha() or c.isdigit() or c in " ._-"]).rstrip()
 
     @staticmethod
     def _safe_filename_title(title, max_len=None):
@@ -7566,9 +7396,7 @@ class OutputHandler:
         Select filename title based on source site rules.
         For GitHub URLs, prefer page <title>.
         """
-        twitter_title = OutputHandler._extract_social_first_sentence_title(
-            html_content, source_url=source_url
-        )
+        twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
         if twitter_title:
             return twitter_title
         if source_url and re.match(r"^https?://(www\.)?github\.com/", source_url, re.IGNORECASE):
@@ -7674,9 +7502,7 @@ class OutputHandler:
         def replace_link_url(match):
             text = match.group(1)
             url = match.group(2)
-            if url and not url.startswith(
-                ("http://", "https://", "data:", "#", "mailto:", "tel:", "javascript:")
-            ):
+            if url and not url.startswith(("http://", "https://", "data:", "#", "mailto:", "tel:", "javascript:")):
                 absolute_url = urljoin(base_url, url)
                 return f"[{text}]({absolute_url})"
             return match.group(0)
@@ -7725,9 +7551,7 @@ class OutputHandler:
             return str(soup)
 
         # 匹配自闭合标签如 <img src="...">、<video src="..."> 等
-        md_content = re.sub(
-            r"<([a-zA-Z][a-zA-Z0-9]*)\s+[^>]*>", convert_html_attrs_in_md, md_content
-        )
+        md_content = re.sub(r"<([a-zA-Z][a-zA-Z0-9]*)\s+[^>]*>", convert_html_attrs_in_md, md_content)
 
         return md_content
 
@@ -7756,26 +7580,16 @@ class OutputHandler:
         }
 
         source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
-        source_site = (
-            source_site_tag.get("content", "").strip().lower()
-            if source_site_tag
-            else ""
-        )
+        source_site = source_site_tag.get("content", "").strip().lower() if source_site_tag else ""
         if source_site == "xiaohongshu" and metadata["source"]:
-            metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(
-                metadata["source"]
-            )
+            metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
 
         # 提取title元素
         title_tag = soup.find("title")
         if title_tag:
-            metadata["title"] = OutputHandler.normalize_markdown_encoding(
-                title_tag.get_text(strip=True)
-            )
+            metadata["title"] = OutputHandler.normalize_markdown_encoding(title_tag.get_text(strip=True))
 
-        twitter_title = OutputHandler._extract_social_first_sentence_title(
-            html_content, source_url=source_url
-        )
+        twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
         if twitter_title:
             metadata["title"] = OutputHandler.normalize_markdown_encoding(twitter_title)
 
@@ -7895,9 +7709,7 @@ class OutputHandler:
         if not os.path.exists(md_dir):
             os.makedirs(md_dir)
 
-        filename_title = OutputHandler._get_filename_title(
-            title, source_url=source_url, html_content=html_content
-        )
+        filename_title = OutputHandler._get_filename_title(title, source_url=source_url, html_content=html_content)
 
         # Determine filepath
         if output_path:
@@ -7921,9 +7733,7 @@ class OutputHandler:
 
         # Convert relative URLs to absolute if base_url is provided
         if base_url:
-            content = OutputHandler._convert_markdown_urls_to_absolute(
-                content, base_url
-            )
+            content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
 
         # Generate YAML front matter if html_content is provided and add_front_matter is True
         yaml_frontmatter = ""
@@ -8022,9 +7832,7 @@ class OutputHandler:
         return filepath
 
     @staticmethod
-    def save_html(
-        title, html_content, config, inline=False, output_path=None, base_url=None
-    ):
+    def save_html(title, html_content, config, inline=False, output_path=None, base_url=None):
         """
         Save content as HTML file.
 
@@ -8047,9 +7855,7 @@ class OutputHandler:
             html_content = OutputHandler._inline_resources(html_content)
         elif base_url:
             # Convert relative URLs to absolute for non-inline HTML
-            html_content = OutputHandler._convert_urls_to_absolute(
-                html_content, base_url
-            )
+            html_content = OutputHandler._convert_urls_to_absolute(html_content, base_url)
 
         # Wrap content in complete HTML document if needed
         if (
@@ -8156,9 +7962,7 @@ class PublishHandler:
     """Handler for publishing content to various platforms."""
 
     @staticmethod
-    def publish_to_pastebin(
-        title, content, config, proxy_mode_override=None, custom_proxy_override=None
-    ):
+    def publish_to_pastebin(title, content, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Publish content to pastebin.com.
 
@@ -8174,17 +7978,13 @@ class PublishHandler:
         """
         api_dev_key = config.get("publish.pastebin", "api_dev_key")
         if not api_dev_key:
-            logger.error(
-                "Pastebin API key not found in config [publish.pastebin] section."
-            )
+            logger.error("Pastebin API key not found in config [publish.pastebin] section.")
             return None
 
         logger.info(f"Publishing to pastebin.com as '{title}'...")
 
         # Get proxies for the request
-        req_proxies, _ = Fetcher._get_proxies(
-            config, proxy_mode_override, custom_proxy_override
-        )
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         # Prepare POST data (equivalent to curl command)
         data = {
@@ -8196,9 +7996,7 @@ class PublishHandler:
 
         # Optional: get additional parameters from config
         paste_expire = config.get("publish.pastebin", "api_paste_expire", fallback=None)
-        paste_private = config.get(
-            "publish.pastebin", "api_paste_private", fallback="0"
-        )
+        paste_private = config.get("publish.pastebin", "api_paste_private", fallback="0")
 
         if paste_expire:
             data["api_paste_expire_date"] = paste_expire
@@ -8282,9 +8080,7 @@ def migrate_data():
         except Exception as e:
             logger.warning(f"Failed to migrate data from {old_dir} to {new_dir}: {e}")
     elif os.path.exists(old_dir) and os.path.exists(new_dir):
-        logger.info(
-            f"Both {old_dir} and {new_dir} exist. Please manually merge if needed."
-        )
+        logger.info(f"Both {old_dir} and {new_dir} exist. Please manually merge if needed.")
 
 
 # Perform migration on import/startup
@@ -8505,17 +8301,15 @@ class AuthHandler:
             print("Recommended workflow:")
             print(f"1. Run `surf --login {normalized_site_name}` on a desktop machine with a browser.")
             print(f"2. Export the saved state with `surf --export-auth {normalized_site_name} <FILE>`.")
-            print(f"3. Copy the file to this server and import it with `surf --import-auth {normalized_site_name} <FILE>`.")
+            print(
+                f"3. Copy the file to this server and import it with `surf --import-auth {normalized_site_name} <FILE>`."
+            )
             return False
 
         if normalized_site_name == "twitter":
-            _, pw_proxy = Fetcher._get_twitter_forced_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            _, pw_proxy = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
         else:
-            _, pw_proxy = Fetcher._get_proxies(
-                config, proxy_mode_override, custom_proxy_override
-            )
+            _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         print(f"\n{'=' * 60}")
         print(f"Interactive Login for {normalized_site_name}")
@@ -8541,14 +8335,10 @@ class AuthHandler:
                     persistent_args["proxy"] = pw_proxy
 
                 try:
-                    context = p.chromium.launch_persistent_context(
-                        profile_dir, channel="chrome", **persistent_args
-                    )
+                    context = p.chromium.launch_persistent_context(profile_dir, channel="chrome", **persistent_args)
                 except Exception as e:
                     logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
-                    context = p.chromium.launch_persistent_context(
-                        profile_dir, **persistent_args
-                    )
+                    context = p.chromium.launch_persistent_context(profile_dir, **persistent_args)
             else:
                 launch_args = {"headless": False}
                 if pw_proxy:
@@ -8637,9 +8427,7 @@ class TTSHandler:
         rate = config.get("TTS", "rate", fallback="+0%")
         volume = config.get("TTS", "volume", fallback="+0%")
 
-        logger.info(
-            f"Generating TTS audio with voice: {voice}, rate: {rate}, volume: {volume}..."
-        )
+        logger.info(f"Generating TTS audio with voice: {voice}, rate: {rate}, volume: {volume}...")
         communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
         await communicate.save(output_file)
         logger.info(f"Audio saved to {output_file}")
@@ -8659,20 +8447,11 @@ class TTSHandler:
         # Remove [link text](url) -> keep 'link text'
         clean_text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", clean_text)
         # Remove other common MD artifacts
-        clean_text = (
-            clean_text.replace("#", "")
-            .replace("*", "")
-            .replace("`", "")
-            .replace("---", "")
-        )
+        clean_text = clean_text.replace("#", "").replace("*", "").replace("`", "").replace("---", "")
 
         # If output file not specified but speak is needed, use temp
         temp_file = "tts_temp.mp3"
-        filename = (
-            resolve_user_path(save_path)
-            if save_path
-            else temp_file
-        )
+        filename = resolve_user_path(save_path) if save_path else temp_file
 
         try:
             asyncio.run(TTSHandler.generate_speech(clean_text, filename, config))
@@ -8763,18 +8542,10 @@ Twitter/X Backend:
         choices=["md", "pdf", "html", "audio", "publish"],
         help="Output format: md/pdf/html/audio/publish (default: md)",
     )
-    format_group.add_argument(
-        "-h", action="store_true", help="Shorthand for --format html"
-    )
-    format_group.add_argument(
-        "-p", action="store_true", help="Shorthand for --format pdf"
-    )
-    format_group.add_argument(
-        "-a", action="store_true", help="Shorthand for --format audio"
-    )
-    format_group.add_argument(
-        "-P", action="store_true", help="Shorthand for --format publish"
-    )
+    format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
+    format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
+    format_group.add_argument("-a", action="store_true", help="Shorthand for --format audio")
+    format_group.add_argument("-P", action="store_true", help="Shorthand for --format publish")
 
     # Output path
     parser.add_argument(
@@ -8782,9 +8553,7 @@ Twitter/X Backend:
         "--output",
         help="Output file path (use '-' for stdout, overrides config; on Windows, accepts '~/Note' and '/' and maps '~' to %%USERPROFILE%%)",
     )
-    parser.add_argument(
-        "-O", action="store_true", help="Shorthand for --output - (output to stdout)"
-    )
+    parser.add_argument("-O", action="store_true", help="Shorthand for --output - (output to stdout)")
 
     # Language mode
     lang_group = parser.add_mutually_exclusive_group()
@@ -8843,9 +8612,7 @@ Twitter/X Backend:
     )
 
     # HTML options
-    parser.add_argument(
-        "--html-inline", action="store_true", help="Inline CSS/JS in HTML output"
-    )
+    parser.add_argument("--html-inline", action="store_true", help="Inline CSS/JS in HTML output")
 
     ocr_group = parser.add_mutually_exclusive_group()
     ocr_group.add_argument(
@@ -8893,9 +8660,7 @@ Twitter/X Backend:
     parser.add_argument("--llm", help="Override the default LLM provider")
 
     # Other options
-    parser.add_argument(
-        "--browser", action="store_true", help="Force use of browser (Playwright)"
-    )
+    parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
     thread_group = parser.add_mutually_exclusive_group()
     thread_group.add_argument(
         "-t",
@@ -8925,9 +8690,7 @@ Twitter/X Backend:
         action="store_true",
         help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--help", action="help", help="Show this help message")
 
     args = parser.parse_args(_normalize_thread_argv(sys.argv[1:]))
@@ -8939,11 +8702,7 @@ Twitter/X Backend:
     _raise_if_interrupted()
 
     # Determine config path
-    config_path = (
-        resolve_user_path(args.config)
-        if args.config
-        else "config.ini"
-    )
+    config_path = resolve_user_path(args.config) if args.config else "config.ini"
     config = Config(config_path)
 
     # Handle --clear-auth
@@ -8962,9 +8721,7 @@ Twitter/X Backend:
         export_path = resolve_user_path(export_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
-            parser.error(
-                "Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd"
-            )
+            parser.error("Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd")
         try:
             AuthHandler.export_state(normalized_site_name, export_path)
         except Exception as e:
@@ -8978,9 +8735,7 @@ Twitter/X Backend:
         import_path = resolve_user_path(import_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
-            parser.error(
-                "Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd"
-            )
+            parser.error("Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd")
         try:
             AuthHandler.import_state(normalized_site_name, import_path)
         except Exception as e:
@@ -8997,13 +8752,9 @@ Twitter/X Backend:
         site_name = args.login.lower()
         login_url = AuthHandler.get_login_url(site_name)
         if not login_url:
-            parser.error(
-                f"Unsupported site: {site_name}. Supported: {', '.join(AuthHandler.LOGIN_URLS.keys())}"
-            )
+            parser.error(f"Unsupported site: {site_name}. Supported: {', '.join(AuthHandler.LOGIN_URLS.keys())}")
         login_site = AuthHandler.normalize_site_name(site_name)
-        success = AuthHandler.interactive_login(
-            login_site, login_url, config, proxy_mode, custom_proxy
-        )
+        success = AuthHandler.interactive_login(login_site, login_url, config, proxy_mode, custom_proxy)
         sys.exit(0 if success else 1)
 
     # Check if url is required but not provided
@@ -9050,21 +8801,15 @@ Twitter/X Backend:
 
     # Check if URL matches special site handlers for default policies
     handler, site_name, site_config = _get_handler_for_url(args.url)
-    explicit_output_format_selected = bool(
-        args.format or args.h or args.p or args.a or args.P
-    )
+    explicit_output_format_selected = bool(args.format or args.h or args.p or args.a or args.P)
     if site_config:
         # Apply special site defaults (can be overridden by command line)
         if site_config.get("default_no_proxy") and proxy_mode is None and not Fetcher._is_windows():
-            logger.info(
-                f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)"
-            )
+            logger.info(f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)")
             proxy_mode = "no"
 
         if site_config.get("default_no_translate") and lang_mode == "trans":
-            logger.info(
-                f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)"
-            )
+            logger.info(f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)")
             lang_mode = "raw"
 
         if site_config.get("default_thread") and fetch_thread is None:
@@ -9082,21 +8827,13 @@ Twitter/X Backend:
         logger.info("ncpssd: Applying default output format 'pdf' for secure article page")
 
     # Determine output path
-    output_path = (
-        resolve_user_path(args.output)
-        if args.output
-        else None
-    )
+    output_path = resolve_user_path(args.output) if args.output else None
     if args.O:
         output_path = "-"
 
     # For NCPSSD secure article pages, PDF mode should download the original full-text PDF
     # by simulating a click on the page's "全文下载" button.
-    if (
-        output_format == "pdf"
-        and site_name == "ncpssd"
-        and Fetcher._is_ncpssd_secure_article_url(args.url)
-    ):
+    if output_format == "pdf" and site_name == "ncpssd" and Fetcher._is_ncpssd_secure_article_url(args.url):
         downloaded_pdf = Fetcher.download_ncpssd_pdf(
             args.url,
             config=config,
@@ -9132,9 +8869,7 @@ Twitter/X Backend:
 
     if not html_content:
         if Fetcher._is_twitter_url(args.url):
-            logger.error(
-                "Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue)."
-            )
+            logger.error("Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue).")
         else:
             logger.error(f"Failed to fetch usable content from {args.url}.")
         sys.exit(1)
@@ -9160,9 +8895,7 @@ Twitter/X Backend:
     _raise_if_interrupted()
     if direct_markdown_payload:
         title = direct_markdown_payload.get("title") or "Untitled"
-        md_content = _convert_embedded_html_in_markdown(
-            direct_markdown_payload.get("markdown") or ""
-        )
+        md_content = _convert_embedded_html_in_markdown(direct_markdown_payload.get("markdown") or "")
         content_base_url = direct_markdown_payload.get("base_url") or source_url
         cleaned_html = _render_markdown_to_html(md_content)
         logger.info(f"Using direct markdown payload. Title: {title}")
@@ -9202,9 +8935,7 @@ Twitter/X Backend:
             logger.error(f"Failed to convert to markdown: {e}")
             sys.exit(1)
 
-    twitter_title = OutputHandler._extract_social_first_sentence_title(
-        html_content, source_url=source_url
-    )
+    twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
     if twitter_title:
         title = twitter_title
 
@@ -9250,9 +8981,7 @@ Twitter/X Backend:
             translated_title = original_title
 
         if lang_mode == "both":
-            logger.info(
-                "Language mode set to 'both'. Combining original and translation."
-            )
+            logger.info("Language mode set to 'both'. Combining original and translation.")
             # Only combine if translation actually happened
             if translated_md != original_md:
                 title = f"{translated_title} ({original_title})"
@@ -9268,9 +8997,7 @@ Twitter/X Backend:
     # 4.5 Convert relative URLs to absolute (after translation, before output)
     base_url_for_links = content_base_url or source_url or args.url
     if base_url_for_links:
-        md_content = OutputHandler._convert_markdown_urls_to_absolute(
-            md_content, base_url_for_links
-        )
+        md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, base_url_for_links)
         # Also convert HTML URLs for HTML output
         cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)
 
@@ -9297,15 +9024,11 @@ Twitter/X Backend:
                 output_path=output_path,
             )
         else:
-            OutputHandler.save_html(
-                title, cleaned_html, config, inline=args.html_inline
-            )
+            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
 
     elif output_format == "audio":
         if output_path:
-            TTSHandler.run_tts(
-                title, md_content, config, speak=args.speak, save_path=output_path
-            )
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
         else:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak)
 
@@ -9362,9 +9085,7 @@ Twitter/X Backend:
                     output_path,
                     html_content=html_content,
                     add_front_matter=not args.no_front_matter,
-                    translated_title=translated_title
-                    if translation_performed
-                    else None,
+                    translated_title=translated_title if translation_performed else None,
                     source_url=source_url,
                     translator=translator,
                     archive_url=archive_url,

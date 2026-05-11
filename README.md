@@ -42,6 +42,7 @@ surf "https://example.com" -r
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
+- **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
 ### Special Site Policies

@@ -1,5 +1,6 @@
 import surf_web
 from surf import (
+    ContentProcessor,
     Fetcher,
     _build_direct_markdown_payload,
     _convert_embedded_html_in_markdown,
@@ -168,6 +169,54 @@ def test_direct_markdown_converts_embedded_html_but_preserves_fenced_code():
     assert "Hello **reader**. [More](docs/more.md)" in converted
     assert "<p>Hello" not in converted
     assert "<p>Keep this example as HTML.</p>" in converted
+
+
+def test_to_markdown_preserves_content_inline_svg_as_image():
+    html = """
+    <article>
+      <p>Before</p>
+      <svg aria-hidden="true" class="lucide" width="24" height="24">
+        <path d="M0 0h24v24H0z"></path>
+      </svg>
+      <div class="post-media post-media--svg-board">
+        <svg width="100%" viewBox="0 0 200 80" xmlns="http://www.w3.org/2000/svg">
+          <g class="node c-purple">
+            <rect x="10" y="10" width="80" height="40"></rect>
+            <text class="th" x="50" y="30">MIR</text>
+            <text class="ts" x="50" y="45">Codegen</text>
+          </g>
+        </svg>
+      </div>
+      <p>After</p>
+    </article>
+    """
+
+    markdown = ContentProcessor.to_markdown(html)
+
+    assert "Before" in markdown
+    assert "After" in markdown
+    assert "![MIR Codegen](data:image/svg+xml;base64," in markdown
+    assert "lucide" not in markdown
+    assert "MIRCodegen" not in markdown
+
+
+def test_direct_markdown_embedded_svg_becomes_image():
+    markdown = """
+# Guide
+
+<div class="post-media post-media--svg-board">
+  <svg width="100%" viewBox="0 0 120 60" xmlns="http://www.w3.org/2000/svg">
+    <text x="10" y="20">LLVM IR</text>
+    <text x="10" y="40">Machine code</text>
+  </svg>
+</div>
+"""
+
+    converted = _convert_embedded_html_in_markdown(markdown)
+
+    assert "![LLVM IR Machine code](data:image/svg+xml;base64," in converted
+    assert "<svg" not in converted
+    assert "LLVM IRMachine code" not in converted
 
 
 def test_web_auto_proxy_uses_cli_implicit_proxy_resolution(monkeypatch):
