@@ -292,11 +292,6 @@ HTML_TEMPLATE = """
             border-bottom: 2px solid #e1e5e9;
         }
         
-        .result-title {
-            font-size: 1.5em;
-            color: #333;
-        }
-        
         .save-links {
             display: flex;
             gap: 10px;
@@ -305,10 +300,11 @@ HTML_TEMPLATE = """
 
         .save-actions {
             display: flex;
-            align-items: center;
-            justify-content: flex-end;
+            flex-direction: column;
+            align-items: stretch;
+            justify-content: flex-start;
             gap: 12px;
-            flex-wrap: wrap;
+            width: 100%;
         }
 
         .play-btn {
@@ -348,11 +344,11 @@ HTML_TEMPLATE = """
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 12px;
-            margin: 16px 0 14px;
-            padding: 14px;
-            border: 1px solid #e1e8f0;
-            border-radius: 10px;
-            background: #f8fbff;
+            margin: 0;
+        }
+
+        .result-source {
+            margin-bottom: 14px;
         }
 
         .save-field {
@@ -1039,12 +1035,21 @@ HTML_TEMPLATE = """
 
             card.innerHTML = `
                 <div class="result-header">
-                    <h2 class="result-title"></h2>
                     <div class="save-actions">
                         <div class="save-links"></div>
+                        <div class="save-config">
+                            <div class="save-field">
+                                <label>保存文件夹</label>
+                                <input class="save-input save-dir-input" type="text">
+                            </div>
+                            <div class="save-field">
+                                <label>文件标题</label>
+                                <input class="save-input save-title-input" type="text">
+                            </div>
+                        </div>
                     </div>
                 </div>
-                ${source ? `<div class="field-hint"></div>` : ''}
+                ${source ? `<div class="field-hint result-source"></div>` : ''}
                 <div class="tabs">
                     <button class="tab active" data-tab="markdown">Markdown</button>
                     <button class="tab" data-tab="html">HTML</button>
@@ -1059,22 +1064,11 @@ HTML_TEMPLATE = """
                 <div class="tab-content" data-tab-content="raw">
                     <pre class="content-preview"></pre>
                 </div>
-                <div class="save-config">
-                    <div class="save-field">
-                        <label>保存文件夹</label>
-                        <input class="save-input save-dir-input" type="text">
-                    </div>
-                    <div class="save-field">
-                        <label>文件标题</label>
-                        <input class="save-input save-title-input" type="text">
-                    </div>
-                </div>
             `;
 
-            card.querySelector('.result-title').textContent = `${result.title || 'Untitled'}${label}`;
             const hint = card.querySelector('.field-hint');
             if (hint) {
-                hint.textContent = source;
+                hint.textContent = `${source}${label}`;
             }
             card.dataset.defaultDirs = JSON.stringify(result.defaultDirs || {});
             card.dataset.defaultSaveTitle = result.defaultSaveTitle || result.title || 'Untitled';
