@@ -576,19 +576,34 @@ HTML_TEMPLATE = """
                                 <label for="thread-off">关闭</label>
                             </div>
                             <div class="radio-option">
-                                <input type="radio" id="thread-backward" name="thread_mode" value="backward">
-                                <label for="thread-backward">向后抓取同作者后续回复</label>
+                                <input type="radio" id="thread-after" name="thread_mode" value="after">
+                                <label for="thread-after">向后</label>
                             </div>
                             <div class="radio-option">
-                                <input type="radio" id="thread-forward" name="thread_mode" value="forward">
-                                <label for="thread-forward">向前抓取上下文</label>
+                                <input type="radio" id="thread-before" name="thread_mode" value="before">
+                                <label for="thread-before">向前</label>
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="thread-both" name="thread_mode" value="both">
-                                <label for="thread-both">双向抓取</label>
+                                <label for="thread-both">前后</label>
                             </div>
                         </div>
                         <div class="field-hint">对应 CLI 的 `--thread/--no-thread`。仅支持的社交站点会生效。</div>
+                    </div>
+
+                    <div class="form-group wide">
+                        <label>线程作者范围</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="thread-author-all" name="thread_author" value="all" checked>
+                                <label for="thread-author-all">所有作者</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-author-same" name="thread_author" value="same">
+                                <label for="thread-author-same">仅同作者</label>
+                            </div>
+                        </div>
+                        <div class="field-hint">对应 CLI 的 `--thread-author same|all`。</div>
                     </div>
                 </div>
 
@@ -1411,12 +1426,20 @@ def resolve_web_thread_mode(data, site_name, site_config):
     thread_mode = str(data.get("thread_mode", "default")).strip().lower()
     if thread_mode == "off":
         return False
-    if thread_mode in {"forward", "backward", "both"}:
+    if thread_mode in {"after", "before", "both"}:
         return thread_mode
     if site_config and site_config.get("default_thread"):
         logger.info(f"Web: {site_name} using default thread expansion")
-        return "backward"
+        return "after"
     return None
+
+
+def resolve_web_thread_author(data):
+    """Resolve web thread author scope using the same semantics as CLI."""
+    thread_author = str(data.get("thread_author", "all")).strip().lower()
+    if thread_author in {"same", "all"}:
+        return thread_author
+    return "all"
 
 
 def resolve_web_site_defaults(config, url=None):
@@ -1524,6 +1547,7 @@ def process_url():
             )
             _, site_name, site_config = _get_handler_for_url(url)
             fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
+            fetch_thread_author = resolve_web_thread_author(data)
             if site_config:
                 if (
                     site_config.get("default_no_translate")
@@ -1540,6 +1564,7 @@ def process_url():
                 proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
                 fetch_thread=fetch_thread,
+                fetch_thread_author=fetch_thread_author,
             )
             if not html_content:
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})

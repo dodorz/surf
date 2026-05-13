@@ -9,7 +9,7 @@
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
-- **Same-Author Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf now defaults to following later same-author replies in the thread until the author changes. You can switch to `forward` or `both` with `--thread`; V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
+- **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, and `xhslink.com` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL.
 - **GitHub Markdown Source Preservation**: GitHub repo and branchless Markdown URLs can be fetched from the resolved README/blob file while front matter `source` preserves the user-facing URL you entered.
 - **Accurate Translation Metadata**: Front matter includes `translator` only when content or title translation actually changed the output; language detection alone does not count.
@@ -87,7 +87,7 @@ The web form exposes the most commonly used Surf options directly, including:
 - proxy mode and custom proxy (`auto/win/env/custom/no` on Windows, `auto/env/custom/no` on non-Windows)
 - browser rendering
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
-- thread expansion (`forward` / `backward` / `both` / off; V2EX uses this as reply inclusion)
+- thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
 - after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
@@ -278,16 +278,18 @@ Force using Playwright (useful for tricky sites).
 uv run surf.py "https://example.com" --browser
 ```
 
-### Thread Expansion (-t / --thread / --no-thread)
+### Thread Expansion (-t / --thread / --thread-author / --no-thread)
 
-Fetch the current post together with same-author posts from the same thread:
+Fetch the current post together with posts from the same thread. `--thread` chooses the range, and `--thread-author` chooses whether to keep only the current post author or all authors:
 
 ```bash
 uv run surf.py "https://x.com/user/status/123" -t
-uv run surf.py "https://x.com/user/status/123" --thread forward
-uv run surf.py "https://x.com/user/status/123" --thread both
+uv run surf.py "https://x.com/user/status/123" --thread before
+uv run surf.py "https://x.com/user/status/123" --thread both --thread-author same
 uv run surf.py "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
 ```
+
+Thread directions are `after` (later posts, default), `before` (earlier posts), `both`, and `off`. Author scopes are `all` (default) and `same`.
 
 For V2EX topics, Surf defaults to the main post only and uses the configured proxy automatically when available. Add `-t` or `--thread` to include replies:
 
@@ -362,7 +364,7 @@ surf --clear-auth all
 
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
 On headless Linux, `surf --login ...` now fails fast instead of trying to open a browser with no display. Run the login command on a desktop machine, then move the saved state with `--export-auth` and `--import-auth`.
-For Twitter/X, Surf also keeps a persistent browser profile under the auth directory to improve login-wall handling. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
+For Twitter/X, `surf --login twitter` first tries to import cookies from your real browser (or `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`) through `twitter-cli`, which is usually more reliable than X's automated login page. If that import is unavailable, Surf falls back to a visible Playwright login window and keeps a persistent browser profile under the auth directory. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
 For site-specific behavior details (including NCPSSD download rules), refer to `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md`.
 
 ## Help

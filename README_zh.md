@@ -9,7 +9,7 @@
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD 等网站优化处理，支持复用已保存的登录态。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
-- **同作者 Thread 追溯**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认会向后抓取当前贴文之后、且作者仍与当前贴文相同的连续回帖；也可通过 `--thread forward|backward|both` 显式指定方向。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
+- **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
 - **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。
 - **GitHub Markdown 来源保留**：GitHub 仓库页和不带分支的 Markdown 文件 URL 可以从实际 README/blob 文件抓取内容，但 front matter 的 `source` 会保留用户输入的页面 URL。
 - **翻译元数据更准确**：只有正文或标题实际被翻译改写时，front matter 才写入 `translator`；单纯语言判断不计入翻译器记录。
@@ -64,7 +64,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 代理模式和自定义代理（Windows: `auto/win/env/custom/no`；非 Windows: `auto/env/custom/no`）
 - 浏览器渲染
 - 图片 OCR 开关；OCR 引擎和 OCR 语言只在未关闭 OCR 时显示
-- Thread 抓取模式（`forward` / `backward` / `both` / 关闭；V2EX 将该选项用作是否包含回帖）
+- Thread 抓取方向（`after` / `before` / `both` / `off`）和作者范围（`same` / `all`；V2EX 将 thread 方向用作是否包含回帖）
 - 翻译时可选的 LLM Provider 覆盖；语言模式不是 `raw` / 保留原文时才显示
 - 宽松 URL / 文本输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接；如果没有 URL，则会把这段文字直接当作帖子保存，并以第一句作为标题
 - 每个结果卡在预览区下方都会直接显示“保存文件夹”“文件标题”两个可编辑输入框，并预填默认值；点击保存按钮后会直接写入，不再额外弹框确认
@@ -239,9 +239,9 @@ surf "https://example.com" -n          # 不使用代理
 
 ```bash
 surf "https://example.com" --browser   # 强制使用浏览器
-surf "https://x.com/user/status/123" -t   # 默认抓取同作者 thread 后续回帖
-surf "https://x.com/user/status/123" --thread forward
-surf "https://x.com/user/status/123" --thread both
+surf "https://x.com/user/status/123" -t   # 默认抓取 thread 后续回帖
+surf "https://x.com/user/status/123" --thread before
+surf "https://x.com/user/status/123" --thread both --thread-author same
 surf "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
 surf "https://v2ex.com/t/1208365" -r      # V2EX 默认只抓主贴，并自动使用已配置代理
 surf "https://v2ex.com/t/1208365" -r -t   # V2EX 包含回帖
@@ -317,7 +317,7 @@ surf --clear-auth all
 
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
 在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
-对于 Twitter/X，Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
+对于 Twitter/X，`surf --login twitter` 会先通过 `twitter-cli` 尝试从真实浏览器（或 `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` 环境变量）导入 Cookie，这通常比在自动化登录页里手动登录更可靠；导入失败时才回退到可见的 Playwright 登录窗口。Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
 涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
 
 ## 单字符参数连写

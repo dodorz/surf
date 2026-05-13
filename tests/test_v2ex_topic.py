@@ -63,6 +63,24 @@ def test_v2ex_topic_can_extract_replies_when_requested():
 def test_thread_flag_accepts_url_as_next_argument():
     assert surf._normalize_thread_argv(["-t", "https://v2ex.com/t/1"]) == [
         "-t",
-        "backward",
+        "after",
         "https://v2ex.com/t/1",
     ]
+
+
+def test_thread_extraction_supports_range_and_author_scope():
+    items = [
+        {"author_key": "alice", "text": "previous alice"},
+        {"author_key": "bob", "text": "previous bob"},
+        {"author_key": "alice", "text": "current"},
+        {"author_key": "bob", "text": "reply bob"},
+        {"author_key": "alice", "text": "reply alice"},
+    ]
+
+    same_items, same_index = surf.Fetcher._extract_thread_items(items, 2, "both", "same")
+    assert same_items == [items[2]]
+    assert same_index == 0
+
+    all_items, all_index = surf.Fetcher._extract_thread_items(items, 2, "both", "all")
+    assert all_items == items
+    assert all_index == 2

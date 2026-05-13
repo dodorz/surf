@@ -16,7 +16,7 @@ Each site entry may define:
 - `default_no_proxy`: default no-proxy policy (overridable by CLI)
 - `force_proxy`: default force-proxy policy (overridable by CLI)
 - `default_no_translate`: default raw-language policy (overridable by CLI)
-- `default_thread`: default thread mode (`backward`), overridable by `--thread` / `--no-thread`
+- `default_thread`: default thread direction (`after`) with author scope `all`, overridable by `--thread`, `--thread-author`, or `--no-thread`
 
 ---
 
@@ -44,7 +44,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Prefers `uvx --from twitter-cli twitter` backend by default.
 - Reuses local/browser cookies when possible.
 - Includes fallback chain for login walls and unreachable `x.com` scenarios.
-- Supports same-author thread expansion with `--thread`.
+- Supports thread expansion with `--thread after|before|both|off` and `--thread-author same|all`.
 
 ### WeChat / Xiaohongshu
 - Default: no proxy, no translation (unless overridden).
@@ -56,7 +56,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Reuses saved Zhihu cookies for API/mirror requests when available.
 
 ### Social Thread Sites (Twitter/X, Bluesky, Weibo, Threads)
-- Default thread mode: `backward`.
+- Default thread direction: `after`; default author scope: `all`.
 - Short-post title normalization: `First sentence - Author on Site`.
 
 ### V2EX

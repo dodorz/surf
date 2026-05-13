@@ -2,6 +2,7 @@
 import argparse
 import base64
 import configparser
+import getpass
 import os
 import sys
 import logging
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import io
+import locale
 import requests  # type: ignore
 import threading
 import queue
@@ -521,6 +523,20 @@ def _run_subprocess_interruptibly(command, **kwargs):
     return _CompletedProcess(command, process.returncode, stdout, stderr)
 
 
+def _decode_subprocess_output(value):
+    """Decode subprocess output robustly across Windows console locales."""
+    if isinstance(value, bytes):
+        for encoding in ("utf-8", "utf-8-sig", sys.getfilesystemencoding() or "", locale.getpreferredencoding(False)):
+            if not encoding:
+                continue
+            try:
+                return value.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def _call_interruptibly(func, *args, poll_interval=0.2, **kwargs):
     """
     Run a blocking callable in a daemon thread so Ctrl+C can interrupt promptly.
@@ -604,7 +620,7 @@ def _normalize_thread_argv(argv):
         if token in {"-t", "--thread"} and index + 1 < len(argv):
             next_token = argv[index + 1]
             if re.match(r"^https?://", next_token, re.IGNORECASE):
-                normalized.append("backward")
+                normalized.append("after")
         index += 1
     return normalized
 
@@ -1134,6 +1150,7 @@ class Fetcher:
         proxy_mode_override=None,
         custom_proxy_override=None,
         fetch_thread=None,
+        fetch_thread_author=None,
         twitter_backend=None,
         twitter_cli_bin=None,
         twitter_browser=None,
@@ -1182,6 +1199,7 @@ class Fetcher:
                     proxy_mode_override,
                     custom_proxy_override,
                     fetch_thread=fetch_thread,
+                    fetch_thread_author=fetch_thread_author,
                     backend=twitter_backend,
                     cli_bin=twitter_cli_bin,
                     browser=twitter_browser,
@@ -1194,6 +1212,7 @@ class Fetcher:
                     proxy_mode_override,
                     custom_proxy_override,
                     fetch_thread=fetch_thread,
+                    fetch_thread_author=fetch_thread_author,
                 )
             else:
                 html_content = handler(url, config, proxy_mode_override, custom_proxy_override)
@@ -2279,6 +2298,42 @@ class Fetcher:
         return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
 
     @staticmethod
+    def _repair_twitter_cli_mojibake_text(text):
+        """Repair UTF-8 text that arrived through a Windows single-byte decode path."""
+        if not isinstance(text, str) or not text:
+            return text
+        if not any(marker in text for marker in ("Ã", "Â", "â", "å", "æ", "ç", "ðŸ", "ï")):
+            return text
+        try:
+            repaired = text.encode("cp1252").decode("utf-8")
+        except UnicodeError:
+            try:
+                repaired = text.encode("cp1252", errors="ignore").decode("utf-8")
+            except UnicodeError:
+                return text
+        original_score = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+        repaired_score = sum(1 for char in repaired if "\u4e00" <= char <= "\u9fff")
+        if repaired_score > original_score:
+            return repaired
+        if "ðŸ" in text and "ðŸ" not in repaired:
+            return repaired
+        return text
+
+    @staticmethod
+    def _repair_twitter_cli_mojibake_value(value):
+        """Recursively repair mojibake in twitter-cli JSON payloads."""
+        if isinstance(value, str):
+            return Fetcher._repair_twitter_cli_mojibake_text(value)
+        if isinstance(value, list):
+            return [Fetcher._repair_twitter_cli_mojibake_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: Fetcher._repair_twitter_cli_mojibake_value(item)
+                for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
     def _fetch_twitter_via_cli(
         url,
         config,
@@ -2304,12 +2359,14 @@ class Fetcher:
 
         env = os.environ.copy()
         env.setdefault("UV_CACHE_DIR", os.path.join(os.getcwd(), ".uv-cache"))
+        AuthHandler.apply_twitter_cookie_env(env)
         if browser:
             env["TWITTER_BROWSER"] = browser
         if profile:
             env["TWITTER_CHROME_PROFILE"] = profile
         if proxy_url:
             env["TWITTER_PROXY"] = proxy_url
+        env.setdefault("PYTHONIOENCODING", "utf-8")
 
         commands = [
             cli_command + ["article", url, "--json"],
@@ -2317,18 +2374,10 @@ class Fetcher:
         ]
 
         for command in commands:
-            tmp_path = None
-            completed = None
             try:
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as tmp_file:
-                    tmp_path = tmp_file.name
-                command_with_output = command + ["--output", tmp_path]
                 logger.info("Trying twitter-cli backend: %s", " ".join(command))
                 completed = _run_subprocess_interruptibly(
-                    command_with_output,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    command,
                     timeout=60,
                     env=env,
                     check=False,
@@ -2336,14 +2385,9 @@ class Fetcher:
             except Exception as e:
                 logger.warning(f"twitter-cli execution failed: {e}")
                 return None
-            finally:
-                if tmp_path and os.path.exists(tmp_path) and (completed is None or completed.returncode != 0):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
 
-            stderr = (completed.stderr or "").strip()
+            stdout = _decode_subprocess_output(completed.stdout)
+            stderr = _decode_subprocess_output(completed.stderr).strip()
             if completed.returncode != 0:
                 logger.info(
                     "twitter-cli command failed (%s): %s",
@@ -2352,22 +2396,12 @@ class Fetcher:
                 )
                 continue
 
-            if not tmp_path or not os.path.exists(tmp_path):
-                logger.info("twitter-cli did not produce an output file")
-                continue
-
             try:
-                with open(tmp_path, "r", encoding="utf-8") as f:
-                    payload = json.load(f)
+                payload = json.loads(stdout or "")
+                payload = Fetcher._repair_twitter_cli_mojibake_value(payload)
             except Exception as e:
-                logger.info(f"twitter-cli output could not be parsed: {e}")
+                logger.info(f"twitter-cli stdout could not be parsed as JSON: {e}")
                 continue
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
 
             html = Fetcher._convert_twitter_cli_json_to_html(payload, url)
             if html:
@@ -2376,12 +2410,72 @@ class Fetcher:
         return None
 
     @staticmethod
+    def _fetch_twitter_cli_tweet_json(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        cli_bin=None,
+        browser=None,
+        profile=None,
+    ):
+        """Fetch tweet detail JSON from twitter-cli stdout, including replies when authenticated."""
+        cli_command = Fetcher._resolve_twitter_cli_command(cli_bin)
+        if not cli_command:
+            return None
+
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
+        proxy_url = None
+        if req_proxies:
+            proxy_url = req_proxies.get("https") or req_proxies.get("http")
+
+        env = os.environ.copy()
+        env.setdefault("UV_CACHE_DIR", os.path.join(os.getcwd(), ".uv-cache"))
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        AuthHandler.apply_twitter_cookie_env(env)
+        if browser:
+            env["TWITTER_BROWSER"] = browser
+        if profile:
+            env["TWITTER_CHROME_PROFILE"] = profile
+        if proxy_url:
+            env["TWITTER_PROXY"] = proxy_url
+
+        command = cli_command + ["tweet", url, "--max", "50", "--json", "--full-text"]
+        logger.info("Trying twitter-cli thread backend: %s", " ".join(command))
+        try:
+            completed = _run_subprocess_interruptibly(
+                command,
+                timeout=60,
+                env=env,
+                check=False,
+            )
+        except Exception as e:
+            logger.warning(f"twitter-cli thread execution failed: {e}")
+            return None
+
+        if completed.returncode != 0:
+            logger.info(
+                "twitter-cli thread command failed (%s): %s",
+                completed.returncode,
+                _decode_subprocess_output(completed.stderr).strip() or "no output",
+            )
+            return None
+
+        try:
+            payload = json.loads(_decode_subprocess_output(completed.stdout) or "")
+            return Fetcher._repair_twitter_cli_mojibake_value(payload)
+        except Exception as e:
+            logger.info(f"twitter-cli thread stdout could not be parsed as JSON: {e}")
+            return None
+
+    @staticmethod
     def _fetch_twitter_content(
         url,
         config,
         proxy_mode_override=None,
         custom_proxy_override=None,
         fetch_thread=None,
+        fetch_thread_author=None,
         backend=None,
         cli_bin=None,
         browser=None,
@@ -2419,20 +2513,32 @@ class Fetcher:
                 html = Fetcher._fetch_twitter_oembed(url, config, proxy_mode_override, custom_proxy_override)
             if html:
                 thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+                thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
                 if thread_mode and Fetcher._extract_twitter_status_id(url):
                     thread_items, thread_current_index = Fetcher._get_twitter_thread_items(
-                        url, config, proxy_mode_override, custom_proxy_override, thread_mode
+                        url, config, proxy_mode_override, custom_proxy_override, thread_mode, thread_author
                     )
+                    if not thread_items:
+                        logger.warning(
+                            "Twitter/X thread expansion requested, but no thread items were available. "
+                            "Login with `surf --login twitter` or provide twitter-cli cookies/tokens for more reliable thread fetching."
+                        )
                     html = Fetcher._merge_thread_context_into_html(html, "twitter", thread_items, thread_current_index)
                 return html
         req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
         fallback_html = Fetcher._fetch_twitter_status_fallbacks(url, proxies=req_proxies)
         if fallback_html:
             thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+            thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
             if thread_mode and Fetcher._extract_twitter_status_id(url):
                 thread_items, thread_current_index = Fetcher._get_twitter_thread_items(
-                    url, config, proxy_mode_override, custom_proxy_override, thread_mode
+                    url, config, proxy_mode_override, custom_proxy_override, thread_mode, thread_author
                 )
+                if not thread_items:
+                    logger.warning(
+                        "Twitter/X thread expansion requested, but no thread items were available. "
+                        "Login with `surf --login twitter` or provide twitter-cli cookies/tokens for more reliable thread fetching."
+                    )
                 fallback_html = Fetcher._merge_thread_context_into_html(
                     fallback_html, "twitter", thread_items, thread_current_index
                 )
@@ -4033,14 +4139,24 @@ class Fetcher:
         return "".join(html_parts)
 
     @staticmethod
-    def _normalize_thread_mode(fetch_thread, default_mode="backward"):
+    def _normalize_thread_mode(fetch_thread, default_mode="after"):
         if fetch_thread is False:
             return None
         if isinstance(fetch_thread, str):
             mode = fetch_thread.strip().lower()
-            if mode in {"forward", "backward", "both"}:
+            if mode == "off":
+                return None
+            if mode in {"after", "before", "both"}:
                 return mode
         return default_mode
+
+    @staticmethod
+    def _normalize_thread_author(fetch_thread_author, default_author="all"):
+        if isinstance(fetch_thread_author, str):
+            author = fetch_thread_author.strip().lower()
+            if author in {"same", "all"}:
+                return author
+        return default_author
 
     @staticmethod
     def _ensure_source_site_meta(html_content, site_name):
@@ -4114,7 +4230,7 @@ class Fetcher:
                 for child in fragment.contents:
                     section.append(child)
 
-            article.insert(0, section)
+            article.append(section)
             return Fetcher._ensure_source_site_meta(str(soup), site_name)
         except Exception as e:
             logger.warning(f"Failed to merge thread context: {e}")
@@ -4166,7 +4282,7 @@ class Fetcher:
         return "".join(html_parts)
 
     @staticmethod
-    def _extract_same_author_thread_items(items, current_index, mode):
+    def _extract_thread_items(items, current_index, mode, author_scope="same"):
         if not items:
             return [], -1
         if current_index is None or current_index < 0 or current_index >= len(items):
@@ -4179,16 +4295,16 @@ class Fetcher:
         start_index = current_index
         end_index = current_index
 
-        if mode in {"forward", "both"} and current_author_key:
+        if mode in {"before", "both"}:
             while start_index > 0:
                 previous = items[start_index - 1]
-                if previous.get("author_key", "") != current_author_key:
+                if author_scope == "same" and previous.get("author_key", "") != current_author_key:
                     break
                 start_index -= 1
-        if mode in {"backward", "both"} and current_author_key:
+        if mode in {"after", "both"}:
             while end_index + 1 < len(items):
                 following = items[end_index + 1]
-                if following.get("author_key", "") != current_author_key:
+                if author_scope == "same" and following.get("author_key", "") != current_author_key:
                     break
                 end_index += 1
 
@@ -4201,9 +4317,11 @@ class Fetcher:
         proxy_mode_override=None,
         custom_proxy_override=None,
         fetch_thread=None,
+        fetch_thread_author=None,
     ):
         site_name = "threads" if "threads.net" in url.lower() else "weibo"
         thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
+        thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
 
         from playwright.sync_api import sync_playwright
 
@@ -4232,6 +4350,7 @@ class Fetcher:
                     """(args) => {
                         const site = args.site;
                         const threadMode = args.threadMode || '';
+                        const threadAuthor = args.threadAuthor || 'same';
                         const currentUrl = window.location.href;
                         const urlMatch = currentUrl.match(site === 'threads'
                             ? /\\/post\\/([^/?#]+)/
@@ -4303,20 +4422,26 @@ class Fetcher:
 
                         let startIndex = currentIndex;
                         let endIndex = currentIndex;
-                        if ((threadMode === 'forward' || threadMode === 'both') && items[currentIndex].authorKey) {
-                            while (startIndex > 0 && items[startIndex - 1].authorKey === items[currentIndex].authorKey) {
+                        if (threadMode === 'before' || threadMode === 'both') {
+                            while (
+                                startIndex > 0 &&
+                                (threadAuthor === 'all' || items[startIndex - 1].authorKey === items[currentIndex].authorKey)
+                            ) {
                                 startIndex -= 1;
                             }
                         }
-                        if ((threadMode === 'backward' || threadMode === 'both') && items[currentIndex].authorKey) {
-                            while (endIndex + 1 < items.length && items[endIndex + 1].authorKey === items[currentIndex].authorKey) {
+                        if (threadMode === 'after' || threadMode === 'both') {
+                            while (
+                                endIndex + 1 < items.length &&
+                                (threadAuthor === 'all' || items[endIndex + 1].authorKey === items[currentIndex].authorKey)
+                            ) {
                                 endIndex += 1;
                             }
                         }
 
                         return { items: items.slice(startIndex, endIndex + 1), currentIndex: currentIndex - startIndex };
                     }""",
-                    {"site": site_name, "threadMode": thread_mode or ""},
+                    {"site": site_name, "threadMode": thread_mode or "", "threadAuthor": thread_author},
                 )
 
                 items = []
@@ -4347,8 +4472,29 @@ class Fetcher:
 
     @staticmethod
     def _get_twitter_thread_items(
-        url, config, proxy_mode_override=None, custom_proxy_override=None, thread_mode="backward"
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        thread_mode="after",
+        thread_author="all",
     ):
+        cli_payload = Fetcher._fetch_twitter_cli_tweet_json(
+            url,
+            config,
+            proxy_mode_override=proxy_mode_override,
+            custom_proxy_override=custom_proxy_override,
+        )
+        cli_items, cli_current_index = Fetcher._extract_twitter_cli_thread_items(
+            cli_payload,
+            Fetcher._extract_twitter_status_id(url) or "",
+            thread_mode,
+            thread_author,
+        )
+        if cli_items:
+            logger.info("Using twitter-cli thread data: %d item(s)", len(cli_items))
+            return cli_items, cli_current_index
+
         try:
             from playwright.sync_api import sync_playwright
 
@@ -4413,13 +4559,67 @@ class Fetcher:
                     if current_index is None or current_index < 0:
                         current_index = len(items) - 1
 
-                    return Fetcher._extract_same_author_thread_items(items, current_index, thread_mode)
+                    return Fetcher._extract_thread_items(items, current_index, thread_mode, thread_author)
                 finally:
                     context.close()
                     browser.close()
         except Exception as e:
             logger.warning(f"Failed to fetch Twitter/X thread items: {e}")
             return [], -1
+
+    @staticmethod
+    def _extract_twitter_cli_thread_items(payload, target_status_id, thread_mode="after", thread_author="all"):
+        if not isinstance(payload, dict) or payload.get("ok") is False:
+            return [], -1
+
+        data = payload.get("data", payload)
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return [], -1
+
+        items = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            author = entry.get("author") or {}
+            if isinstance(author, dict):
+                author_name = author.get("name") or author.get("screenName") or author.get("screen_name") or ""
+                handle = author.get("screenName") or author.get("screen_name") or ""
+                author_key = author.get("id") or handle or author_name
+            else:
+                author_name = str(author)
+                handle = ""
+                author_key = author_name
+
+            text = entry.get("text") or entry.get("full_text") or entry.get("fullText") or ""
+            tweet_id = str(entry.get("id") or entry.get("statusId") or entry.get("status_id") or "")
+            media_blocks = [
+                {"type": "image", "url": media_url}
+                for media_url in Fetcher._extract_twitter_media_urls(entry)
+            ]
+            permalink = entry.get("url") or (f"https://x.com/{handle}/status/{tweet_id}" if handle and tweet_id else "")
+            normalized = {
+                "author": str(author_name).strip(),
+                "author_key": Fetcher._normalize_thread_author_key(author_key),
+                "handle": f"@{handle}" if handle else "",
+                "timestamp": entry.get("createdAtLocal") or entry.get("createdAtISO") or entry.get("createdAt") or "",
+                "text": str(text).strip(),
+                "media": media_blocks,
+                "permalink": permalink,
+                "status_id": tweet_id,
+            }
+            if normalized["author"] and normalized["text"]:
+                items.append(normalized)
+
+        if not items:
+            return [], -1
+
+        current_index = next(
+            (index for index, item in enumerate(items) if target_status_id and item.get("status_id") == target_status_id),
+            0,
+        )
+        return Fetcher._extract_thread_items(items, current_index, thread_mode, thread_author)
 
     @staticmethod
     def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
@@ -5882,6 +6082,7 @@ class Fetcher:
         proxy_mode_override=None,
         custom_proxy_override=None,
         fetch_thread=None,
+        fetch_thread_author=None,
     ):
         """
         Fetch Bluesky post using the official public API.
@@ -5978,7 +6179,8 @@ class Fetcher:
                 )
 
             thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
-            if thread_mode in {"forward", "both"}:
+            thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
+            if thread_mode in {"before", "both"}:
                 parent = thread.get("parent")
                 ancestors = []
                 while isinstance(parent, dict):
@@ -5990,7 +6192,7 @@ class Fetcher:
                         or parent_author.get("displayName")
                         or ""
                     )
-                    if parent_author_key != original_author_key:
+                    if thread_author == "same" and parent_author_key != original_author_key:
                         break
                     ancestors.append(parent_post)
                     parent = parent.get("parent")
@@ -6001,20 +6203,34 @@ class Fetcher:
 
             current_index = len(thread_items) - 1
 
-            if thread_mode in {"backward", "both"}:
-                replies = thread.get("replies", [])
-                cursor = replies[0] if replies else None
-                while isinstance(cursor, dict):
-                    reply_post = cursor.get("post", {})
-                    reply_author = reply_post.get("author", {})
-                    reply_author_key = (
-                        reply_author.get("did") or reply_author.get("handle") or reply_author.get("displayName") or ""
-                    )
-                    if reply_author_key != original_author_key:
-                        break
-                    append_post_item(reply_post)
-                    nested_replies = cursor.get("replies", [])
-                    cursor = nested_replies[0] if nested_replies else None
+            if thread_mode in {"after", "both"}:
+                if thread_author == "all":
+                    def append_reply_tree(reply_nodes):
+                        for reply in reply_nodes or []:
+                            if not isinstance(reply, dict):
+                                continue
+                            reply_post = reply.get("post", {})
+                            append_post_item(reply_post)
+                            append_reply_tree(reply.get("replies", []))
+
+                    append_reply_tree(thread.get("replies", []))
+                else:
+                    replies = thread.get("replies", [])
+                    cursor = replies[0] if replies else None
+                    while isinstance(cursor, dict):
+                        reply_post = cursor.get("post", {})
+                        reply_author = reply_post.get("author", {})
+                        reply_author_key = (
+                            reply_author.get("did")
+                            or reply_author.get("handle")
+                            or reply_author.get("displayName")
+                            or ""
+                        )
+                        if reply_author_key != original_author_key:
+                            break
+                        append_post_item(reply_post)
+                        nested_replies = cursor.get("replies", [])
+                        cursor = nested_replies[0] if nested_replies else None
 
             html_content = Fetcher._render_social_thread_html("bluesky", url, thread_items, current_index)
 
@@ -6152,6 +6368,7 @@ class Fetcher:
         proxy_mode_override=None,
         custom_proxy_override=None,
         fetch_thread=None,
+        fetch_thread_author=None,
     ):
         """Fetch V2EX topic pages as structured Markdown, with replies only when requested."""
         try:
@@ -7292,27 +7509,30 @@ class OutputHandler:
                         current_section = section
                         break
                 if not current_section:
-                    current_section = thread_posts[0]
+                    # Merged Twitter/X replies are structured as thread posts while
+                    # the original tweet remains plain article content. Do not let
+                    # the first reply replace the source post as the title basis.
+                    pass
+                else:
+                    meta_paragraph = current_section.find("p", recursive=False)
+                    if meta_paragraph:
+                        strong_tag = meta_paragraph.find("strong")
+                        if strong_tag:
+                            author_name = re.sub(r"\s+", " ", strong_tag.get_text(" ", strip=True)).strip() or None
 
-                meta_paragraph = current_section.find("p", recursive=False)
-                if meta_paragraph:
-                    strong_tag = meta_paragraph.find("strong")
-                    if strong_tag:
-                        author_name = re.sub(r"\s+", " ", strong_tag.get_text(" ", strip=True)).strip() or None
-
-                for paragraph in current_section.find_all("p", recursive=False):
-                    line = re.sub(r"\s+", " ", paragraph.get_text(" ", strip=True)).strip()
-                    if not line:
-                        continue
-                    if line.lower().startswith("view "):
-                        continue
-                    if " | @" in line:
-                        continue
-                    sentence = OutputHandler._extract_first_sentence(line)
-                    if sentence:
-                        if author_name:
-                            return f"{sentence} - {author_name} on {site_label}"
-                        return sentence
+                    for paragraph in current_section.find_all("p", recursive=False):
+                        line = re.sub(r"\s+", " ", paragraph.get_text(" ", strip=True)).strip()
+                        if not line:
+                            continue
+                        if line.lower().startswith("view "):
+                            continue
+                        if " | @" in line:
+                            continue
+                        sentence = OutputHandler._extract_first_sentence(line)
+                        if sentence:
+                            if author_name:
+                                return f"{sentence} - {author_name} on {site_label}"
+                            return sentence
 
             html_title = OutputHandler._extract_html_title(html_content) or ""
             skip_lines = set()
@@ -8190,6 +8410,46 @@ class AuthHandler:
         return "; ".join(f"{k}={v}" for k, v in by_name.items())
 
     @staticmethod
+    def twitter_cookie_values():
+        """Return saved Twitter/X auth_token, ct0, and full cookie string from Surf auth state."""
+        state = AuthHandler.load_state("twitter", log_load=False)
+        if not state:
+            return None
+        cookies = state.get("cookies") or []
+        by_name = {}
+        for cookie in cookies:
+            domain = (cookie.get("domain") or "").lower()
+            if "x.com" not in domain and "twitter.com" not in domain:
+                continue
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if name and value and name not in by_name:
+                by_name[name] = value
+        auth_token = by_name.get("auth_token")
+        ct0 = by_name.get("ct0")
+        if not auth_token or not ct0:
+            return None
+        return {
+            "auth_token": auth_token,
+            "ct0": ct0,
+            "cookie_string": "; ".join(f"{name}={value}" for name, value in by_name.items()),
+        }
+
+    @staticmethod
+    def apply_twitter_cookie_env(env):
+        """Inject saved Surf Twitter/X cookies into a subprocess environment."""
+        if env.get("TWITTER_AUTH_TOKEN") and env.get("TWITTER_CT0"):
+            return env
+        values = AuthHandler.twitter_cookie_values()
+        if not values:
+            return env
+        env["TWITTER_AUTH_TOKEN"] = values["auth_token"]
+        env["TWITTER_CT0"] = values["ct0"]
+        if values.get("cookie_string"):
+            env["TWITTER_COOKIE_STRING"] = values["cookie_string"]
+        return env
+
+    @staticmethod
     def save_state(site_name, state):
         """
         Save browser state for a site.
@@ -8240,6 +8500,161 @@ class AuthHandler:
         AuthHandler.save_state(normalized_site_name, state)
 
     @staticmethod
+    def _twitter_storage_state_from_cookie_string(cookie_string):
+        """Build a Playwright storage_state payload from a browser-style Twitter cookie string."""
+        if not cookie_string:
+            return None
+
+        cookies = []
+        seen = set()
+        for part in cookie_string.split(";"):
+            if "=" not in part:
+                continue
+            name, value = part.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            cookies.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".x.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": name in {"auth_token", "ct0"},
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            )
+            cookies.append(
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": ".twitter.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": name in {"auth_token", "ct0"},
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            )
+
+        names = {cookie["name"] for cookie in cookies}
+        if not {"auth_token", "ct0"}.issubset(names):
+            return None
+        return {"cookies": cookies, "origins": []}
+
+    @staticmethod
+    def import_twitter_cookies_from_cli(
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        browser=None,
+        profile=None,
+    ):
+        """Use twitter-cli/browser-cookie3 to import real-browser X cookies into Surf auth state."""
+        env_auth_token = (os.environ.get("TWITTER_AUTH_TOKEN") or "").strip()
+        env_ct0 = (os.environ.get("TWITTER_CT0") or "").strip()
+        if env_auth_token and env_ct0:
+            return AuthHandler.import_twitter_cookie_values(env_auth_token, env_ct0)
+
+        cli_command = Fetcher._resolve_twitter_cli_command(config.get("Twitter", "cli_bin", fallback=""))
+        if not cli_command:
+            logger.info("uvx not found; cannot import Twitter cookies via twitter-cli")
+            return False
+
+        req_proxies, _ = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
+        proxy_url = None
+        if req_proxies:
+            proxy_url = req_proxies.get("https") or req_proxies.get("http")
+
+        env = os.environ.copy()
+        env.setdefault("UV_CACHE_DIR", os.path.join(os.getcwd(), ".uv-cache"))
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        AuthHandler.apply_twitter_cookie_env(env)
+        browser = (browser or config.get("Twitter", "browser", fallback="") or "").strip()
+        profile = (profile or config.get("Twitter", "profile", fallback="") or "").strip()
+        if browser:
+            env["TWITTER_BROWSER"] = browser
+        if profile:
+            env["TWITTER_CHROME_PROFILE"] = profile
+        if proxy_url:
+            env["TWITTER_PROXY"] = proxy_url
+
+        script = r"""
+import json
+from twitter_cli.auth import get_cookies
+
+cookies = get_cookies()
+print(json.dumps(cookies, ensure_ascii=False))
+"""
+        command = cli_command[:-1] + ["python", "-c", script] if cli_command[-1] == "twitter" else []
+        if not command:
+            return False
+
+        try:
+            completed = _run_subprocess_interruptibly(
+                command,
+                timeout=60,
+                env=env,
+                check=False,
+            )
+        except Exception as e:
+            logger.info(f"Twitter cookie import via twitter-cli failed to run: {e}")
+            return False
+
+        if completed.returncode != 0:
+            message = (
+                _decode_subprocess_output(completed.stderr)
+                or _decode_subprocess_output(completed.stdout)
+                or ""
+            ).strip()
+            logger.info(
+                "Twitter cookie import via twitter-cli failed (%s): %s",
+                completed.returncode,
+                message or "no output",
+            )
+            if message:
+                print("Twitter/X browser cookie import failed:")
+                print(message)
+            return False
+
+        try:
+            cookies = json.loads(_decode_subprocess_output(completed.stdout) or "")
+        except Exception as e:
+            logger.info(f"Twitter cookie import output could not be parsed: {e}")
+            return False
+
+        cookie_string = cookies.get("cookie_string")
+        if not cookie_string and cookies.get("auth_token") and cookies.get("ct0"):
+            cookie_string = f"auth_token={cookies['auth_token']}; ct0={cookies['ct0']}"
+        state = AuthHandler._twitter_storage_state_from_cookie_string(cookie_string)
+        if not state:
+            logger.info("Twitter cookie import did not produce auth_token/ct0")
+            return False
+
+        AuthHandler.save_state("twitter", state)
+        logger.info("Imported Twitter/X cookies from real browser into Surf auth state")
+        return True
+
+    @staticmethod
+    def import_twitter_cookie_values(auth_token, ct0, cookie_string=None):
+        """Import manually supplied Twitter/X auth_token and ct0 values."""
+        auth_token = (auth_token or "").strip()
+        ct0 = (ct0 or "").strip()
+        if not auth_token or not ct0:
+            return False
+        cookie_string = cookie_string or f"auth_token={auth_token}; ct0={ct0}"
+        state = AuthHandler._twitter_storage_state_from_cookie_string(cookie_string)
+        if not state:
+            return False
+        AuthHandler.save_state("twitter", state)
+        logger.info("Imported Twitter/X cookies from auth_token/ct0 values")
+        return True
+
+    @staticmethod
     def clear_state(site_name=None):
         """
         Clear saved authentication state.
@@ -8274,6 +8689,8 @@ class AuthHandler:
         config,
         proxy_mode_override=None,
         custom_proxy_override=None,
+        twitter_browser=None,
+        twitter_profile=None,
     ):
         """
         Perform interactive login for a site.
@@ -8319,6 +8736,30 @@ class AuthHandler:
         print("2. Complete any CAPTCHA or verification if needed")
         print("3. Once logged in, press Enter in this terminal to save the session")
         print(f"{'=' * 60}\n")
+
+        if normalized_site_name == "twitter":
+            print("Trying to import Twitter/X cookies from your real browser first...")
+            if AuthHandler.import_twitter_cookies_from_cli(
+                config,
+                proxy_mode_override,
+                custom_proxy_override,
+                browser=twitter_browser,
+                profile=twitter_profile,
+            ):
+                print("Imported Twitter/X login cookies from your real browser.")
+                return True
+            print("Browser cookie import was unavailable.")
+            print("If the X login window loops, paste cookie values instead.")
+            manual = input("Paste auth_token now? [y/N]: ").strip().lower()
+            if manual in {"y", "yes"}:
+                auth_token = getpass.getpass("auth_token: ").strip()
+                ct0 = getpass.getpass("ct0: ").strip()
+                if AuthHandler.import_twitter_cookie_values(auth_token, ct0):
+                    print("Imported Twitter/X login cookies from auth_token/ct0.")
+                    return True
+                print("auth_token/ct0 import failed; falling back to an interactive login window.")
+            else:
+                print("Falling back to an interactive login window.")
 
         with sync_playwright() as p:
             browser = None
@@ -8487,8 +8928,9 @@ Examples:
   surf -c http://127.0.0.1:7890 https://example.com
   surf -n https://example.com                   # No proxy
   surf -hrn https://example.com                 # Combined short flags
-  surf -t https://x.com/user/status/123         # Fetch same-author later replies in the thread
-  surf --thread forward https://x.com/user/status/123
+  surf -t https://x.com/user/status/123         # Fetch later replies in the thread
+  surf --thread before https://x.com/user/status/123
+  surf --thread both --thread-author same https://x.com/user/status/123
 
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
@@ -8497,7 +8939,8 @@ Special Sites:
                         If the proxy path fails, Surf retries direct access automatically.
                         Default backend prefers `uvx --from twitter-cli twitter`.
                         `auto` backend tries CLI first, then native fallback.
-  Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `backward`.
+  Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `after`
+                        with `--thread-author all`.
   Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
                         use `First sentence - Author on Site`.
   V2EX:                Forces configured proxy by default, keeps the original
@@ -8666,14 +9109,20 @@ Twitter/X Backend:
         "-t",
         "--thread",
         nargs="?",
-        const="backward",
-        choices=["forward", "backward", "both"],
-        help="Thread expansion mode: backward=follow same-author later replies (default), forward=earlier context, both=both directions",
+        const="after",
+        choices=["after", "before", "both", "off"],
+        help="Thread range: after=later posts (default), before=earlier posts, both=both directions, off=disabled",
     )
     thread_group.add_argument(
         "--no-thread",
         action="store_true",
         help="Disable thread expansion for supported social sites",
+    )
+    parser.add_argument(
+        "--thread-author",
+        choices=["same", "all"],
+        default="all",
+        help="Thread author scope: all=all authors (default), same=only the current post author",
     )
     parser.add_argument(
         "--config",
@@ -8754,7 +9203,15 @@ Twitter/X Backend:
         if not login_url:
             parser.error(f"Unsupported site: {site_name}. Supported: {', '.join(AuthHandler.LOGIN_URLS.keys())}")
         login_site = AuthHandler.normalize_site_name(site_name)
-        success = AuthHandler.interactive_login(login_site, login_url, config, proxy_mode, custom_proxy)
+        success = AuthHandler.interactive_login(
+            login_site,
+            login_url,
+            config,
+            proxy_mode,
+            custom_proxy,
+            twitter_browser=args.twitter_browser,
+            twitter_profile=args.twitter_profile,
+        )
         sys.exit(0 if success else 1)
 
     # Check if url is required but not provided
@@ -8795,9 +9252,10 @@ Twitter/X Backend:
 
     fetch_thread = None
     if args.thread:
-        fetch_thread = args.thread
+        fetch_thread = False if args.thread == "off" else args.thread
     elif args.no_thread:
         fetch_thread = False
+    fetch_thread_author = args.thread_author
 
     # Check if URL matches special site handlers for default policies
     handler, site_name, site_config = _get_handler_for_url(args.url)
@@ -8814,7 +9272,7 @@ Twitter/X Backend:
 
         if site_config.get("default_thread") and fetch_thread is None:
             logger.info(f"{site_name}: Applying default thread expansion policy")
-            fetch_thread = "backward"
+            fetch_thread = "after"
 
     # NCPSSD secure article pages default to PDF output (same as implicit `-p`).
     # This only applies when user did not explicitly choose an output format.
@@ -8858,6 +9316,7 @@ Twitter/X Backend:
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
             fetch_thread=fetch_thread,
+            fetch_thread_author=fetch_thread_author,
             twitter_backend=args.twitter_backend,
             twitter_cli_bin=args.twitter_cli_bin,
             twitter_browser=args.twitter_browser,
@@ -9075,8 +9534,11 @@ Twitter/X Backend:
         if output_path:
             if output_path == "-":
                 # Output to stdout
-                print(f"# {title}\n")
-                print(md_content)
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+                sys.stdout.write(f"# {title}\n\n")
+                sys.stdout.write(md_content)
+                if not md_content.endswith("\n"):
+                    sys.stdout.write("\n")
             else:
                 OutputHandler.save_markdown(
                     title,
