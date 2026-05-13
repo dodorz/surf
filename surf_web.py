@@ -343,6 +343,46 @@ HTML_TEMPLATE = """
         .save-html { background: #e34c26; color: white; }
         .save-pdf { background: #f40f02; color: white; }
         .save-audio { background: #6f42c1; color: white; }
+
+        .save-config {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin: 16px 0 14px;
+            padding: 14px;
+            border: 1px solid #e1e8f0;
+            border-radius: 10px;
+            background: #f8fbff;
+        }
+
+        .save-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .save-field label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .save-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #cfd8e3;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            color: #1f2937;
+            background: #fff;
+        }
+
+        .save-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+        }
         
         .content-preview {
             background: #f8f9fa;
@@ -929,16 +969,36 @@ HTML_TEMPLATE = """
                 ['html', 'save-html', '🌐 保存 HTML', {}],
                 ['pdf', 'save-pdf', '📕 保存 PDF', {}],
                 ['audio', 'save-audio', '🔊 保存 Audio', {}],
-                ['audio', 'save-audio play-btn', '▶ 播放语音', { speak: true, promptForDir: false }],
+                ['audio', 'save-audio play-btn', '▶ 播放语音', { speak: true }],
             ];
 
             for (const [fileType, className, label, options] of buttons) {
                 const btn = document.createElement('button');
                 btn.className = 'save-btn ' + className;
                 btn.innerHTML = label;
-                btn.onclick = () => saveFile(result, fileType, options);
+                btn.onclick = () => saveFile(container, result, fileType, options);
                 saveLinks.appendChild(btn);
             }
+        }
+
+        function resultDefaultDirs(container) {
+            try {
+                return JSON.parse(container.dataset.defaultDirs || '{}');
+            } catch (error) {
+                return {};
+            }
+        }
+
+        function getSaveFormState(container, fileType) {
+            const dirInput = container.querySelector('.save-dir-input');
+            const titleInput = container.querySelector('.save-title-input');
+            const defaultDirs = resultDefaultDirs(container);
+            const defaultTitle = (container.dataset.defaultSaveTitle || '').trim();
+
+            return {
+                saveDir: (dirInput?.value || '').trim() || (defaultDirs[fileType] || ''),
+                customTitle: (titleInput?.value || '').trim() || defaultTitle || 'Untitled',
+            };
         }
 
         function wireResultTabs(card) {
@@ -984,6 +1044,16 @@ HTML_TEMPLATE = """
                 <div class="tab-content" data-tab-content="raw">
                     <pre class="content-preview"></pre>
                 </div>
+                <div class="save-config">
+                    <div class="save-field">
+                        <label>保存文件夹</label>
+                        <input class="save-input save-dir-input" type="text">
+                    </div>
+                    <div class="save-field">
+                        <label>文件标题</label>
+                        <input class="save-input save-title-input" type="text">
+                    </div>
+                </div>
             `;
 
             card.querySelector('.result-title').textContent = `${result.title || 'Untitled'}${label}`;
@@ -991,9 +1061,13 @@ HTML_TEMPLATE = """
             if (hint) {
                 hint.textContent = source;
             }
+            card.dataset.defaultDirs = JSON.stringify(result.defaultDirs || {});
+            card.dataset.defaultSaveTitle = result.defaultSaveTitle || result.title || 'Untitled';
             card.querySelector('[data-tab-content="markdown"] pre').textContent = result.markdown || '';
             card.querySelector('[data-tab-content="html"] pre').textContent = result.html || '';
             card.querySelector('[data-tab-content="raw"] pre').textContent = result.raw || '';
+            card.querySelector('.save-dir-input').value = (result.defaultDirs || {}).md || '';
+            card.querySelector('.save-title-input').value = result.defaultSaveTitle || result.title || 'Untitled';
 
             addSaveButtons(card, result);
             wireResultTabs(card);
@@ -1113,31 +1187,17 @@ HTML_TEMPLATE = """
         // Store result data for saving
         let currentResults = [];
 
-        async function saveFile(resultData, fileType, options = {}) {
+        async function saveFile(container, resultData, fileType, options = {}) {
             if (!resultData) {
                 showStatus('error', '没有可保存的内容');
                 return;
             }
 
-            // Get default directory from config
-            const defaultDir = (resultData.defaultDirs || window.defaultDirs || {})[fileType] || '';
-            const promptForDir = options.promptForDir !== false;
             const speak = !!options.speak;
-
-            let saveDir = '';
-            if (promptForDir) {
-                saveDir = prompt(
-                    `保存 ${fileType.toUpperCase()} 文件\n\n输入保存目录（留空使用默认目录 ${defaultDir}）：`,
-                    ''
-                );
-
-                // If user cancelled
-                if (saveDir === null) {
-                    return;
-                }
-            }
+            const { saveDir, customTitle } = getSaveFormState(container, fileType);
 
             try {
+                showStatus('processing', `正在保存 ${fileType.toUpperCase()} 文件...`);
                 const response = await fetch('/api/save', {
                     method: 'POST',
                     headers: {
@@ -1145,7 +1205,8 @@ HTML_TEMPLATE = """
                     },
                     body: JSON.stringify({
                         fileType,
-                        saveDir: saveDir.trim(),
+                        saveDir,
+                        customTitle,
                         data: resultData,
                         speak
                     })
@@ -1335,6 +1396,14 @@ def build_output_path(title, extension, target_dir, source_url=None, html_conten
         resolve_user_path(target_dir),
         f"{safe_title}.{extension}",
     )
+
+
+def build_default_filename_stem(title, source_url=None, html_content=None):
+    """Build the default filename stem shown in the Web save form."""
+    filename_title = OutputHandler._get_filename_title(
+        title, source_url=source_url, html_content=html_content
+    )
+    return OutputHandler._safe_filename_title(filename_title, max_len=100)
 
 
 def resolve_web_thread_mode(data, site_name, site_config):
@@ -1581,6 +1650,11 @@ def process_url():
             "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
             "audio": config.get_path("Output", "audio_dir", fallback="audio"),
         }
+        defaultSaveTitle = build_default_filename_stem(
+            title,
+            source_url=source_url,
+            html_content=html_content,
+        )
 
         return jsonify(
             {
@@ -1590,6 +1664,7 @@ def process_url():
                 "html": cleaned_html,
                 "raw": original_md,
                 "defaultDirs": defaultDirs,
+                "defaultSaveTitle": defaultSaveTitle,
                 # Store metadata for saving later
                 "metadata": {
                     "title": title,
@@ -1631,6 +1706,7 @@ def save_file():
     data = request.get_json(silent=True) or {}
     fileType = data.get("fileType")
     saveDir = data.get("saveDir", "").strip()
+    customTitle = (data.get("customTitle") or "").strip()
     resultData = data.get("data", {})
     speak = bool(data.get("speak"))
 
@@ -1657,7 +1733,7 @@ def save_file():
     os.makedirs(targetDir, exist_ok=True)
 
     try:
-        title = resultData.get("title", "Untitled")
+        title = customTitle or resultData.get("title", "Untitled")
         metadata = resultData.get("metadata", {})
         html_content = metadata.get("html_content", "")
         source_url = metadata.get("source_url")
