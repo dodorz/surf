@@ -99,6 +99,7 @@ GitHub repo and Markdown URLs use the normal Surf Web language default: content 
 Web proxy default selection is intentionally different from the CLI:
 - CLI defaults to implicit auto proxy resolution because it often runs on Windows client machines where many sites need a local proxy.
 - Surf Web defaults to `no` proxy because it usually runs on a server where public sites are directly reachable, and Linux servers do not have Windows registry proxy settings. Choose `auto`, `env`, `custom`, or another proxy mode manually in the Web UI only when that deployment needs it.
+- When Surf used an implicit proxy and the first HTTP request fails with a proxy/TLS handshake error, it automatically retries once without the proxy before switching to browser rendering. Explicit `-x win` / `-x custom` still keep the user-selected proxy behavior.
 
 For local access:
 

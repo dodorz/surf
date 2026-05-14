@@ -1226,10 +1226,10 @@ class Fetcher:
 
         if not use_browser:
             should_use_browser = False
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
             try:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-                }
                 logger.info(f"Requests Proxies: {req_proxies if req_proxies else 'None'}")
                 response = _requests_get_interruptibly(url, headers=headers, proxies=req_proxies, timeout=10)
                 response.raise_for_status()
@@ -1243,6 +1243,20 @@ class Fetcher:
                     return decoded_text
 
             except Exception as e:
+                if Fetcher._should_retry_without_proxy(proxy_mode_override, req_proxies, e):
+                    logger.warning(f"Requests failed via implicit proxy: {e}. Retrying direct connection...")
+                    try:
+                        response = _requests_get_interruptibly(url, headers=headers, timeout=10)
+                        response.raise_for_status()
+                        decoded_text = Fetcher._decode_response_text(response)
+                        if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
+                            logger.info("Direct retry succeeded but content still seems short or requires JS. Switching to browser...")
+                            should_use_browser = True
+                        else:
+                            return decoded_text
+                    except Exception as retry_error:
+                        logger.warning(f"Direct retry after proxy failure failed: {retry_error}. Switching to browser...")
+                        return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
                 logger.warning(f"Requests failed: {e}. Switching to browser...")
 
             if should_use_browser:
@@ -3053,13 +3067,16 @@ class Fetcher:
             "407 proxy",
             "tunnel error",
             "socks",
+            "ssleoferror",
+            "unexpected_eof_while_reading",
+            "eof occurred in violation of protocol",
         ]
         return any(marker in message for marker in proxy_markers)
 
     @staticmethod
-    def _should_retry_twitter_without_proxy(proxy_mode_override, proxy_value, error):
+    def _should_retry_without_proxy(proxy_mode_override, proxy_value, error):
         """
-        Allow automatic direct-connection fallback only for implicit Twitter proxy usage.
+        Allow automatic direct-connection fallback only for implicit proxy usage.
         Explicit `-x win` / `-x custom` should still be treated as user intent.
         """
         if proxy_mode_override is not None:
@@ -3067,6 +3084,14 @@ class Fetcher:
         if not proxy_value:
             return False
         return Fetcher._is_proxy_related_error(error)
+
+    @staticmethod
+    def _should_retry_twitter_without_proxy(proxy_mode_override, proxy_value, error):
+        """
+        Allow automatic direct-connection fallback only for implicit Twitter proxy usage.
+        Explicit `-x win` / `-x custom` should still be treated as user intent.
+        """
+        return Fetcher._should_retry_without_proxy(proxy_mode_override, proxy_value, error)
 
     @staticmethod
     def _clean_twitter_article_content(html_content):
