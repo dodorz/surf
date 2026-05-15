@@ -90,6 +90,7 @@ The web form exposes the most commonly used Surf options directly, including:
 - thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
+- the input area also includes a paste button, an inline fetch button, and a `Save full text` mode that keeps pasted text intact even when it contains URLs
 - after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
 
 As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.

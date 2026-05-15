@@ -62,6 +62,32 @@ def test_process_url_treats_plain_text_as_post(monkeypatch):
     assert payload["metadata"]["source_url"] is None
 
 
+def test_process_url_can_force_full_text_save_even_when_text_contains_url(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    def _should_not_fetch(*args, **kwargs):
+        raise AssertionError("Fetcher.fetch should not be called when full-text save is enabled")
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", _should_not_fetch)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "标题在这里 https://example.com/page\n\n这是希望原样保存的全文。",
+            "lang": "raw",
+            "save_full_text": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert "https://example.com/page" in payload["markdown"]
+    assert "这是希望原样保存的全文。" in payload["markdown"]
+    assert payload["metadata"]["source_url"] is None
+
+
 def test_translation_metadata_requires_actual_translation(monkeypatch):
     assert not _translation_was_performed("中文正文", "中文正文", "中文标题", "中文标题")
     assert _translation_was_performed("English", "中文", "Title", "标题")

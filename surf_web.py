@@ -172,6 +172,21 @@ HTML_TEMPLATE = """
             min-height: 96px;
             resize: vertical;
         }
+
+        .input-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .input-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
         
         .options-grid {
             display: grid;
@@ -497,6 +512,10 @@ HTML_TEMPLATE = """
             .save-actions {
                 justify-content: flex-start;
             }
+
+            .input-toolbar {
+                align-items: stretch;
+            }
         }
     </style>
 </head>
@@ -513,7 +532,18 @@ HTML_TEMPLATE = """
                     <label for="url">URL 地址或纯文本</label>
                     <textarea id="url" name="url" class="url-input" rows="4"
                               placeholder="粘贴链接，或直接输入一段没有 URL 的文字"></textarea>
+                    <div class="input-toolbar">
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="saveFullText" name="save_full_text">
+                            <label for="saveFullText">全文保存</label>
+                        </div>
+                        <div class="input-actions">
+                            <button type="button" class="btn btn-secondary" id="pasteBtn">粘贴</button>
+                            <button type="submit" class="btn btn-primary" id="submitBtn">开始获取</button>
+                        </div>
+                    </div>
                     <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
+                    <div class="field-hint">勾选“全文保存”后，即使文本里包含 URL，也会整段作为正文保存，不再提取链接抓取网页。</div>
                 </div>
                 
                 <div class="section-title">获取内容</div>
@@ -722,11 +752,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 
-                <div style="text-align: center; margin-top: 25px;">
-                    <button type="submit" class="btn btn-primary" id="submitBtn">
-                        开始获取
-                    </button>
-                </div>
             </form>
         </div>
         
@@ -1126,9 +1151,14 @@ HTML_TEMPLATE = """
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
+            data.save_full_text = data.save_full_text === 'on';
             const rawInput = (data.url || '').trim();
-            const urls = extractUrlsFromInput(rawInput);
-            const inputs = urls.length ? urls : (rawInput ? [rawInput] : []);
+            const inputs = data.save_full_text
+                ? (rawInput ? [rawInput] : [])
+                : (() => {
+                    const urls = extractUrlsFromInput(rawInput);
+                    return urls.length ? urls : (rawInput ? [rawInput] : []);
+                })();
 
             if (!inputs.length) {
                 showStatus('error', '请输入 URL 或文本');
@@ -1168,6 +1198,21 @@ HTML_TEMPLATE = """
             } finally {
                 submitBtn.disabled = false;
                 submitBtn.textContent = '开始获取';
+            }
+        });
+
+        document.getElementById('pasteBtn').addEventListener('click', async function() {
+            try {
+                const text = await navigator.clipboard.readText();
+                if (!text) {
+                    showStatus('error', '剪贴板为空');
+                    return;
+                }
+                urlInput.value = text;
+                await refreshProxyDefault(true);
+                await refreshSiteDefaults(true);
+            } catch (error) {
+                showStatus('error', '读取剪贴板失败: ' + error.message);
             }
         });
         
@@ -1480,7 +1525,8 @@ def process_url():
 
     data = request.get_json(silent=True) or {}
     raw_url_input = data.get("url")
-    url = extract_url_from_text(raw_url_input)
+    save_full_text = bool(data.get("save_full_text", False))
+    url = None if save_full_text else extract_url_from_text(raw_url_input)
     raw_text = (raw_url_input or "").strip()
     is_text_post = bool(raw_text and not url)
 
