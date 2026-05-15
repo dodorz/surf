@@ -69,12 +69,10 @@ from surf import (
     OutputHandler,
     TTSHandler,
     _convert_embedded_html_in_markdown,
-    _extract_direct_markdown_payload,
     _get_handler_for_url,
     _get_version,
     logger,
-    _render_markdown_to_html,
-    _translation_was_performed,
+    _process_fetched_content,
     resolve_user_path,
 )
 
@@ -1330,21 +1328,6 @@ def build_text_post_html(text, title):
     )
 
 
-def extract_source_url_from_html(html_blob, default_url):
-    if not html_blob:
-        return default_url
-    try:
-        from bs4 import BeautifulSoup
-
-        soup = BeautifulSoup(html_blob, "html.parser")
-        meta_tag = soup.find("meta", attrs={"name": "source-url"})
-        if meta_tag and meta_tag.get("content"):
-            return meta_tag["content"]
-    except Exception:
-        pass
-    return default_url
-
-
 def build_web_ocr_args(data):
     """Build an args-like object for OCR settings reused from the CLI pipeline."""
     ocr_mode = str(data.get("ocr_mode", "default")).strip().lower()
@@ -1562,87 +1545,27 @@ def process_url():
             )
             if not html_content:
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
-
-            source_url = extract_source_url_from_html(html_content, url)
-            content_base_url = source_url
-            direct_markdown_payload = _extract_direct_markdown_payload(html_content)
-
-            if direct_markdown_payload:
-                title = direct_markdown_payload.get("title") or "Untitled"
-                md_content = _convert_embedded_html_in_markdown(
-                    direct_markdown_payload.get("markdown") or ""
-                )
-                content_base_url = direct_markdown_payload.get("base_url") or source_url
-                cleaned_html = _render_markdown_to_html(md_content)
-            else:
-                # Extract content
-                title, cleaned_html = ContentProcessor.extract_content(html_content)
-                if not title:
-                    title = "Untitled"
-
-            if not direct_markdown_payload:
-                try:
-                    cleaned_html = OcrHandler.annotate_html_with_ocr(
-                        cleaned_html,
-                        source_url=source_url,
-                        site_name=site_name,
-                        site_config=site_config,
-                        args=build_web_ocr_args(data),
-                        config=config,
-                        proxy_mode_override=proxy_override,
-                        custom_proxy_override=custom_proxy,
-                    )
-                except Exception as e:
-                    logger.warning(f"Web OCR failed and was skipped: {e}")
-
-            if not direct_markdown_payload:
-                # Convert to markdown
-                md_content = ContentProcessor.to_markdown(cleaned_html)
-
-            social_title = OutputHandler._extract_social_first_sentence_title(
-                html_content, source_url=source_url
+            processed = _process_fetched_content(
+                html_content,
+                url,
+                config,
+                site_name=site_name,
+                site_config=site_config,
+                lang_mode=lang_mode,
+                ocr_args=build_web_ocr_args(data),
+                proxy_mode_override=proxy_override,
+                custom_proxy_override=custom_proxy,
+                llm_provider=(data.get("llm") or "").strip() or None,
             )
-            if social_title:
-                title = social_title
-
-            original_md = md_content
-            original_title = title
-
-        # Handle language mode
-        target_lang = config.get("Output", "target_language", fallback="zh-cn")
-
-        skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
-
-        if lang_mode != "raw":
-            llm_provider = (data.get("llm") or "").strip() or None
-            md_content, translated_title = ContentProcessor.translate_if_needed(
-                md_content,
-                title=None if skip_title_translation else title,
-                target_lang=target_lang,
-                config=config,
-                llm_provider=llm_provider,
-            )
-            translation_performed = _translation_was_performed(
-                original_md,
-                md_content,
-                original_title,
-                translated_title,
-                title_was_translated=not skip_title_translation,
-            )
-            if skip_title_translation:
-                translated_title = original_title
-
-            if lang_mode == "both" and translated_title != original_title:
-                title = f"{translated_title} ({original_title})"
-                md_content = f"{md_content}\n\n---\n\n### Original Content / 原文内容\n\n{original_md}"
-            else:
-                title = translated_title
-
-        # Convert relative URLs to absolute
-        base_url_for_links = content_base_url or source_url or url
-        if base_url_for_links:
-            md_content = OutputHandler._convert_markdown_urls_to_absolute(md_content, base_url_for_links)
-            cleaned_html = OutputHandler._convert_urls_to_absolute(cleaned_html, base_url_for_links)
+            source_url = processed["source_url"]
+            content_base_url = processed["content_base_url"]
+            title = processed["title"]
+            cleaned_html = processed["cleaned_html"]
+            md_content = processed["markdown"]
+            original_md = processed["raw_markdown"]
+            original_title = processed["original_title"]
+            translated_title = processed["translated_title"]
+            translation_performed = processed["translation_performed"]
 
         translator = None
         if translation_performed:

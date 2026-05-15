@@ -339,3 +339,51 @@ def test_web_github_untouched_translation_mode_checks_translation(monkeypatch):
     payload = response.get_json()
     assert payload["success"] is True
     assert payload["markdown"] == "中文 README"
+
+
+def test_web_process_uses_shared_post_fetch_pipeline(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    seen = {}
+
+    def fake_fetch(*args, **kwargs):
+        return "<html><head><title>x</title></head><body><article>x</article></body></html>"
+
+    def fake_process(html_content, request_url, config, **kwargs):
+        seen["html_content"] = html_content
+        seen["request_url"] = request_url
+        seen["lang_mode"] = kwargs.get("lang_mode")
+        seen["site_name"] = kwargs.get("site_name")
+        return {
+            "title": "Processed",
+            "cleaned_html": "<article>Processed</article>",
+            "markdown": "Processed body",
+            "raw_markdown": "Processed body",
+            "original_title": "Processed",
+            "translated_title": None,
+            "translation_performed": False,
+            "source_url": request_url,
+            "content_base_url": request_url,
+            "html_content": html_content,
+        }
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", fake_fetch)
+    monkeypatch.setattr(surf_web, "_process_fetched_content", fake_process)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://zserge.com/posts/visicalc/",
+            "lang": "raw",
+            "proxy": "no",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["title"] == "Processed"
+    assert payload["markdown"] == "Processed body"
+    assert seen["request_url"] == "https://zserge.com/posts/visicalc/"
+    assert seen["lang_mode"] == "raw"
