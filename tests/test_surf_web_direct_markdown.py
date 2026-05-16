@@ -73,3 +73,50 @@ def test_save_endpoint_uses_custom_title_and_dir(monkeypatch, tmp_path):
     assert saved["title"] == "Custom Name"
     assert Path(saved["output_path"]).name == "Custom Name.md"
     assert Path(data["savePath"]).name == "Custom Name.md"
+
+
+def test_save_endpoint_can_merge_multiple_results(monkeypatch, tmp_path):
+    saved = {}
+
+    def fake_save_markdown(title, content, config, **kwargs):
+        saved["title"] = title
+        saved["content"] = content
+        saved["output_path"] = kwargs["output_path"]
+        Path(kwargs["output_path"]).write_text(content, encoding="utf-8")
+        return kwargs["output_path"]
+
+    monkeypatch.setattr("surf_web.OutputHandler.save_markdown", fake_save_markdown)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/save",
+        json={
+            "fileType": "md",
+            "saveDir": str(tmp_path),
+            "customTitle": "Merged Notes",
+            "combine_all": True,
+            "results": [
+                {
+                    "title": "First",
+                    "markdown": "Alpha body",
+                    "raw": "Alpha body",
+                    "html": "<article>Alpha</article>",
+                    "metadata": {"source_url": "https://example.com/a"},
+                },
+                {
+                    "title": "Second",
+                    "markdown": "Beta body",
+                    "raw": "Beta body",
+                    "html": "<article>Beta</article>",
+                    "metadata": {"source_url": "https://example.com/b"},
+                },
+            ],
+        },
+    )
+
+    data = response.get_json()
+    assert response.status_code == 200
+    assert data["success"] is True
+    assert saved["title"] == "Merged Notes"
+    assert "## First" in saved["content"]
+    assert "## Second" in saved["content"]

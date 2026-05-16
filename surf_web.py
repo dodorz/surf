@@ -295,6 +295,17 @@ HTML_TEMPLATE = """
         .result-card.show {
             display: block;
         }
+
+        .aggregate-card {
+            border: 2px solid #d6defa;
+            background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
+        }
+
+        .aggregate-card .result-title {
+            font-size: 1.15em;
+            font-weight: 700;
+            color: #3047b0;
+        }
         
         .result-header {
             display: flex;
@@ -1015,6 +1026,122 @@ HTML_TEMPLATE = """
             }
         }
 
+        function stripMarkdownHeading(markdownText, title) {
+            const normalized = (markdownText || '').replace(/^﻿/, '');
+            const escapedTitle = (title || '').replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
+            const headingPattern = new RegExp(`^#\\s+${escapedTitle}\\s*(?:\\r?\\n){1,2}`);
+            return normalized.replace(headingPattern, '');
+        }
+
+        function mergeResultsForSave(results) {
+            if (!results || !results.length) {
+                return null;
+            }
+
+            const title = `Surf Collection (${results.length} items)`;
+            const markdownSections = [];
+            const htmlSections = [];
+            const rawSections = [];
+            const sourceLines = [];
+
+            results.forEach((result, index) => {
+                const itemTitle = result.title || `Item ${index + 1}`;
+                const source = result?.metadata?.source_url || result?.input_url || '';
+                const markdownBody = stripMarkdownHeading(result.markdown || '', itemTitle).trim();
+                const rawBody = stripMarkdownHeading(result.raw || '', itemTitle).trim();
+                const htmlBody = (result.html || '').trim();
+
+                markdownSections.push(`## ${itemTitle}\n\n${markdownBody || '_No content_'}`);
+                rawSections.push(`## ${itemTitle}\n\n${rawBody || '_No content_'}`);
+                htmlSections.push(`<section><h2>${itemTitle}</h2>${htmlBody || '<p><em>No content.</em></p>'}</section>`);
+                if (source) {
+                    sourceLines.push(`- ${itemTitle}: ${source}`);
+                }
+            });
+
+            const metadataHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title></head><body></body></html>`;
+            return {
+                title,
+                markdown: markdownSections.join('\\n\\n---\\n\\n'),
+                raw: rawSections.join('\\n\\n---\\n\\n'),
+                html: `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${htmlSections.join('')}</body></html>`,
+                defaultDirs: results[0].defaultDirs || {},
+                defaultSaveTitle: title,
+                metadata: {
+                    title,
+                    html_content: metadataHtml,
+                    add_front_matter: false,
+                    translated_title: null,
+                    source_url: null,
+                    archive_url: null,
+                    translator: null,
+                    html_inline: false,
+                    combined_sources: sourceLines,
+                },
+            };
+        }
+
+        function renderAggregateSaveCard(results) {
+            if (!results || results.length <= 1) {
+                return;
+            }
+
+            const aggregateResult = mergeResultsForSave(results);
+            if (!aggregateResult) {
+                return;
+            }
+
+            const container = document.getElementById('resultsContainer');
+            const card = document.createElement('div');
+            card.className = 'card result-card show aggregate-card';
+            card.innerHTML = `
+                <div class="result-header">
+                    <h2 class="result-title">合并保存全部结果</h2>
+                    <div class="save-actions">
+                        <div class="save-links"></div>
+                        <div class="save-config">
+                            <div class="save-field">
+                                <label>保存文件夹</label>
+                                <input class="save-input save-dir-input" type="text">
+                            </div>
+                            <div class="save-field">
+                                <label>文件标题</label>
+                                <input class="save-input save-title-input" type="text">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="field-hint result-source"></div>
+                <div class="tabs">
+                    <button class="tab active" data-tab="markdown">Markdown</button>
+                    <button class="tab" data-tab="html">HTML</button>
+                    <button class="tab" data-tab="raw">原始内容</button>
+                </div>
+                <div class="tab-content active" data-tab-content="markdown">
+                    <pre class="content-preview"></pre>
+                </div>
+                <div class="tab-content" data-tab-content="html">
+                    <pre class="content-preview"></pre>
+                </div>
+                <div class="tab-content" data-tab-content="raw">
+                    <pre class="content-preview"></pre>
+                </div>
+            `;
+
+            card.querySelector('.result-source').textContent = `合并保存 ${results.length} 张结果卡`;
+            card.dataset.defaultDirs = JSON.stringify(aggregateResult.defaultDirs || {});
+            card.dataset.defaultSaveTitle = aggregateResult.defaultSaveTitle || aggregateResult.title || 'Untitled';
+            card.querySelector('[data-tab-content="markdown"] pre').textContent = aggregateResult.markdown || '';
+            card.querySelector('[data-tab-content="html"] pre').textContent = aggregateResult.html || '';
+            card.querySelector('[data-tab-content="raw"] pre').textContent = aggregateResult.raw || '';
+            card.querySelector('.save-dir-input').value = (aggregateResult.defaultDirs || {}).md || '';
+            card.querySelector('.save-title-input').value = aggregateResult.defaultSaveTitle || aggregateResult.title || 'Untitled';
+
+            addSaveButtons(card, aggregateResult);
+            wireResultTabs(card);
+            container.prepend(card);
+        }
+
         function resultDefaultDirs(container) {
             try {
                 return JSON.parse(container.dataset.defaultDirs || '{}');
@@ -1192,6 +1319,7 @@ HTML_TEMPLATE = """
                         renderErrorCard(input, result.error, i, inputs.length);
                     }
                 }
+                renderAggregateSaveCard(currentResults);
                 showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
@@ -1441,6 +1569,58 @@ def build_default_filename_stem(title, source_url=None, html_content=None):
         title, source_url=source_url, html_content=html_content
     )
     return OutputHandler._safe_filename_title(filename_title, max_len=100)
+
+
+def build_combined_result_payload(results):
+    """Merge multiple result payloads into a single saveable payload."""
+    valid_results = [item for item in (results or []) if isinstance(item, dict)]
+    if not valid_results:
+        return None
+
+    title = f"Surf Collection ({len(valid_results)} items)"
+    markdown_sections = []
+    raw_sections = []
+    html_sections = []
+    combined_sources = []
+
+    for index, result in enumerate(valid_results, start=1):
+        item_title = result.get("title") or f"Item {index}"
+        source = (result.get("metadata") or {}).get("source_url") or result.get("input_url") or ""
+        markdown_body = (result.get("markdown") or "").strip()
+        raw_body = (result.get("raw") or "").strip()
+        html_body = (result.get("html") or "").strip()
+
+        markdown_sections.append(f"## {item_title}\n\n{markdown_body or '_No content_'}")
+        raw_sections.append(f"## {item_title}\n\n{raw_body or '_No content_'}")
+        html_sections.append(f"<section><h2>{escape(item_title)}</h2>{html_body or '<p><em>No content.</em></p>'}</section>")
+        if source:
+            combined_sources.append(f"{item_title}: {source}")
+
+    html_content = (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<title>{escape(title)}</title>"
+        "</head><body>"
+        + "".join(html_sections)
+        + "</body></html>"
+    )
+
+    return {
+        "title": title,
+        "markdown": "\n\n---\n\n".join(markdown_sections),
+        "raw": "\n\n---\n\n".join(raw_sections),
+        "html": html_content,
+        "metadata": {
+            "title": title,
+            "html_content": html_content,
+            "add_front_matter": False,
+            "translated_title": None,
+            "source_url": None,
+            "archive_url": None,
+            "translator": None,
+            "html_inline": False,
+            "combined_sources": combined_sources,
+        },
+    }
 
 
 def resolve_web_thread_mode(data, site_name, site_config):
@@ -1696,6 +1876,8 @@ def save_file():
     saveDir = data.get("saveDir", "").strip()
     customTitle = (data.get("customTitle") or "").strip()
     resultData = data.get("data", {})
+    if data.get("combine_all"):
+        resultData = build_combined_result_payload(data.get("results", [])) or {}
     speak = bool(data.get("speak"))
 
     if not fileType:
