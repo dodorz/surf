@@ -116,7 +116,7 @@ def test_generic_fetch_retries_direct_connection_after_implicit_proxy_ssl_eof(mo
             {"server": "http://localhost:7890"},
         )),
     )
-    monkeypatch.setattr(surf, "_requests_get_interruptibly", _fake_get)
+    monkeypatch.setattr(surf, "_requests_get_with_system_trust_interruptibly", _fake_get)
     monkeypatch.setattr(
         surf.Fetcher,
         "fetch_with_browser",
@@ -130,3 +130,37 @@ def test_generic_fetch_retries_direct_connection_after_implicit_proxy_ssl_eof(mo
         {"http": "http://localhost:7890", "https": "http://localhost:7890"},
         None,
     ]
+
+
+def test_generic_fetch_uses_system_trust_requests_session(monkeypatch):
+    config = _FakeConfig()
+    url = "https://www.antipope.org/charlie/blog-static/fiction/accelerando/accelerando.html"
+    calls = []
+
+    class _FakeResponse:
+        status_code = 200
+        headers = {"content-type": "text/html; charset=utf-8"}
+        text = "<html>" + ("a" * 1200) + "</html>"
+        content = text.encode("utf-8")
+        apparent_encoding = "utf-8"
+        encoding = None
+
+        def raise_for_status(self):
+            return None
+
+    def _fake_system_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _FakeResponse()
+
+    monkeypatch.setattr(surf, "_requests_get_with_system_trust_interruptibly", _fake_system_get)
+    monkeypatch.setattr(
+        surf.Fetcher,
+        "fetch_with_browser",
+        staticmethod(lambda *args, **kwargs: pytest.fail("browser fallback should not run")),
+    )
+
+    html = surf.Fetcher.fetch(url, config, use_browser=False, proxy_mode_override="no")
+
+    assert "aaaa" in html
+    assert len(calls) == 1
+    assert calls[0][0][0] == url

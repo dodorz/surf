@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import io
 import locale
+import ssl
 import requests  # type: ignore
 import threading
 import queue
@@ -712,6 +713,35 @@ def _session_get_interruptibly(session, *args, **kwargs):
     return _call_interruptibly(session.get, *args, **kwargs)
 
 
+class _SystemTrustHTTPAdapter(requests.adapters.HTTPAdapter):
+    """Requests adapter that uses the OS/OpenSSL default trust store."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = ssl.create_default_context()
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, *args, **kwargs):
+        kwargs["ssl_context"] = ssl.create_default_context()
+        return super().proxy_manager_for(*args, **kwargs)
+
+
+def _configure_stdout_utf8():
+    """Best-effort stdout UTF-8 reconfiguration for Windows console output."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+_SYSTEM_TRUST_REQUESTS_SESSION = requests.Session()
+_SYSTEM_TRUST_REQUESTS_SESSION.mount("https://", _SystemTrustHTTPAdapter())
+
+
+def _requests_get_with_system_trust_interruptibly(*args, **kwargs):
+    """Requests.get via a session that uses the system default trust chain."""
+    return _session_get_interruptibly(_SYSTEM_TRUST_REQUESTS_SESSION, *args, **kwargs)
+
+
 def _resolve_proxy_args(args, parser, config):
     """Resolve and validate CLI proxy arguments, with config fallback for custom mode."""
     proxy_mode = args.proxy
@@ -1362,7 +1392,12 @@ class Fetcher:
             }
             try:
                 logger.info(f"Requests Proxies: {req_proxies if req_proxies else 'None'}")
-                response = _requests_get_interruptibly(url, headers=headers, proxies=req_proxies, timeout=10)
+                response = _requests_get_with_system_trust_interruptibly(
+                    url,
+                    headers=headers,
+                    proxies=req_proxies,
+                    timeout=10,
+                )
                 response.raise_for_status()
                 decoded_text = Fetcher._decode_response_text(response)
 
@@ -1377,7 +1412,7 @@ class Fetcher:
                 if Fetcher._should_retry_without_proxy(proxy_mode_override, req_proxies, e):
                     logger.warning(f"Requests failed via implicit proxy: {e}. Retrying direct connection...")
                     try:
-                        response = _requests_get_interruptibly(url, headers=headers, timeout=10)
+                        response = _requests_get_with_system_trust_interruptibly(url, headers=headers, timeout=10)
                         response.raise_for_status()
                         decoded_text = Fetcher._decode_response_text(response)
                         if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
@@ -8254,6 +8289,7 @@ class OutputHandler:
         # Determine filepath
         if output_path == "-":
             # Write to stdout
+            _configure_stdout_utf8()
             sys.stdout.write(html_content)
             sys.stdout.flush()
             logger.info(f"HTML output to stdout (inline={inline})")
@@ -9588,14 +9624,14 @@ Twitter/X Backend:
                 custom_proxy_override=custom_proxy,
             )
 
-        if output_path:
-            if output_path == "-":
-                # Output to stdout
-                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-                sys.stdout.write(f"# {title}\n\n")
-                sys.stdout.write(md_content)
-                if not md_content.endswith("\n"):
-                    sys.stdout.write("\n")
+            if output_path:
+                if output_path == "-":
+                    # Output to stdout
+                    _configure_stdout_utf8()
+                    sys.stdout.write(f"# {title}\n\n")
+                    sys.stdout.write(md_content)
+                    if not md_content.endswith("\n"):
+                        sys.stdout.write("\n")
             else:
                 OutputHandler.save_markdown(
                     title,
