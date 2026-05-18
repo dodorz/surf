@@ -7995,6 +7995,14 @@ class OutputHandler:
         if source_site == "xiaohongshu" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
 
+        def _format_front_matter_datetime(dt):
+            """Format datetime values as local ISO timestamps without timezone suffix."""
+            if dt is None:
+                return None
+            if getattr(dt, "tzinfo", None) is not None:
+                dt = dt.astimezone().replace(tzinfo=None)
+            return dt.isoformat(timespec="seconds")
+
         # 提取title元素
         title_tag = soup.find("title")
         if title_tag:
@@ -8021,7 +8029,7 @@ class OutputHandler:
                     try:
                         # 尝试解析日期
                         parsed_date = date_parser.parse(date_value)
-                        metadata["created"] = parsed_date.strftime("%Y-%m-%d")
+                        metadata["created"] = _format_front_matter_datetime(parsed_date)
                         break
                     except (ValueError, TypeError):
                         pass
@@ -8039,7 +8047,7 @@ class OutputHandler:
                 ]
                 metadata["tags"] = tags
 
-        # 设置updated为当前时间
+        # 设置updated为当前日期（保持既有格式）
         metadata["updated"] = datetime.now().strftime("%Y-%m-%d")
 
         return metadata

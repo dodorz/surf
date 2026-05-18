@@ -51,6 +51,29 @@ def test_markdown_front_matter_includes_archive(tmp_path):
     assert "archive: https://web.archive.org/web/20260426000000/https://example.com/post" in text
 
 
+def test_markdown_front_matter_uses_iso_datetime_format_for_created_only(tmp_path):
+    output_path = tmp_path / "note.md"
+
+    saved = OutputHandler.save_markdown(
+        "Title",
+        "Body",
+        _FakeConfig(),
+        output_path=str(output_path),
+        html_content=(
+            "<html><head><title>Title</title>"
+            "<meta property='article:published_time' content='2024-01-02T03:04:05Z'>"
+            "</head><body>Body</body></html>"
+        ),
+        source_url="https://example.com/post",
+    )
+
+    text = Path(saved).read_text(encoding="utf-8")
+    assert "created: 2024-01-02T" in text
+    updated_line = text.split("updated: ", 1)[1].splitlines()[0]
+    assert updated_line.count("-") == 2
+    assert "T" not in updated_line
+
+
 def test_web_archive_option_stores_archive_metadata(monkeypatch):
     monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
     monkeypatch.setattr(
