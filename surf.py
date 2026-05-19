@@ -27,7 +27,7 @@ from playsound import playsound
 from datetime import datetime
 from dateutil import parser as date_parser  # type: ignore
 from bs4 import BeautifulSoup, UnicodeDammit
-from html import escape
+from html import escape, unescape
 import trafilatura
 import re
 import unicodedata
@@ -1366,7 +1366,7 @@ class Fetcher:
                     browser=twitter_browser,
                     profile=twitter_profile,
                 )
-            elif site_name in {"bluesky", "weibo", "threads", "v2ex"}:
+            elif site_name in {"bluesky", "weibo", "threads", "v2ex", "reddit"}:
                 html_content = handler(
                     url,
                     config,
@@ -4032,6 +4032,8 @@ class Fetcher:
                     auth_site_name = "twitter"
                 elif is_zhihu_url:
                     auth_site_name = "zhihu"
+                elif Fetcher._is_reddit_url(url):
+                    auth_site_name = "reddit"
                 context = Fetcher._create_stealth_context(browser, url, auth_site_name=auth_site_name)
                 page = context.new_page()
 
@@ -6632,6 +6634,231 @@ class Fetcher:
             logger.warning(f"V2EX handler failed: {e}")
             return None
 
+    @staticmethod
+    def _is_reddit_url(url):
+        return bool(
+            url
+            and re.match(
+                r"^https?://((www|old|new)\.)?reddit\.com/|^https?://redd\.it/",
+                url,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _normalize_reddit_url(url):
+        """Normalize Reddit URLs to canonical post/comment URLs on www.reddit.com."""
+        parsed = urlparse(url)
+        hostname = (parsed.netloc or "").lower()
+        path = parsed.path or "/"
+
+        if hostname == "redd.it":
+            post_id = path.strip("/").split("/", 1)[0]
+            if post_id:
+                return f"https://www.reddit.com/comments/{post_id}"
+
+        if hostname in {"old.reddit.com", "new.reddit.com"}:
+            parsed = parsed._replace(netloc="www.reddit.com")
+
+        return urlunparse(parsed)
+
+    @staticmethod
+    def _build_reddit_json_url(url):
+        """Build the Reddit JSON endpoint URL for a post/comment permalink."""
+        normalized = Fetcher._normalize_reddit_url(url)
+        parsed = urlparse(normalized)
+        path = parsed.path.rstrip("/")
+        if not path:
+            return normalized
+        if not path.endswith(".json"):
+            path = f"{path}.json"
+        query_pairs = parse_qs(parsed.query, keep_blank_values=True)
+        query_pairs["raw_json"] = ["1"]
+        return urlunparse(
+            parsed._replace(
+                path=path,
+                query=urlencode(query_pairs, doseq=True),
+                fragment="",
+            )
+        )
+
+    @staticmethod
+    def _get_reddit_headers(referer_url, cookie_header=None):
+        headers = {
+            "User-Agent": "surf/1.1 (+https://github.com/dodorz/surf)",
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": referer_url,
+        }
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        return headers
+
+    @staticmethod
+    def _markdownify_reddit_html(html_fragment):
+        """Convert Reddit HTML fragments from JSON fields into markdown."""
+        if not html_fragment:
+            return ""
+        try:
+            html_text = unescape(html_fragment)
+            markdown_text = markdownify.markdownify(html_text, heading_style="ATX")
+            markdown_text = re.sub(r"\n{3,}", "\n\n", markdown_text or "")
+            return markdown_text.strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _extract_reddit_comment_items(children, current_items=None, depth=0):
+        if current_items is None:
+            current_items = []
+
+        for child in children or []:
+            if not isinstance(child, dict) or child.get("kind") != "t1":
+                continue
+            data = child.get("data") or {}
+            body_markdown = Fetcher._markdownify_reddit_html(data.get("body_html")) or (data.get("body") or "").strip()
+            author = (data.get("author") or "[deleted]").strip()
+            item = {
+                "kind": "comment",
+                "id": data.get("id") or "",
+                "author": author,
+                "author_key": Fetcher._normalize_thread_author_key(author),
+                "depth": depth,
+                "score": data.get("score"),
+                "created_time": Fetcher._format_unix_timestamp(data.get("created_utc")),
+                "permalink": data.get("permalink") or "",
+                "markdown": body_markdown,
+            }
+            current_items.append(item)
+            replies = data.get("replies")
+            if isinstance(replies, dict):
+                reply_listing = ((replies.get("data") or {}).get("children") or [])
+                Fetcher._extract_reddit_comment_items(reply_listing, current_items=current_items, depth=depth + 1)
+
+        return current_items
+
+    @staticmethod
+    def _build_reddit_markdown_payload(post_data, comment_items, source_url, include_comments=False):
+        title = (post_data.get("title") or "Reddit Post").strip() or "Reddit Post"
+        subreddit = (post_data.get("subreddit_name_prefixed") or "").strip()
+        author = (post_data.get("author") or "[deleted]").strip()
+        created_time = Fetcher._format_unix_timestamp(post_data.get("created_utc"))
+        score = post_data.get("score")
+        comment_count = post_data.get("num_comments")
+        is_self = bool(post_data.get("is_self"))
+        outbound_url = (post_data.get("url_overridden_by_dest") or post_data.get("url") or "").strip()
+
+        lines = []
+        if subreddit:
+            lines.append(f"Subreddit: {subreddit}")
+        if author:
+            lines.append(f"Author: {author}")
+        if created_time:
+            lines.append(f"Posted: {created_time}")
+        if isinstance(score, int):
+            lines.append(f"Score: {score}")
+        if isinstance(comment_count, int):
+            lines.append(f"Comments: {comment_count}")
+        lines.append(f"Source: {source_url}")
+        lines.append("")
+
+        body_markdown = Fetcher._markdownify_reddit_html(post_data.get("selftext_html")) or (post_data.get("selftext") or "").strip()
+        if body_markdown:
+            lines.append(body_markdown)
+            lines.append("")
+
+        if not is_self and outbound_url and outbound_url != source_url:
+            lines.append(f"Link: {outbound_url}")
+            lines.append("")
+
+        if include_comments and comment_items:
+            lines.extend(["## Comments", ""])
+            for item in comment_items:
+                indent = "  " * min(int(item.get("depth") or 0), 8)
+                heading = f"{indent}- {item.get('author') or '[deleted]'}"
+                metadata = []
+                if isinstance(item.get("score"), int):
+                    metadata.append(f"score {item['score']}")
+                if item.get("created_time"):
+                    metadata.append(item["created_time"])
+                if metadata:
+                    heading += f" ({', '.join(metadata)})"
+                lines.append(heading)
+                lines.append("")
+                comment_md = (item.get("markdown") or "").strip() or "[deleted]"
+                for para in comment_md.splitlines():
+                    lines.append(f"{indent}  {para}" if para else "")
+                lines.append("")
+
+        markdown_text = "\n".join(lines).strip() + "\n"
+        return _build_direct_markdown_payload(
+            markdown_text=markdown_text,
+            title=title,
+            source_url=source_url,
+            site_name="reddit",
+        )
+
+    @staticmethod
+    def _fetch_reddit_content(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        fetch_thread=None,
+        fetch_thread_author=None,
+    ):
+        """Fetch Reddit posts via the comments JSON endpoint, optionally using saved login cookies."""
+        try:
+            normalized_url = Fetcher._normalize_reddit_url(url)
+            json_url = Fetcher._build_reddit_json_url(normalized_url)
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+            cookie_header = AuthHandler.cookie_header_for_reddit()
+            headers = Fetcher._get_reddit_headers(normalized_url, cookie_header=cookie_header)
+            response = _requests_get_with_system_trust_interruptibly(
+                json_url,
+                headers=headers,
+                proxies=req_proxies,
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list) or len(payload) < 2:
+                return None
+
+            post_children = ((payload[0].get("data") or {}).get("children") or [])
+            if not post_children:
+                return None
+            post_entry = post_children[0]
+            if not isinstance(post_entry, dict) or post_entry.get("kind") != "t3":
+                return None
+            post_data = post_entry.get("data") or {}
+            permalink = (post_data.get("permalink") or "").strip()
+            source_url = urljoin("https://www.reddit.com", permalink) if permalink else normalized_url
+
+            comment_listing = (payload[1].get("data") or {}).get("children") or []
+            comment_items = Fetcher._extract_reddit_comment_items(comment_listing)
+
+            thread_mode = Fetcher._normalize_thread_mode(fetch_thread, default_mode=None)
+            thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
+            include_comments = thread_mode in {"after", "both"}
+            if thread_mode == "before":
+                logger.info("reddit: --thread before is not applicable for top-level post fetch; ignoring.")
+            if include_comments and thread_author == "same":
+                original_author_key = Fetcher._normalize_thread_author_key(post_data.get("author"))
+                comment_items = [
+                    item for item in comment_items if item.get("author_key") == original_author_key
+                ]
+
+            return Fetcher._build_reddit_markdown_payload(
+                post_data,
+                comment_items,
+                source_url,
+                include_comments=include_comments,
+            )
+        except Exception as e:
+            logger.warning(f"Reddit handler failed: {e}")
+            return None
+
 
 # =============================================================================
 # Special Site Handlers
@@ -6735,6 +6962,14 @@ SPECIAL_SITE_HANDLERS = {
         ],
         "handler": Fetcher._fetch_social_thread_page,
         "default_thread": True,
+    },
+    "reddit": {
+        "patterns": [
+            r"^https?://(www\.|old\.|new\.)?reddit\.com/r/[^/]+/comments/",
+            r"^https?://(www\.|old\.|new\.)?reddit\.com/comments/",
+            r"^https?://redd\.it/[A-Za-z0-9]+/?$",
+        ],
+        "handler": Fetcher._fetch_reddit_content,
     },
     "v2ex": {
         "patterns": [
@@ -8519,6 +8754,7 @@ class AuthHandler:
         "xiaohongshu": "https://www.xiaohongshu.com",
         "twitter": "https://x.com/i/flow/login",
         "x": "https://x.com/i/flow/login",
+        "reddit": "https://www.reddit.com/login/",
         "zhihu": "https://www.zhihu.com/",
         "ncpssd": "https://www.ncpssd.cn/",
     }
@@ -8529,6 +8765,8 @@ class AuthHandler:
         normalized = site_name.lower()
         if normalized in {"twitter", "x"}:
             return "twitter"
+        if normalized in {"reddit"}:
+            return "reddit"
         if normalized in {"ncp", "ncpssd"}:
             return "ncpssd"
         return normalized
@@ -8600,6 +8838,26 @@ class AuthHandler:
         for c in cookies:
             domain = (c.get("domain") or "").lower()
             if "zhihu.com" not in domain:
+                continue
+            name = c.get("name")
+            if not name:
+                continue
+            by_name[name] = c.get("value", "")
+        if not by_name:
+            return None
+        return "; ".join(f"{k}={v}" for k, v in by_name.items())
+
+    @staticmethod
+    def cookie_header_for_reddit():
+        """Build a Cookie header value from saved Playwright storage for reddit.com domains."""
+        state = AuthHandler.load_state("reddit", log_load=False)
+        if not state:
+            return None
+        cookies = state.get("cookies") or []
+        by_name = {}
+        for c in cookies:
+            domain = (c.get("domain") or "").lower()
+            if "reddit.com" not in domain:
                 continue
             name = c.get("name")
             if not name:
@@ -9153,9 +9411,11 @@ Authentication:
   surf --import-auth xiaohongshu STATE.json  # Import auth state on another machine
   surf --login ncpssd                        # Login to NCPSSD (for full-text PDF download)
   surf --login twitter                       # Login to Twitter/X
+  surf --login reddit                        # Login to Reddit
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
   surf --clear-auth ncpssd                   # Clear auth for NCPSSD
   surf --clear-auth twitter                  # Clear auth for Twitter/X
+  surf --clear-auth reddit                   # Clear auth for Reddit
 
 OCR:
   surf --ocr-images URL                      # Run local OCR on article images
@@ -9216,7 +9476,7 @@ Twitter/X Backend:
     parser.add_argument(
         "--login",
         metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, zhihu, ncpssd). Opens a browser for manual login on machines with a desktop session.",
+        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, reddit, zhihu, ncpssd). Opens a browser for manual login on machines with a desktop session.",
     )
     parser.add_argument(
         "--clear-auth",
@@ -9369,8 +9629,8 @@ Twitter/X Backend:
         site_name, export_path = args.export_auth
         export_path = resolve_user_path(export_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
-            parser.error("Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd")
+        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "ncpssd"}:
+            parser.error("Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, ncpssd")
         try:
             AuthHandler.export_state(normalized_site_name, export_path)
         except Exception as e:
@@ -9383,8 +9643,8 @@ Twitter/X Backend:
         site_name, import_path = args.import_auth
         import_path = resolve_user_path(import_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "zhihu", "ncpssd"}:
-            parser.error("Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, zhihu, ncpssd")
+        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "ncpssd"}:
+            parser.error("Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, ncpssd")
         try:
             AuthHandler.import_state(normalized_site_name, import_path)
         except Exception as e:

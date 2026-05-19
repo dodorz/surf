@@ -7,7 +7,7 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
-- **Special Site Handling**: Optimized handling for Twitter/X, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
+- **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, and `xhslink.com` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL.
@@ -40,14 +40,14 @@ surf "https://example.com" -r
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
-- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, NCPSSD).
+- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 - **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
 ### Special Site Policies
 
-Surf includes site-specific handlers for platforms such as Twitter/X, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, V2EX, NCPSSD, GitHub, and Wikipedia.
+Surf includes site-specific handlers for platforms such as Twitter/X, Reddit, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, V2EX, NCPSSD, GitHub, and Wikipedia.
 
 Detailed matching rules, handler behavior, default policy overrides, and maintenance notes are documented in:
 - `SPECIAL_SITES.md` (English)
@@ -322,7 +322,7 @@ Notes:
 
 ### Authentication (--login / --export-auth / --import-auth / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Zhihu, NCPSSD), prepare and reuse a saved Playwright auth state:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Reddit, Zhihu, NCPSSD), prepare and reuse a saved Playwright auth state:
 
 ```bash
 # First-time login for Xiaohongshu
@@ -339,6 +339,11 @@ surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
 # Optional: login for Twitter/X (helps with login-wall pages)
 surf --login twitter
 
+# Optional: login for Reddit (reuses saved cookies for JSON and browser fetches)
+surf --login reddit
+surf --export-auth reddit ./reddit_state.json
+surf --import-auth reddit ./reddit_state.json
+
 # Prefer uvx --from twitter-cli twitter with local browser cookies
 surf --twitter-backend cli "https://x.com/username/status/1234567890"
 surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
@@ -353,12 +358,14 @@ surf --login ncpssd
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
+surf --thread after "https://www.reddit.com/r/test/comments/abc123/example_post/"
 surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
 surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
 
 # Clear saved authentication
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
+surf --clear-auth reddit
 surf --clear-auth zhihu
 surf --clear-auth ncpssd
 # Or clear all sites
@@ -368,6 +375,7 @@ surf --clear-auth all
 **Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
 On headless Linux, `surf --login ...` now fails fast instead of trying to open a browser with no display. Run the login command on a desktop machine, then move the saved state with `--export-auth` and `--import-auth`.
 For Twitter/X, `surf --login twitter` first tries to import cookies from your real browser (or `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`) through `twitter-cli`, which is usually more reliable than X's automated login page. If that import is unavailable, Surf falls back to a visible Playwright login window and keeps a persistent browser profile under the auth directory. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
+For Reddit post URLs, Surf fetches the post from Reddit's JSON comments endpoint, reuses saved `reddit.com` cookies when available, and only includes reply threads when you explicitly pass `--thread after|both` or `-t`.
 For site-specific behavior details (including NCPSSD download rules), refer to `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md`.
 
 ## Help

@@ -32,7 +32,8 @@ Each site entry may define:
 8. Weibo
 9. Threads
 10. V2EX
-11. NCPSSD
+11. Reddit
+12. NCPSSD
 
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 
@@ -58,6 +59,14 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 ### Social Thread Sites (Twitter/X, Bluesky, Weibo, Threads)
 - Default thread direction: `after`; default author scope: `all`.
 - Short-post title normalization: `First sentence - Author on Site`.
+
+### Reddit
+- Scope: Reddit post/comment permalinks on `www.reddit.com`, `old.reddit.com`, `new.reddit.com`, and `redd.it` short links.
+- Normalizes supported Reddit URLs to canonical `www.reddit.com` post URLs, then fetches the `.json?raw_json=1` comments endpoint.
+- Reuses saved `reddit.com` cookies from `surf --login reddit` for both direct requests and browser fallback when available.
+- Main post content is extracted from the top-level `t3` payload; link posts preserve the outbound target as `Link: ...`.
+- Replies are included only when the user explicitly enables thread fetching with `--thread after|both` or `-t`; there is no Reddit-specific default thread expansion.
+- `--thread-author same` keeps only comments written by the original post author.
 
 ### V2EX
 - Scope: `https://v2ex.com/t/<id>` and `https://www.v2ex.com/t/<id>` topic pages.
@@ -104,5 +113,5 @@ Typical change triggers:
 
 ---
 
-**Last Updated**: 2026-04-17
+**Last Updated**: 2026-05-19
 **Doc Version**: 1.0

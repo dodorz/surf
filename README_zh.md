@@ -7,7 +7,7 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
-- **特殊网站处理**：针对 Twitter/X、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD 等网站优化处理，支持复用已保存的登录态。
+- **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD 等网站优化处理，支持复用已保存的登录态。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
 - **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。
@@ -23,13 +23,13 @@
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
-- **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用。
+- **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用，也适用于 Reddit 等需要 Cookie 的站点。
 - **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
 - **内嵌 SVG 插图保留**：会将正文中的内嵌 SVG 图表转换为 Markdown 图片引用，同时过滤装饰性图标。
 
 ### 特殊网站策略
 
-Surf 内置了多个特殊网站处理器（如 Twitter/X、微信、知乎、小红书、Bluesky、微博、Threads、V2EX、NCPSSD、GitHub、Wikipedia）。
+Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、知乎、小红书、Bluesky、微博、Threads、V2EX、NCPSSD、GitHub、Wikipedia）。
 
 完整的匹配规则、处理流程、默认策略和维护要求统一维护在：
 - `SPECIAL_SITES_zh.md`（中文）
@@ -276,7 +276,7 @@ surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lan
 
 ### 认证功能 (--login / --export-auth / --import-auth / --clear-auth)
 
-对于需要登录的网站（如小红书、Twitter/X、知乎、NCPSSD），可以先准备并复用 Playwright 登录态：
+对于需要登录的网站（如小红书、Twitter/X、Reddit、知乎、NCPSSD），可以先准备并复用 Playwright 登录态：
 
 ```bash
 # 首次登录小红书
@@ -293,6 +293,11 @@ surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
 # 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
 surf --login twitter
 
+# 可选：登录 Reddit（保存的 Cookie 会复用于 JSON 与浏览器抓取）
+surf --login reddit
+surf --export-auth reddit ./reddit_state.json
+surf --import-auth reddit ./reddit_state.json
+
 # 优先使用 twitter-cli 和本机浏览器 Cookie
 surf --twitter-backend cli "https://x.com/username/status/1234567890"
 surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
@@ -307,12 +312,14 @@ surf --login ncpssd
 surf "https://www.xiaohongshu.com/explore/..."
 surf "https://www.xiaohongshu.com/discovery/item/..."
 surf "https://x.com/username/status/1234567890"
+surf --thread after "https://www.reddit.com/r/test/comments/abc123/example_post/"
 surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
 surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
 
 # 清除保存的认证
 surf --clear-auth xiaohongshu
 surf --clear-auth twitter
+surf --clear-auth reddit
 surf --clear-auth zhihu
 surf --clear-auth ncpssd
 # 或清除所有网站的认证
@@ -322,6 +329,7 @@ surf --clear-auth all
 **注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
 在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
 对于 Twitter/X，`surf --login twitter` 会先通过 `twitter-cli` 尝试从真实浏览器（或 `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` 环境变量）导入 Cookie，这通常比在自动化登录页里手动登录更可靠；导入失败时才回退到可见的 Playwright 登录窗口。Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
+对于 Reddit 帖子 URL，Surf 会优先走 Reddit comments JSON 接口抓取主贴内容；若存在已保存的 `reddit.com` Cookie，会同时复用于 requests 与浏览器抓取。只有显式传入 `--thread after|both` 或 `-t` 时，才会把回复 thread 一并带上。
 涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
 
 ## 单字符参数连写
