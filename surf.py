@@ -8146,6 +8146,37 @@ class OutputHandler:
         return str(soup)
 
     @staticmethod
+    def _rewrite_github_blob_asset_url(url):
+        if not url:
+            return url
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "github.com":
+            return url
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) < 5 or parts[2] != "blob":
+            return url
+        owner, repo, _, branch = parts[:4]
+        asset_path = "/".join(parts[4:])
+        if not asset_path:
+            return url
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                f"/{owner}/{repo}/raw/{branch}/{asset_path}",
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
+
+    @staticmethod
     def _convert_markdown_urls_to_absolute(md_content, base_url):
         """
         将Markdown中的相对URL转换为绝对URL。
@@ -8164,6 +8195,10 @@ class OutputHandler:
         def replace_image_url(match):
             alt_text = match.group(1)
             url = match.group(2)
+            if url and url.startswith(("http://", "https://")):
+                rewritten_url = OutputHandler._rewrite_github_blob_asset_url(url)
+                if rewritten_url != url:
+                    return f"![{alt_text}]({rewritten_url})"
             if url and not url.startswith(("http://", "https://", "data:")):
                 absolute_url = urljoin(base_url, url)
                 return f"![{alt_text}]({absolute_url})"

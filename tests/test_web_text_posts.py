@@ -180,6 +180,37 @@ def test_process_url_preserves_direct_markdown_payload(monkeypatch):
     assert payload["metadata"]["source_url"] == "https://github.com/USER/PROJECT/docs/guide.md"
 
 
+def test_process_url_rewrites_github_blob_image_links_to_raw(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    payload_html = _build_direct_markdown_payload(
+        markdown_text="![Logo](https://github.com/USER/PROJECT/blob/master/assets/logo.png)",
+        title="guide.md",
+        source_url="https://github.com/USER/PROJECT/docs/guide.md",
+        site_name="github",
+        base_url="https://github.com/USER/PROJECT/blob/main/docs/guide.md",
+    )
+
+    monkeypatch.setattr(
+        surf_web.Fetcher,
+        "fetch",
+        lambda *args, **kwargs: payload_html,
+    )
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT/docs/guide.md",
+            "lang": "raw",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["markdown"] == "![Logo](https://github.com/USER/PROJECT/raw/master/assets/logo.png)"
+
 def test_direct_markdown_converts_embedded_html_but_preserves_fenced_code():
     markdown = """# Guide
 
