@@ -68,6 +68,31 @@ def test_thread_flag_accepts_url_as_next_argument():
     ]
 
 
+def test_v2ex_source_url_drops_reply_fragment_for_front_matter():
+    html = surf._build_direct_markdown_payload(
+        "Body",
+        title="Example Topic",
+        source_url="https://v2ex.com/t/123#reply7",
+        site_name="v2ex",
+    )
+
+    metadata = surf.OutputHandler._extract_metadata(html, source_url="https://v2ex.com/t/123#reply7")
+
+    assert metadata["source"] == "https://v2ex.com/t/123"
+
+
+def test_v2ex_source_url_keeps_non_reply_fragment():
+    html = surf._build_direct_markdown_payload(
+        "Body",
+        title="Example Topic",
+        source_url="https://v2ex.com/t/123#other",
+        site_name="v2ex",
+    )
+
+    metadata = surf.OutputHandler._extract_metadata(html, source_url="https://v2ex.com/t/123#other")
+
+    assert metadata["source"] == "https://v2ex.com/t/123#other"
+
 def test_thread_extraction_supports_range_and_author_scope():
     items = [
         {"author_key": "alice", "text": "previous alice"},

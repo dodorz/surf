@@ -6478,6 +6478,33 @@ class Fetcher:
         return markdown.strip()
 
     @staticmethod
+    def _canonicalize_v2ex_source_url(url):
+        if not url:
+            return url
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in {"v2ex.com", "cn.v2ex.com"}:
+            return url
+        fragment = parsed.fragment or ""
+        if re.fullmatch(r"reply\d+", fragment):
+            return urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    "",
+                )
+            )
+        return url
+
+    @staticmethod
     def _extract_v2ex_topic_page(html_content, page_url, include_replies=False):
         soup = BeautifulSoup(html_content, "html.parser")
         title_node = soup.select_one("#Main .box .header h1") or soup.find("h1")
@@ -8229,7 +8256,8 @@ class OutputHandler:
         source_site = source_site_tag.get("content", "").strip().lower() if source_site_tag else ""
         if source_site == "xiaohongshu" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
-
+        elif source_site == "v2ex" and metadata["source"]:
+            metadata["source"] = Fetcher._canonicalize_v2ex_source_url(metadata["source"])
         def _format_front_matter_datetime(dt):
             """Format datetime values as local ISO timestamps without timezone suffix."""
             if dt is None:
