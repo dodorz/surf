@@ -1,9 +1,15 @@
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 import surf
+
+
+def test_project_script_points_to_run_cli():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    assert 'surf = "surf:run_cli"' in pyproject.read_text(encoding="utf-8")
 
 
 def test_run_cli_exits_with_130_on_keyboard_interrupt(monkeypatch):

@@ -66,7 +66,7 @@ Repository = "https://github.com/dodorz/surf.git"
 Issues = "https://github.com/dodorz/surf/issues"
 
 [project.scripts]
-surf = "surf:main"
+surf = "surf:run_cli"
 
 [tool.setuptools]
 py-modules = ["surf"]
