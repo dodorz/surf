@@ -87,6 +87,7 @@ def _extract_direct_markdown_payload(html_content):
             "source_url": source_meta.get("content") if source_meta else None,
             "base_url": base_meta.get("content") if base_meta else None,
             "site_name": site_meta.get("content") if site_meta else None,
+            "soup": soup,
         }
     except Exception:
         return None
@@ -8279,6 +8280,8 @@ class OutputHandler:
         soup = BeautifulSoup(html_content, "html.parser")
         metadata = {
             "title": None,
+            "description": None,
+            "author": None,
             "created": None,
             "updated": None,
             "tags": [],
@@ -8293,13 +8296,40 @@ class OutputHandler:
             metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
         elif source_site == "v2ex" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_v2ex_source_url(metadata["source"])
+
         def _format_front_matter_datetime(dt):
             """Format datetime values as local ISO timestamps without timezone suffix."""
             if dt is None:
                 return None
             if getattr(dt, "tzinfo", None) is not None:
                 dt = dt.astimezone().replace(tzinfo=None)
-            return dt.isoformat(timespec="seconds")
+            return dt.isoformat(timespec="minutes")
+
+        def _extract_direct_markdown_field(pattern):
+            direct_markdown = soup.find(id="surf-direct-markdown")
+            if not direct_markdown:
+                return None
+            match = re.search(pattern, direct_markdown.get_text(), re.MULTILINE)
+            if not match:
+                return None
+            value = match.group(1).strip()
+            return OutputHandler.normalize_markdown_encoding(value) if value else None
+
+        if source_site == "v2ex":
+            author = _extract_direct_markdown_field(r"^Author:\s*(.+)$")
+            node_name = _extract_direct_markdown_field(r"^Node:\s*(.+)$")
+            published = _extract_direct_markdown_field(r"^Published:\s*(.+)$")
+
+            if author:
+                metadata["author"] = author
+            if node_name:
+                metadata["tags"] = [node_name]
+            if published:
+                try:
+                    parsed_date = date_parser.parse(published)
+                    metadata["created"] = _format_front_matter_datetime(parsed_date)
+                except (ValueError, TypeError):
+                    pass
 
         # 提取title元素
         title_tag = soup.find("title")
@@ -8309,6 +8339,12 @@ class OutputHandler:
         twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
         if twitter_title:
             metadata["title"] = OutputHandler.normalize_markdown_encoding(twitter_title)
+
+        description_tag = soup.find("meta", attrs={"name": "description"})
+        if description_tag:
+            description_value = description_tag.get("content") or description_tag.get("value")
+            if description_value:
+                metadata["description"] = OutputHandler.normalize_markdown_encoding(description_value.strip())
 
         # 提取发布日期 - 尝试多种常见的meta标签
         date_selectors = [
@@ -8333,17 +8369,18 @@ class OutputHandler:
                         pass
 
         # 提取keywords作为tags
-        keywords_tag = soup.find("meta", {"name": "keywords"})
-        if keywords_tag:
-            keywords_value = keywords_tag.get("content") or keywords_tag.get("value")
-            if keywords_value:
-                # 分割关键词为列表
-                tags = [
-                    OutputHandler.normalize_markdown_encoding(tag.strip())
-                    for tag in keywords_value.split(",")
-                    if tag.strip()
-                ]
-                metadata["tags"] = tags
+        if not metadata["tags"]:
+            keywords_tag = soup.find("meta", {"name": "keywords"})
+            if keywords_tag:
+                keywords_value = keywords_tag.get("content") or keywords_tag.get("value")
+                if keywords_value:
+                    # 分割关键词为列表
+                    tags = [
+                        OutputHandler.normalize_markdown_encoding(tag.strip())
+                        for tag in keywords_value.split(",")
+                        if tag.strip()
+                    ]
+                    metadata["tags"] = tags
 
         # 设置updated为当前日期（保持既有格式）
         metadata["updated"] = datetime.now().strftime("%Y-%m-%d")
@@ -8367,6 +8404,13 @@ class OutputHandler:
             # 转义特殊字符
             title = metadata["title"].replace('"', '\\"')
             lines.append(f'title: "{title}"')
+
+        if metadata.get("description"):
+            description = metadata["description"].replace('"', '\\"')
+            lines.append(f'description: "{description}"')
+
+        if metadata.get("author"):
+            lines.append(f'author: "{metadata["author"].replace(chr(34), r"\"")}"')
 
         if metadata.get("created"):
             lines.append(f"created: {metadata['created']}")

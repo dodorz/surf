@@ -51,6 +51,26 @@ def test_markdown_front_matter_includes_archive(tmp_path):
     assert "archive: https://web.archive.org/web/20260426000000/https://example.com/post" in text
 
 
+def test_markdown_front_matter_includes_meta_description(tmp_path):
+    output_path = tmp_path / "note.md"
+
+    saved = OutputHandler.save_markdown(
+        "Title",
+        "Body",
+        _FakeConfig(),
+        output_path=str(output_path),
+        html_content=(
+            "<html><head><title>Title</title>"
+            "<meta name='description' content='Example summary'>"
+            "</head><body>Body</body></html>"
+        ),
+        source_url="https://example.com/post",
+    )
+
+    text = Path(saved).read_text(encoding="utf-8")
+    assert 'description: "Example summary"' in text
+
+
 def test_markdown_front_matter_uses_iso_datetime_format_for_created_only(tmp_path):
     output_path = tmp_path / "note.md"
 
