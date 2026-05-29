@@ -3409,6 +3409,37 @@ class Fetcher:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": referer_url,
             "Origin": "https://www.zhihu.com",
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "X-Requested-With": "fetch",
+        }
+
+    @staticmethod
+    def _get_zhihu_html_headers(referer_url):
+        """Build browser-like headers for fetching Zhihu page HTML (not API)."""
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.zhihu.com/",
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-site",
+            "sec-fetch-user": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "Connection": "keep-alive",
+            "Cache-Control": "max-age=0",
         }
 
     @staticmethod
@@ -3598,6 +3629,144 @@ class Fetcher:
         return None
 
     @staticmethod
+    def _fetch_zhihu_page_html(url, proxies=None, cookie_header=None):
+        """Fetch Zhihu page HTML directly, trying desktop and mobile URL variants."""
+        article_id = Fetcher._extract_zhihu_article_id(url)
+        answer_id = Fetcher._extract_zhihu_answer_id(url)
+
+        # Build candidate URLs: desktop first, then mobile (mobile often has weaker anti-bot)
+        candidate_urls = []
+        if article_id:
+            candidate_urls.extend([
+                ("desktop", url),
+                ("desktop", f"https://www.zhihu.com/p/{article_id}"),
+                ("mobile", f"https://m.zhihu.com/article/{article_id}"),
+            ])
+        if answer_id:
+            candidate_urls.extend([
+                ("desktop", url),
+                ("desktop", f"https://www.zhihu.com/answer/{answer_id}"),
+                ("mobile", f"https://m.zhihu.com/answer/{answer_id}"),
+            ])
+        if not article_id and not answer_id:
+            candidate_urls.append(("desktop", url))
+
+        # Deduplicate by URL while preserving order
+        seen = set()
+        unique_candidates = []
+        for mode, u in candidate_urls:
+            if u not in seen:
+                seen.add(u)
+                unique_candidates.append((mode, u))
+
+        mobile_ua = (
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        )
+
+        # Use a session so cookies from the homepage carry over
+        session = requests.Session()
+        if proxies:
+            session.proxies.update(proxies)
+
+        try:
+            # Visit homepage first to acquire anti-bot cookies (z_c0, _zap, etc.)
+            if not cookie_header:
+                home_headers = Fetcher._get_zhihu_html_headers("https://www.zhihu.com/")
+                try:
+                    home_resp = session.get("https://www.zhihu.com/", headers=home_headers, timeout=15)
+                    logger.debug("Zhihu homepage pre-visit: %d, cookies: %s", home_resp.status_code, list(session.cookies.keys()))
+                except Exception as e:
+                    logger.debug("Zhihu homepage pre-visit failed: %s", e)
+
+            for mode, candidate_url in unique_candidates:
+                try:
+                    if mode == "mobile":
+                        headers = Fetcher._get_zhihu_html_headers(candidate_url)
+                        headers["User-Agent"] = mobile_ua
+                    else:
+                        headers = Fetcher._get_zhihu_html_headers(candidate_url)
+                    if cookie_header:
+                        headers["Cookie"] = cookie_header
+                    response = session.get(candidate_url, headers=headers, timeout=30)
+                    response.raise_for_status()
+                    text = Fetcher._decode_response_text(response)
+                    if len(text) > 500:
+                        logger.info("Zhihu direct HTML fetch succeeded for %s (%d bytes)", candidate_url, len(text))
+                        return text
+                except Exception as e:
+                    logger.debug("Zhihu direct HTML fetch failed for %s: %s", candidate_url, e)
+        finally:
+            session.close()
+        return None
+
+    @staticmethod
+    def _extract_zhihu_initial_state(html_content, source_url):
+        """Try to extract article content from Zhihu's embedded initial state JSON."""
+        try:
+            import json as _json
+
+            # Zhihu embeds initial data in <script id="js-initialData"> or similar
+            match = re.search(
+                r'<script\s+id="js-initialData"\s*>(.*?)</script>',
+                html_content,
+                re.DOTALL,
+            )
+            if not match:
+                return None
+
+            data = _json.loads(match.group(1))
+
+            # Try article path (zhuanlan)
+            article_data = None
+            for key in data:
+                if isinstance(data[key], dict):
+                    # Common patterns: initialState.entities.articles
+                    entities = data[key].get("entities", {})
+                    articles = entities.get("articles", {})
+                    if articles:
+                        article_data = next(iter(articles.values()))
+                        break
+
+            if article_data and article_data.get("content"):
+                return Fetcher._build_zhihu_html(
+                    title=article_data.get("title", ""),
+                    content_html=article_data.get("content", ""),
+                    source_url=source_url,
+                    author_name=(article_data.get("author") or {}).get("name", ""),
+                    created_time=Fetcher._format_unix_timestamp(article_data.get("created")),
+                    updated_time=Fetcher._format_unix_timestamp(article_data.get("updated")),
+                    voteup_count=article_data.get("voteupCount"),
+                    comment_count=article_data.get("commentCount"),
+                )
+
+            # Try answer path
+            answer_data = None
+            for key in data:
+                if isinstance(data[key], dict):
+                    entities = data[key].get("entities", {})
+                    answers = entities.get("answers", {})
+                    if answers:
+                        answer_data = next(iter(answers.values()))
+                        break
+
+            if answer_data and answer_data.get("content"):
+                return Fetcher._build_zhihu_html(
+                    title=(answer_data.get("question") or {}).get("title", ""),
+                    question_title=(answer_data.get("question") or {}).get("title", ""),
+                    content_html=answer_data.get("content", ""),
+                    source_url=source_url,
+                    author_name=(answer_data.get("author") or {}).get("name", ""),
+                    created_time=Fetcher._format_unix_timestamp(answer_data.get("createdTime")),
+                    updated_time=Fetcher._format_unix_timestamp(answer_data.get("updatedTime")),
+                    voteup_count=answer_data.get("voteupCount"),
+                    comment_count=answer_data.get("commentCount"),
+                )
+        except Exception as e:
+            logger.debug("Zhihu initial state extraction failed: %s", e)
+        return None
+
+    @staticmethod
     def _fetch_zhihu_content(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Zhihu answer/article content via public API first.
@@ -3687,6 +3856,17 @@ class Fetcher:
         )
         if alt_html:
             return alt_html
+
+        # Try direct HTML fetch with full browser-like headers (faster than Playwright)
+        direct_html = Fetcher._fetch_zhihu_page_html(url, proxies=req_proxies, cookie_header=cookie_header)
+        if direct_html:
+            extracted = Fetcher._extract_zhihu_dom_content(direct_html, url)
+            if extracted:
+                return extracted
+            # DOM extraction failed; try extracting embedded initial state JSON
+            json_extracted = Fetcher._extract_zhihu_initial_state(direct_html, url)
+            if json_extracted:
+                return json_extracted
 
         try:
             browser_html = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
@@ -3942,7 +4122,7 @@ class Fetcher:
         else:
             context = browser.new_context(**context_options)
 
-        # Add script to hide webdriver property
+        # Add script to hide webdriver property and automation markers
         context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -3950,7 +4130,28 @@ class Fetcher:
             Object.defineProperty(navigator, 'plugins', {
                 get: () => [1, 2, 3, 4, 5]
             });
-            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['zh-CN', 'zh', 'en']
+            });
+            window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+            // Override permissions query
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters)
+            );
+            // Hide automation-related properties
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+            delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+            // Mock WebGL vendor/renderer to look like a real GPU
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) return 'Intel Inc.';
+                if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                return getParameter.call(this, parameter);
+            };
         """)
 
         return context
@@ -4013,13 +4214,21 @@ class Fetcher:
                 page = context.pages[0] if context.pages else context.new_page()
             else:
                 # Launch browser with stealth args
+                # Use visible browser for Zhihu to avoid headless detection
+                use_headless = not is_zhihu_url
                 launch_args = {
-                    "headless": True,
+                    "headless": use_headless,
                     "args": [
                         "--disable-blink-features=AutomationControlled",
                         "--disable-features=IsolateOrigins,site-per-process",
                         "--disable-web-security",
                         "--disable-features=BlockInsecurePrivateNetworkRequests",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-infobars",
+                        "--disable-background-timer-throttling",
+                        "--disable-popup-blocking",
+                        "--disable-extensions",
                     ],
                 }
                 if pw_proxy:
@@ -4047,9 +4256,74 @@ class Fetcher:
                     # Wait longer for content to hydrate
                     page.wait_for_timeout(5000)
                 elif is_zhihu_url:
-                    logger.info("Using domcontentloaded strategy for Zhihu")
+                    logger.info("Using Zhihu browser strategy: visible browser, homepage first, then article")
+                    content_selectors = [
+                        ".Post-RichTextContainer",
+                        ".RichContent .RichContent-inner",
+                        ".AnswerItem",
+                        "article",
+                        "h1.Post-Title",
+                        "h1.QuestionHeader-title",
+                    ]
+
+                    def _zhihu_wait_for_content(page, timeout_ms=10000):
+                        """Wait for Zhihu article content to appear; return True if found."""
+                        for selector in content_selectors:
+                            try:
+                                page.wait_for_selector(selector, timeout=timeout_ms)
+                                logger.info("Zhihu content appeared: %s", selector)
+                                return True
+                            except PlaywrightTimeoutError:
+                                continue
+                        return False
+
+                    def _zhihu_needs_login(page):
+                        """Check if the current page is a login or security verification page."""
+                        try:
+                            page_text = page.evaluate("document.body ? document.body.innerText : ''")
+                            if not page_text:
+                                return False
+                            if "安全验证" in page_text or "验证你是否是真人" in page_text:
+                                return True
+                            if "登录" in page_text[:500] and len(page_text) < 2000:
+                                return True
+                            return False
+                        except Exception:
+                            return False
+
+                    # Step 1: Visit homepage to acquire cookies / check login status
+                    try:
+                        page.goto("https://www.zhihu.com/", wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(2000)
+                    except Exception as e:
+                        logger.debug("Zhihu homepage pre-visit failed: %s", e)
+
+                    # Step 2: Navigate to the target article
                     page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(4000)
+                    page.wait_for_timeout(3000)
+                    try:
+                        page.wait_for_load_state("load", timeout=15000)
+                    except PlaywrightTimeoutError:
+                        pass
+
+                    # Step 3: Check if content loaded or login is needed
+                    if not _zhihu_wait_for_content(page, timeout_ms=5000):
+                        if _zhihu_needs_login(page):
+                            logger.info("Zhihu requires login; please log in manually in the browser window...")
+                            logger.info("Waiting up to 120 seconds for login...")
+                            # Wait for user to log in and be redirected back to content
+                            if _zhihu_wait_for_content(page, timeout_ms=120000):
+                                # Login succeeded — save auth state and re-navigate
+                                try:
+                                    state = context.storage_state()
+                                    AuthHandler.save_state("zhihu", state)
+                                    logger.info("Saved Zhihu auth state after login")
+                                except Exception as e:
+                                    logger.debug("Failed to save auth state: %s", e)
+                                # Re-navigate to the article URL to get fresh content
+                                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                                page.wait_for_timeout(3000)
+                                _zhihu_wait_for_content(page, timeout_ms=15000)
                 else:
                     try:
                         page.goto(url, wait_until="networkidle", timeout=60000)
@@ -4067,7 +4341,17 @@ class Fetcher:
                             )
                     page.wait_for_timeout(2000)
 
-                content = page.content()
+                # Retry page.content() if the page is still mid-navigation
+                for _content_attempt in range(3):
+                    try:
+                        content = page.content()
+                        break
+                    except Exception as content_err:
+                        if "navigating" in str(content_err).lower() and _content_attempt < 2:
+                            logger.debug("Page still navigating; waiting and retrying content()")
+                            page.wait_for_timeout(3000)
+                        else:
+                            raise
 
                 if is_twitter_url:
                     if Fetcher._is_twitter_placeholder_content(content):
