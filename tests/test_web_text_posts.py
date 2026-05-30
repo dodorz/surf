@@ -1,7 +1,10 @@
+import time
+
 import surf_web
 from surf import (
     ContentProcessor,
     Fetcher,
+    OutputHandler,
     _build_direct_markdown_payload,
     _convert_embedded_html_in_markdown,
     _translation_was_performed,
@@ -211,6 +214,87 @@ def test_process_url_rewrites_github_blob_image_links_to_raw(monkeypatch):
     assert payload["success"] is True
     assert payload["markdown"] == "![Logo](https://github.com/USER/PROJECT/raw/master/assets/logo.png)"
 
+
+def test_process_url_rewrites_github_blob_media_links_to_raw(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    payload_html = _build_direct_markdown_payload(
+        markdown_text="[https://github.com/USER/PROJECT/blob/master/media/demo.mp4](https://github.com/USER/PROJECT/blob/master/media/demo.mp4)",
+        title="guide.md",
+        source_url="https://github.com/USER/PROJECT/docs/guide.md",
+        site_name="github",
+        base_url="https://github.com/USER/PROJECT/blob/main/docs/guide.md",
+    )
+
+    monkeypatch.setattr(
+        surf_web.Fetcher,
+        "fetch",
+        lambda *args, **kwargs: payload_html,
+    )
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT/docs/guide.md",
+            "lang": "raw",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["markdown"] == "[https://github.com/USER/PROJECT/blob/master/media/demo.mp4](https://github.com/USER/PROJECT/raw/master/media/demo.mp4)"
+
+
+def test_process_url_rewrites_github_blob_media_html_src_to_raw(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    payload_html = _build_direct_markdown_payload(
+        markdown_text='<video controls src="https://github.com/USER/PROJECT/blob/master/media/demo.mp4"></video>',
+        title="guide.md",
+        source_url="https://github.com/USER/PROJECT/docs/guide.md",
+        site_name="github",
+        base_url="https://github.com/USER/PROJECT/blob/main/docs/guide.md",
+    )
+
+    monkeypatch.setattr(
+        surf_web.Fetcher,
+        "fetch",
+        lambda *args, **kwargs: payload_html,
+    )
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://github.com/USER/PROJECT/docs/guide.md",
+            "lang": "raw",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["markdown"] == "[](https://github.com/USER/PROJECT/raw/master/media/demo.mp4)"
+
+
+def test_extract_metadata_strips_utm_tracking_from_source():
+    html = _build_direct_markdown_payload(
+        markdown_text="Body",
+        title="Example",
+        source_url="https://cn.nytimes.com/technology/20260519/elon-musk-openai-trial/?utm_source=tw-nytimeschinese&utm_medium=social&utm_campaign=cur",
+        site_name="nytimes",
+    )
+
+    metadata = OutputHandler._extract_metadata(
+        html,
+        source_url="https://cn.nytimes.com/technology/20260519/elon-musk-openai-trial/?utm_source=tw-nytimeschinese&utm_medium=social&utm_campaign=cur",
+    )
+
+    assert metadata["source"] == "https://cn.nytimes.com/technology/20260519/elon-musk-openai-trial/"
+
+
 def test_direct_markdown_converts_embedded_html_but_preserves_fenced_code():
     markdown = """# Guide
 
@@ -395,7 +479,24 @@ def test_web_github_untouched_translation_mode_checks_translation(monkeypatch):
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["success"] is True
-    assert payload["markdown"] == "中文 README"
+    assert payload["markdown"] == "English README"
+    assert payload["translation_pending"] is True
+    assert payload["translation_job_id"]
+
+    job_response = client.get(f"/api/translation-jobs/{payload['translation_job_id']}")
+    job_payload = job_response.get_json()
+    assert job_response.status_code == 200
+    assert job_payload["success"] is True
+    assert job_payload["status"] in {"pending", "running", "done"}
+
+    for _ in range(20):
+        job_response = client.get(f"/api/translation-jobs/{payload['translation_job_id']}")
+        job_payload = job_response.get_json()
+        if job_payload["status"] == "done":
+            break
+        time.sleep(0.05)
+    assert job_payload["status"] == "done"
+    assert job_payload["result"]["markdown"] == "中文 README"
 
 
 def test_web_process_uses_shared_post_fetch_pipeline(monkeypatch):
@@ -444,3 +545,38 @@ def test_web_process_uses_shared_post_fetch_pipeline(monkeypatch):
     assert payload["markdown"] == "Processed body"
     assert seen["request_url"] == "https://zserge.com/posts/visicalc/"
     assert seen["lang_mode"] == "raw"
+
+
+def test_web_translation_job_uses_raw_fallback_fields(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+    monkeypatch.setattr(
+        surf_web.ContentProcessor,
+        "translate_if_needed",
+        lambda text, title=None, **kwargs: (f"译文: {text}", f"译名: {title}"),
+    )
+
+    job_id = "job-raw-fallback"
+    surf_web._store_translation_job(
+        job_id,
+        {
+            "status": "pending",
+            "created_at": 0,
+            "updated_at": 0,
+            "llm_provider": None,
+            "lang_mode": "trans",
+            "source": {
+                "title": "Original Title",
+                "raw": "Original body",
+                "markdown": "Original body",
+                "metadata": {"source_url": "https://example.com/post"},
+            },
+        },
+    )
+
+    surf_web._run_web_translation_job(job_id)
+    job = surf_web._get_translation_job(job_id)
+
+    assert job["status"] == "done"
+    assert job["result"]["markdown"] == "译文: Original body"
+    assert job["result"]["title"] == "译名: Original Title"
+    assert job["result"]["metadata"]["translator"] == "fake-model"

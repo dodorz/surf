@@ -32,7 +32,7 @@ import trafilatura
 import re
 import unicodedata
 import signal
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
 
 
 def _build_direct_markdown_payload(
@@ -8462,6 +8462,54 @@ class OutputHandler:
         )
 
     @staticmethod
+    def _is_likely_media_url(url):
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        path = (parsed.path or "").lower()
+        media_exts = {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".svg",
+            ".bmp",
+            ".ico",
+            ".avif",
+            ".mp4",
+            ".webm",
+            ".mov",
+            ".m4v",
+            ".mp3",
+            ".wav",
+            ".ogg",
+            ".oga",
+            ".m4a",
+            ".flac",
+            ".aac",
+            ".opus",
+            ".pdf",
+        }
+        return any(path.endswith(ext) for ext in media_exts)
+
+    @staticmethod
+    def _canonicalize_generic_source_url(url):
+        if not url:
+            return url
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        cleaned_pairs = [(key, value) for key, value in query_pairs if not key.lower().startswith("utm_")]
+        cleaned_query = urlencode(cleaned_pairs, doseq=True)
+        return urlunparse(parsed._replace(query=cleaned_query))
+
+    @staticmethod
     def _convert_markdown_urls_to_absolute(md_content, base_url):
         """
         将Markdown中的相对URL转换为绝对URL。
@@ -8495,12 +8543,16 @@ class OutputHandler:
         def replace_link_url(match):
             text = match.group(1)
             url = match.group(2)
+            if url and url.startswith(("http://", "https://")):
+                rewritten_url = OutputHandler._rewrite_github_blob_asset_url(url)
+                if rewritten_url != url and OutputHandler._is_likely_media_url(rewritten_url):
+                    return f"[{text}]({rewritten_url})"
             if url and not url.startswith(("http://", "https://", "data:", "#", "mailto:", "tel:", "javascript:")):
                 absolute_url = urljoin(base_url, url)
                 return f"[{text}]({absolute_url})"
             return match.group(0)
 
-        md_content = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", replace_link_url, md_content)
+        md_content = re.sub(r"\[([^\]]*)\]\(([^)]+)\)", replace_link_url, md_content)
 
         # 处理内联HTML标签中的URL（如 <video src="...">、<audio src="..."> 等）
         def convert_html_attrs_in_md(match):
@@ -8528,16 +8580,15 @@ class OutputHandler:
                 if tag_name in tag_attr_map:
                     for attr in tag_attr_map[tag_name]:
                         url = tag.get(attr)
-                        if url and not url.startswith(
-                            (
-                                "http://",
-                                "https://",
-                                "data:",
-                                "#",
-                                "mailto:",
-                                "tel:",
-                                "javascript:",
-                            )
+                        if not url:
+                            continue
+                        if url.startswith(("http://", "https://")):
+                            rewritten_url = OutputHandler._rewrite_github_blob_asset_url(url)
+                            if rewritten_url != url:
+                                tag[attr] = rewritten_url
+                            continue
+                        if not url.startswith(
+                            ("data:", "#", "mailto:", "tel:", "javascript:")
                         ):
                             tag[attr] = urljoin(base_url, url)
 
@@ -8573,6 +8624,8 @@ class OutputHandler:
             "translator": translator,
             "archive": archive_url,
         }
+        if metadata["source"]:
+            metadata["source"] = OutputHandler._canonicalize_generic_source_url(metadata["source"])
 
         source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
         source_site = source_site_tag.get("content", "").strip().lower() if source_site_tag else ""

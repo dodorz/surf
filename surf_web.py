@@ -10,11 +10,15 @@ Example:
 """
 
 import argparse
+import copy
 import importlib.util
 import os
 import re
 import sys
 import threading
+import time
+import traceback
+import uuid
 import webbrowser
 from html import escape
 from types import SimpleNamespace
@@ -77,6 +81,8 @@ from surf import (
 )
 
 app = Flask(__name__)
+_TRANSLATION_JOBS = {}
+_TRANSLATION_JOBS_LOCK = threading.Lock()
 
 @app.errorhandler(Exception)
 def handle_api_error(error):
@@ -1092,6 +1098,10 @@ HTML_TEMPLATE = """
             }
 
             const container = document.getElementById('resultsContainer');
+            const existingAggregate = container.querySelector('.aggregate-card');
+            if (existingAggregate) {
+                existingAggregate.remove();
+            }
             const card = document.createElement('div');
             card.className = 'card result-card show aggregate-card';
             card.innerHTML = `
@@ -1176,10 +1186,7 @@ HTML_TEMPLATE = """
             });
         }
 
-        function renderResultCard(result, index, total) {
-            const container = document.getElementById('resultsContainer');
-            const card = document.createElement('div');
-            card.className = 'card result-card show';
+        function populateResultCard(card, result, index, total) {
             const label = total > 1 ? ` (${index + 1}/${total})` : '';
             const source = result?.metadata?.source_url || result?.input_url || '';
 
@@ -1200,6 +1207,7 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 ${source ? `<div class="field-hint result-source"></div>` : ''}
+                ${result.translation_pending ? '<div class="field-hint">翻译处理中，先显示原文结果。</div>' : ''}
                 <div class="tabs">
                     <button class="tab active" data-tab="markdown">Markdown</button>
                     <button class="tab" data-tab="html">HTML</button>
@@ -1216,12 +1224,14 @@ HTML_TEMPLATE = """
                 </div>
             `;
 
-            const hint = card.querySelector('.field-hint');
+            const hint = card.querySelector('.result-source');
             if (hint) {
                 hint.textContent = `${source}${label}`;
             }
             card.dataset.defaultDirs = JSON.stringify(result.defaultDirs || {});
             card.dataset.defaultSaveTitle = result.defaultSaveTitle || result.title || 'Untitled';
+            card.dataset.inputUrl = result.input_url || '';
+            card.dataset.translationJobId = result.translation_job_id || '';
             card.querySelector('[data-tab-content="markdown"] pre').textContent = result.markdown || '';
             card.querySelector('[data-tab-content="html"] pre').textContent = result.html || '';
             card.querySelector('[data-tab-content="raw"] pre').textContent = result.raw || '';
@@ -1230,7 +1240,16 @@ HTML_TEMPLATE = """
 
             addSaveButtons(card, result);
             wireResultTabs(card);
+            return card;
+        }
+
+        function renderResultCard(result, index, total) {
+            const container = document.getElementById('resultsContainer');
+            const card = document.createElement('div');
+            card.className = 'card result-card show';
+            populateResultCard(card, result, index, total);
             container.appendChild(card);
+            return card;
         }
 
         function renderErrorCard(input, message, index, total) {
@@ -1313,13 +1332,16 @@ HTML_TEMPLATE = """
                         result.input_url = input;
                         currentResults.push(result);
                         window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
-                        renderResultCard(result, i, inputs.length);
+                        const card = renderResultCard(result, i, inputs.length);
+                        if (result.translation_pending && result.translation_job_id) {
+                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
+                        }
                         successCount += 1;
                     } else {
                         renderErrorCard(input, result.error, i, inputs.length);
                     }
                 }
-                renderAggregateSaveCard(currentResults);
+                refreshAggregateCard();
                 showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
@@ -1366,6 +1388,60 @@ HTML_TEMPLATE = """
 
         // Store result data for saving
         let currentResults = [];
+        const translationJobIds = new Set();
+
+        function refreshAggregateCard() {
+            renderAggregateSaveCard(currentResults);
+        }
+
+        function updateResultCard(card, result, index, total) {
+            if (!card) {
+                return;
+            }
+            populateResultCard(card, result, index, total);
+        }
+
+        async function pollTranslationJob(jobId, card, resultIndex, total) {
+            if (!jobId || translationJobIds.has(jobId)) {
+                return;
+            }
+            translationJobIds.add(jobId);
+
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            while (true) {
+                await delay(2000);
+                try {
+                    const response = await fetch(`/api/translation-jobs/${encodeURIComponent(jobId)}`);
+                    const job = await parseJsonResponse(response);
+                    if (!job.success) {
+                        showStatus('error', '翻译任务失败: ' + (job.error || 'unknown error'));
+                        translationJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'done' && job.result) {
+                        const updated = job.result;
+                        updated.input_url = card.dataset.inputUrl || updated.input_url || '';
+                        updated.translation_pending = false;
+                        updated.translation_job_id = jobId;
+                        currentResults[resultIndex] = updated;
+                        updateResultCard(card, updated, resultIndex, total);
+                        refreshAggregateCard();
+                        translationJobIds.delete(jobId);
+                        showStatus('success', `翻译完成：${updated.title || 'Untitled'}`);
+                        return;
+                    }
+                    if (job.status === 'error') {
+                        showStatus('error', '翻译失败: ' + (job.error || 'unknown error'));
+                        translationJobIds.delete(jobId);
+                        return;
+                    }
+                    showStatus('processing', '翻译处理中...');
+                } catch (error) {
+                    showStatus('processing', '翻译处理中...');
+                }
+            }
+        }
 
         async function saveFile(container, resultData, fileType, options = {}) {
             if (!resultData) {
@@ -1571,6 +1647,124 @@ def build_default_filename_stem(title, source_url=None, html_content=None):
     return OutputHandler._safe_filename_title(filename_title, max_len=100)
 
 
+def _store_translation_job(job_id, payload):
+    with _TRANSLATION_JOBS_LOCK:
+        _TRANSLATION_JOBS[job_id] = payload
+
+
+def _get_translation_job(job_id):
+    with _TRANSLATION_JOBS_LOCK:
+        job = _TRANSLATION_JOBS.get(job_id)
+        return copy.deepcopy(job) if job else None
+
+
+def _build_translated_web_result(base_result, translated_markdown, translated_title, translation_performed, lang_mode):
+    result = copy.deepcopy(base_result)
+    original_title = result.get("title") or "Untitled"
+    original_markdown = result.get("markdown") or ""
+
+    if lang_mode == "both":
+        if translated_markdown != original_markdown:
+            result["markdown"] = (
+                f"{translated_markdown}\n\n---\n\n### Original Content / 原文内容\n\n{original_markdown}"
+            )
+            result["title"] = (
+                f"{translated_title} ({original_title})"
+                if translated_title and translated_title != original_title
+                else original_title
+            )
+        else:
+            result["markdown"] = translated_markdown
+            result["title"] = translated_title or original_title
+    else:
+        if translated_markdown != original_markdown:
+            result["markdown"] = translated_markdown
+        if translated_title:
+            result["title"] = translated_title
+
+    result["translated_title"] = translated_title
+    result["translation_performed"] = translation_performed
+    result["defaultSaveTitle"] = result.get("title") or result.get("defaultSaveTitle") or "Untitled"
+    result.setdefault("metadata", {})
+    result["metadata"]["title"] = result["title"]
+    result["metadata"]["translated_title"] = translated_title if translation_performed else None
+    return result
+
+
+def _run_web_translation_job(job_id):
+    job = _get_translation_job(job_id)
+    if not job:
+        return
+
+    _store_translation_job(job_id, {**job, "status": "running", "updated_at": time.time()})
+    try:
+        config = get_config()
+        source = job["source"]
+        raw_markdown = source.get("raw_markdown") or source.get("raw") or ""
+        original_title = source.get("original_title") or source.get("title") or "Untitled"
+        translator_model = None
+        try:
+            translator_model = config.get_llm_config(job.get("llm_provider"))["model"]
+        except Exception:
+            translator_model = None
+        translated_markdown, translated_title = ContentProcessor.translate_if_needed(
+            raw_markdown,
+            title=original_title,
+            target_lang=config.get("Output", "target_language", fallback="zh-cn"),
+            config=config,
+            llm_provider=job.get("llm_provider"),
+        )
+        translation_performed = (
+            translated_markdown != raw_markdown
+            or (translated_title or "") != original_title
+        )
+        result = _build_translated_web_result(
+            source,
+            translated_markdown,
+            translated_title,
+            translation_performed,
+            job.get("lang_mode", "trans"),
+        )
+        result["metadata"]["translator"] = translator_model if translation_performed else None
+        _store_translation_job(
+            job_id,
+            {
+                **job,
+                "status": "done",
+                "updated_at": time.time(),
+                "result": result,
+            },
+        )
+    except Exception as exc:
+        logger.error("Web translation job failed: %s", exc)
+        _store_translation_job(
+            job_id,
+            {
+                **job,
+                "status": "error",
+                "updated_at": time.time(),
+                "error": str(exc),
+            },
+        )
+
+
+def _enqueue_web_translation_job(source_result, llm_provider, lang_mode):
+    job_id = uuid.uuid4().hex
+    _store_translation_job(
+        job_id,
+        {
+            "status": "pending",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "llm_provider": llm_provider,
+            "lang_mode": lang_mode,
+            "source": copy.deepcopy(source_result),
+        },
+    )
+    threading.Thread(target=_run_web_translation_job, args=(job_id,), daemon=True).start()
+    return job_id
+
+
 def build_combined_result_payload(results):
     """Merge multiple result payloads into a single saveable payload."""
     valid_results = [item for item in (results or []) if isinstance(item, dict)]
@@ -1699,6 +1893,27 @@ def site_defaults():
     return jsonify({"success": True, **defaults})
 
 
+@app.route("/api/translation-jobs/<job_id>", methods=["GET"])
+def translation_job_status(job_id):
+    """Fetch the current status of an async translation job."""
+    job = _get_translation_job(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "Translation job not found"}), 404
+
+    payload = {
+        "success": True,
+        "job_id": job_id,
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    if job.get("status") == "done":
+        payload["result"] = job.get("result")
+    elif job.get("status") == "error":
+        payload["error"] = job.get("error") or "Translation failed"
+    return jsonify(payload)
+
+
 @app.route("/api/process", methods=["POST"])
 def process_url():
     """Process a URL or free-form text post and return the result."""
@@ -1718,6 +1933,7 @@ def process_url():
         translated_title = None
         content_base_url = None
         translation_performed = False
+        translation_pending = False
 
         # Fetch content
         proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
@@ -1738,6 +1954,7 @@ def process_url():
             md_content = ContentProcessor.to_markdown(cleaned_html)
             original_md = md_content
             original_title = title
+            translation_pending = lang_mode in {"trans", "both"}
         else:
             if not url:
                 return jsonify({"success": False, "error": "A valid http/https URL is required"})
@@ -1771,13 +1988,14 @@ def process_url():
             )
             if not html_content:
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
+            pipeline_lang_mode = "raw" if lang_mode in {"trans", "both"} else lang_mode
             processed = _process_fetched_content(
                 html_content,
                 url,
                 config,
                 site_name=site_name,
                 site_config=site_config,
-                lang_mode=lang_mode,
+                lang_mode=pipeline_lang_mode,
                 ocr_args=build_web_ocr_args(data),
                 proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
@@ -1792,15 +2010,10 @@ def process_url():
             original_title = processed["original_title"]
             translated_title = processed["translated_title"]
             translation_performed = processed["translation_performed"]
-
-        translator = None
-        if translation_performed:
-            try:
-                llm_provider = (data.get("llm") or "").strip() or None
-                llm_config = config.get_llm_config(llm_provider)
-                translator = llm_config["model"]
-            except Exception:
-                pass
+            translation_pending = lang_mode in {"trans", "both"}
+            if translation_pending:
+                title = original_title
+                md_content = original_md
 
         archive_url = None
         if data.get("archive_source") and not data.get("no_front_matter", False):
@@ -1824,30 +2037,35 @@ def process_url():
             html_content=html_content,
         )
 
-        return jsonify(
-            {
-                "success": True,
+        result = {
+            "success": True,
+            "title": title,
+            "markdown": md_content,
+            "html": cleaned_html,
+            "raw": original_md,
+            "raw_markdown": original_md,
+            "original_title": title,
+            "defaultDirs": defaultDirs,
+            "defaultSaveTitle": defaultSaveTitle,
+            "translation_performed": translation_performed,
+            "translated_title": translated_title if translation_performed else None,
+            "metadata": {
                 "title": title,
-                "markdown": md_content,
-                "html": cleaned_html,
-                "raw": original_md,
-                "defaultDirs": defaultDirs,
-                "defaultSaveTitle": defaultSaveTitle,
-                # Store metadata for saving later
-                "metadata": {
-                    "title": title,
-                    "html_content": html_content,
-                    "add_front_matter": not data.get("no_front_matter", False),
-                    "translated_title": translated_title
-                    if translation_performed
-                    else None,
-                    "source_url": source_url,
-                    "archive_url": archive_url,
-                    "translator": translator,
-                    "html_inline": data.get("html_inline", False),
-                },
-            }
-        )
+                "html_content": html_content,
+                "add_front_matter": not data.get("no_front_matter", False),
+                "translated_title": translated_title if translation_performed else None,
+                "source_url": source_url,
+                "archive_url": archive_url,
+                "translator": None,
+                "html_inline": data.get("html_inline", False),
+            },
+        }
+        if translation_pending:
+            llm_provider = (data.get("llm") or "").strip() or None
+            job_id = _enqueue_web_translation_job(copy.deepcopy(result), llm_provider, lang_mode)
+            result["translation_pending"] = True
+            result["translation_job_id"] = job_id
+        return jsonify(result)
 
     except Exception as e:
         logger.error(f"Processing failed: {e}")
