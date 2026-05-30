@@ -1491,9 +1491,6 @@ HTML_TEMPLATE = """
 
 def get_config():
     """Get config object."""
-    config_path = resolve_user_path("config.ini")
-    if os.path.exists(config_path):
-        return Config(config_path)
     return Config()
 
 

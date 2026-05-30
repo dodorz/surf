@@ -817,9 +817,33 @@ def resolve_user_path(path):
     return os.path.expanduser(raw_path)
 
 
+def _get_default_config_path():
+    """
+    Resolve the default config path.
+
+    Prefer config.ini next to the launched executable/script. If that does not
+    exist, fall back to $XDG_CONFIG_HOME/surf/config.ini, or
+    ~/.config/surf/config.ini when XDG_CONFIG_HOME is unset.
+    """
+    argv0 = (sys.argv[0] or "").strip() if sys.argv else ""
+    if argv0 and argv0 not in {"-c", "-m"}:
+        executable_path = resolve_user_path(argv0)
+        if executable_path and os.path.isfile(executable_path):
+            local_config = os.path.join(os.path.dirname(executable_path), "config.ini")
+            if os.path.exists(local_config):
+                return local_config
+
+    xdg_config_home = (os.environ.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg_config_home:
+        config_home = resolve_user_path(xdg_config_home)
+    else:
+        config_home = resolve_user_path(os.path.join("~", ".config"))
+    return os.path.join(config_home, "surf", "config.ini")
+
+
 class Config:
-    def __init__(self, config_path="config.ini"):
-        config_path = resolve_user_path(config_path)
+    def __init__(self, config_path=None):
+        config_path = resolve_user_path(config_path) if config_path else _get_default_config_path()
         # Disable interpolation to allow '%' in values (e.g. for TTS rate/voltage)
         self.config = configparser.ConfigParser(interpolation=None)
         if not os.path.exists(config_path):
@@ -10055,8 +10079,7 @@ Twitter/X Backend:
     _raise_if_interrupted()
 
     # Determine config path
-    config_path = resolve_user_path(args.config) if args.config else "config.ini"
-    config = Config(config_path)
+    config = Config(args.config) if args.config else Config()
 
     # Handle --clear-auth
     if args.clear_auth:

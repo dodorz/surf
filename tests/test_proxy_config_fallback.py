@@ -164,3 +164,35 @@ def test_generic_fetch_uses_system_trust_requests_session(monkeypatch):
     assert "aaaa" in html
     assert len(calls) == 1
     assert calls[0][0][0] == url
+
+
+def test_default_config_prefers_executable_directory(monkeypatch, tmp_path):
+    exe_dir = tmp_path / "bin"
+    exe_dir.mkdir()
+    exe_path = exe_dir / "surf.exe"
+    exe_path.write_text("")
+    local_config = exe_dir / "config.ini"
+    local_config.write_text("[LLM]\nprovider = local\n")
+
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+    monkeypatch.setattr(surf.sys, "argv", [str(exe_path)])
+
+    assert surf._get_default_config_path() == str(local_config)
+
+
+def test_default_config_falls_back_to_xdg_config_home(monkeypatch, tmp_path):
+    exe_dir = tmp_path / "bin"
+    exe_dir.mkdir()
+    exe_path = exe_dir / "surf.exe"
+    exe_path.write_text("")
+
+    xdg_home = tmp_path / "xdg"
+    xdg_config = xdg_home / "surf" / "config.ini"
+    xdg_config.parent.mkdir(parents=True)
+    xdg_config.write_text("[LLM]\nprovider = xdg\n")
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+    monkeypatch.setattr(surf.sys, "argv", [str(exe_path)])
+
+    assert surf._get_default_config_path() == str(xdg_config)

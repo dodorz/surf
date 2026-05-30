@@ -124,6 +124,8 @@ If you expose it to the internet, put it behind a reverse proxy with HTTPS and o
 
 ## Configuration
 
+Surf looks for `config.ini` next to the launched executable/script first. If it is not there, it falls back to `$XDG_CONFIG_HOME/surf/config.ini`, or `~/.config/surf/config.ini` when `XDG_CONFIG_HOME` is unset.
+
 Copy `config.ini.example` to `config.ini` and edit it to set your API keys and paths.
 
 On Windows, Surf accepts Unix-style path input in config values and CLI path arguments. For example, `~/Note/article.md` is resolved under `%USERPROFILE%`, and `/` is normalized to `\`.

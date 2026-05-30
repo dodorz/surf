@@ -100,6 +100,8 @@ uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 
 ## 配置
 
+Surf 会先读取启动的可执行文件/脚本同目录下的 `config.ini`。如果那里没有，再回退到 `$XDG_CONFIG_HOME/surf/config.ini`；若未设置 `XDG_CONFIG_HOME`，则回退到 `~/.config/surf/config.ini`。
+
 复制 `config.ini.example` 为 `config.ini` 并编辑以设置您的 API 密钥和路径。
 
 在 Windows 上，Surf 支持在配置项和命令行路径参数里直接使用 Unix 风格路径。例如 `~/Note/article.md` 会解析到当前用户的 `%USERPROFILE%` 目录下，同时会自动把 `/` 规范化为 `\`。
