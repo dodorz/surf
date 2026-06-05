@@ -7,7 +7,7 @@ from surf_web import app, Fetcher
 def test_process_url_accepts_direct_markdown_payload(monkeypatch):
     def fake_fetch(*args, **kwargs):
         return _build_direct_markdown_payload(
-            markdown_text="Author: alice\n\nMain post body.",
+            markdown_text="Author: alice\nNode: Test Node\nPublished: 2026-04-24 18:51:29 +08:00\nSource: https://v2ex.com/t/1#reply0\n\nMain post body.",
             title="Example Topic",
             source_url="https://v2ex.com/t/1",
             site_name="v2ex",
@@ -33,6 +33,10 @@ def test_process_url_accepts_direct_markdown_payload(monkeypatch):
     assert data["title"] == "Example Topic"
     assert data["defaultSaveTitle"] == "Example Topic"
     assert data["raw"] == data["markdown"]
+    assert "Author: alice" not in data["markdown"]
+    assert "Node: Test Node" not in data["markdown"]
+    assert "Published: 2026-04-24 18:51:29 +08:00" not in data["markdown"]
+    assert "Source: https://v2ex.com/t/1#reply0" not in data["markdown"]
     assert "Main post body." in data["markdown"]
 
 

@@ -91,6 +91,39 @@ def test_process_url_can_force_full_text_save_even_when_text_contains_url(monkey
     assert payload["metadata"]["source_url"] is None
 
 
+def test_processed_markdown_strips_leading_blank_lines(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+    monkeypatch.setattr(
+        surf_web.OcrHandler,
+        "annotate_html_with_ocr",
+        lambda cleaned_html, **kwargs: cleaned_html,
+    )
+    monkeypatch.setattr(
+        surf_web.ContentProcessor,
+        "extract_content",
+        lambda html: ("Example", "<article><p>Hello.</p></article>"),
+    )
+    monkeypatch.setattr(
+        surf_web.ContentProcessor,
+        "to_markdown",
+        lambda html: "\n\nHello.\n",
+    )
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://example.com/article",
+            "lang": "raw",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["markdown"] == "Hello.\n"
+
+
 def test_translation_metadata_requires_actual_translation(monkeypatch):
     assert not _translation_was_performed("中文正文", "中文正文", "中文标题", "中文标题")
     assert _translation_was_performed("English", "中文", "Title", "标题")

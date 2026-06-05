@@ -105,6 +105,35 @@ def _render_markdown_to_html(markdown_text):
     return f"<article>{body}</article>"
 
 
+def _strip_v2ex_leading_metadata(markdown_text):
+    if not markdown_text:
+        return markdown_text or ""
+
+    lines = markdown_text.splitlines()
+    index = 0
+    metadata_patterns = (
+        r"^Author:\s+.+$",
+        r"^Node:\s+.+$",
+        r"^Published:\s+.+$",
+        r"^Source:\s+https?://.+$",
+    )
+
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line:
+            index += 1
+            continue
+        if any(re.match(pattern, line) for pattern in metadata_patterns):
+            index += 1
+            continue
+        break
+
+    if index >= len(lines):
+        return ""
+
+    return "\n".join(lines[index:]).lstrip("\r\n")
+
+
 _EMBEDDED_HTML_TAGS = (
     "a",
     "abbr",
@@ -497,6 +526,20 @@ def _process_fetched_content(
     if social_title:
         title = social_title
 
+    source_site = None
+    if direct_markdown_payload:
+        source_site = (direct_markdown_payload.get("site_name") or "").strip().lower()
+    else:
+        parsed_payload = _extract_direct_markdown_payload(html_content)
+        if parsed_payload:
+            source_site = (parsed_payload.get("site_name") or "").strip().lower()
+        elif source_url and re.match(r"^https?://((www|cn)\.)?v2ex\.com/t/\d+", source_url, re.IGNORECASE):
+            source_site = "v2ex"
+
+    if source_site == "v2ex":
+        md_content = _strip_v2ex_leading_metadata(md_content)
+
+    md_content = (md_content or "").lstrip("\r\n")
     original_md = md_content
     original_title = title
     translated_title = None
@@ -6926,7 +6969,7 @@ class Fetcher:
         if host not in {"v2ex.com", "cn.v2ex.com"}:
             return url
         fragment = parsed.fragment or ""
-        if re.fullmatch(r"reply\d+", fragment):
+        if re.fullmatch(r"reply\d+", fragment, re.IGNORECASE):
             return urlunparse(
                 (
                     parsed.scheme,
@@ -8817,6 +8860,8 @@ class OutputHandler:
             metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
         elif source_site == "v2ex" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_v2ex_source_url(metadata["source"])
+        elif metadata["source"] and re.match(r"^https?://((www|cn)\.)?v2ex\.com/t/\d+", metadata["source"], re.IGNORECASE):
+            metadata["source"] = Fetcher._canonicalize_v2ex_source_url(metadata["source"])
         elif source_site == "douban" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_douban_source_url(metadata["source"])
         elif metadata["source"] and Fetcher._is_douban_url(metadata["source"]):
@@ -8852,10 +8897,27 @@ class OutputHandler:
             value = match.group(1).strip()
             return OutputHandler.normalize_markdown_encoding(value) if value else None
 
-        if source_site == "v2ex":
+        if source_site == "v2ex" or (
+            source_url and re.match(r"^https?://((www|cn)\.)?v2ex\.com/t/\d+", source_url, re.IGNORECASE)
+        ):
             author = _extract_direct_markdown_field(r"^Author:\s*(.+)$")
             node_name = _extract_direct_markdown_field(r"^Node:\s*(.+)$")
             published = _extract_direct_markdown_field(r"^Published:\s*(.+)$")
+
+            if not author:
+                author_tag = soup.select_one("#Main .box .header small.gray a[href^='/member/']")
+                if author_tag and author_tag.get_text(strip=True):
+                    author = OutputHandler.normalize_markdown_encoding(author_tag.get_text(" ", strip=True))
+            if not node_name:
+                breadcrumb_tags = soup.select("#Main .box .header .flex-one-row a")
+                if breadcrumb_tags:
+                    node_name = OutputHandler.normalize_markdown_encoding(
+                        breadcrumb_tags[-1].get_text(" ", strip=True)
+                    )
+            if not published:
+                published_tag = soup.select_one("#Main .box .header small.gray span[title]")
+                if published_tag:
+                    published = OutputHandler.normalize_markdown_encoding((published_tag.get("title") or "").strip())
 
             if author:
                 metadata["author"] = author

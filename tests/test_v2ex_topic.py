@@ -97,6 +97,20 @@ def test_v2ex_metadata_moves_leading_fields_into_front_matter():
     assert metadata["source"] == "https://v2ex.com/t/1215784"
 
 
+def test_strip_v2ex_leading_metadata_removes_header_block_from_body():
+    markdown = (
+        "Author: TuTouPower\n"
+        "Node: 程序员\n"
+        "Published: 2026-05-27 09:04:11 +08:00\n"
+        "Source: https://v2ex.com/t/1215784#reply106\n\n"
+        "Body\n\nMore"
+    )
+
+    stripped = surf._strip_v2ex_leading_metadata(markdown)
+
+    assert stripped == "Body\n\nMore"
+
+
 def test_v2ex_source_url_keeps_non_reply_fragment():
     html = surf._build_direct_markdown_payload(
         "Body",
@@ -108,6 +122,31 @@ def test_v2ex_source_url_keeps_non_reply_fragment():
     metadata = surf.OutputHandler._extract_metadata(html, source_url="https://v2ex.com/t/123#other")
 
     assert metadata["source"] == "https://v2ex.com/t/123#other"
+
+
+def test_v2ex_source_url_drops_reply_fragment_case_insensitively():
+    html = surf._build_direct_markdown_payload(
+        "Body",
+        title="Example Topic",
+        source_url="https://v2ex.com/t/123#Reply0",
+        site_name="v2ex",
+    )
+
+    metadata = surf.OutputHandler._extract_metadata(html, source_url="https://v2ex.com/t/123#Reply0")
+
+    assert metadata["source"] == "https://v2ex.com/t/123"
+
+
+def test_v2ex_html_page_metadata_moves_into_front_matter():
+    metadata = surf.OutputHandler._extract_metadata(
+        V2EX_HTML,
+        source_url="https://v2ex.com/t/1#Reply0",
+    )
+
+    assert metadata["author"] == "alice"
+    assert metadata["tags"] == ["Test Node"]
+    assert metadata["created"] == "2026-04-24T18:51"
+    assert metadata["source"] == "https://v2ex.com/t/1"
 
 def test_thread_extraction_supports_range_and_author_scope():
     items = [
