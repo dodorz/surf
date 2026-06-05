@@ -40,7 +40,7 @@ surf "https://example.com" -r
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
-- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, NCPSSD).
+- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
 - **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
@@ -325,7 +325,7 @@ Notes:
 
 ### Authentication (--login / --export-auth / --import-auth / --clear-auth)
 
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Reddit, Zhihu, NCPSSD), prepare and reuse a saved Playwright auth state:
+For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Reddit, Zhihu, Douban, NCPSSD), prepare and reuse a saved Playwright auth state:
 
 ```bash
 # First-time login for Xiaohongshu
@@ -346,6 +346,11 @@ surf --login twitter
 surf --login reddit
 surf --export-auth reddit ./reddit_state.json
 surf --import-auth reddit ./reddit_state.json
+
+# Optional: login for Douban (reuses saved cookies for direct requests and browser fallback)
+surf --login douban
+surf --export-auth douban ./douban_state.json
+surf --import-auth douban ./douban_state.json
 
 # Prefer uvx --from twitter-cli twitter with local browser cookies
 surf --twitter-backend cli "https://x.com/username/status/1234567890"

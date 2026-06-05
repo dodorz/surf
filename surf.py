@@ -1415,6 +1415,11 @@ class Fetcher:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
+            if Fetcher._is_douban_url(url):
+                cookie_header = AuthHandler.cookie_header_for_douban()
+                if cookie_header:
+                    headers["Cookie"] = cookie_header
+                    logger.info("douban: Using saved login cookies for HTTP requests")
             try:
                 logger.info(f"Requests Proxies: {req_proxies if req_proxies else 'None'}")
                 response = _requests_get_with_system_trust_interruptibly(
@@ -4268,6 +4273,8 @@ class Fetcher:
                     auth_site_name = "zhihu"
                 elif Fetcher._is_reddit_url(url):
                     auth_site_name = "reddit"
+                elif Fetcher._is_douban_url(url):
+                    auth_site_name = "douban"
                 context = Fetcher._create_stealth_context(browser, url, auth_site_name=auth_site_name)
                 page = context.new_page()
 
@@ -6982,6 +6989,10 @@ class Fetcher:
         )
 
     @staticmethod
+    def _is_douban_url(url):
+        return bool(url and re.match(r"^https?://([^.]+\.)?douban\.com/", url, re.IGNORECASE))
+
+    @staticmethod
     def _normalize_reddit_url(url):
         """Normalize Reddit URLs to canonical post/comment URLs on www.reddit.com."""
         parsed = urlparse(url)
@@ -9224,6 +9235,7 @@ class AuthHandler:
         "x": "https://x.com/i/flow/login",
         "reddit": "https://www.reddit.com/login/",
         "zhihu": "https://www.zhihu.com/",
+        "douban": "https://accounts.douban.com/passport/login",
         "ncpssd": "https://www.ncpssd.cn/",
     }
 
@@ -9298,34 +9310,28 @@ class AuthHandler:
         Build a Cookie header value from saved Playwright storage for zhihu.com domains.
         Zhihu's v4 API often returns 403 without logged-in cookies.
         """
-        state = AuthHandler.load_state("zhihu", log_load=False)
-        if not state:
-            return None
-        cookies = state.get("cookies") or []
-        by_name = {}
-        for c in cookies:
-            domain = (c.get("domain") or "").lower()
-            if "zhihu.com" not in domain:
-                continue
-            name = c.get("name")
-            if not name:
-                continue
-            by_name[name] = c.get("value", "")
-        if not by_name:
-            return None
-        return "; ".join(f"{k}={v}" for k, v in by_name.items())
+        return AuthHandler.cookie_header_for_domains("zhihu", {"zhihu.com"})
 
     @staticmethod
     def cookie_header_for_reddit():
         """Build a Cookie header value from saved Playwright storage for reddit.com domains."""
-        state = AuthHandler.load_state("reddit", log_load=False)
+        return AuthHandler.cookie_header_for_domains("reddit", {"reddit.com"})
+
+    @staticmethod
+    def cookie_header_for_douban():
+        """Build a Cookie header value from saved Playwright storage for douban.com domains."""
+        return AuthHandler.cookie_header_for_domains("douban", {"douban.com"})
+
+    @staticmethod
+    def cookie_header_for_domains(site_name, domains):
+        state = AuthHandler.load_state(site_name, log_load=False)
         if not state:
             return None
         cookies = state.get("cookies") or []
         by_name = {}
         for c in cookies:
             domain = (c.get("domain") or "").lower()
-            if "reddit.com" not in domain:
+            if not any(allowed_domain in domain for allowed_domain in domains):
                 continue
             name = c.get("name")
             if not name:
@@ -9880,10 +9886,12 @@ Authentication:
   surf --login ncpssd                        # Login to NCPSSD (for full-text PDF download)
   surf --login twitter                       # Login to Twitter/X
   surf --login reddit                        # Login to Reddit
+  surf --login douban                        # Login to Douban
   surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
   surf --clear-auth ncpssd                   # Clear auth for NCPSSD
   surf --clear-auth twitter                  # Clear auth for Twitter/X
   surf --clear-auth reddit                   # Clear auth for Reddit
+  surf --clear-auth douban                   # Clear auth for Douban
 
 OCR:
   surf --ocr-images URL                      # Run local OCR on article images
@@ -9944,7 +9952,7 @@ Twitter/X Backend:
     parser.add_argument(
         "--login",
         metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, reddit, zhihu, ncpssd). Opens a browser for manual login on machines with a desktop session.",
+        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, reddit, zhihu, douban, ncpssd). Opens a browser for manual login on machines with a desktop session.",
     )
     parser.add_argument(
         "--clear-auth",
@@ -10096,8 +10104,8 @@ Twitter/X Backend:
         site_name, export_path = args.export_auth
         export_path = resolve_user_path(export_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "ncpssd"}:
-            parser.error("Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, ncpssd")
+        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "douban", "ncpssd"}:
+            parser.error("Unsupported site for --export-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, douban, ncpssd")
         try:
             AuthHandler.export_state(normalized_site_name, export_path)
         except Exception as e:
@@ -10110,8 +10118,8 @@ Twitter/X Backend:
         site_name, import_path = args.import_auth
         import_path = resolve_user_path(import_path)
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
-        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "ncpssd"}:
-            parser.error("Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, ncpssd")
+        if normalized_site_name not in {"xiaohongshu", "twitter", "reddit", "zhihu", "douban", "ncpssd"}:
+            parser.error("Unsupported site for --import-auth. Supported: xiaohongshu, twitter/x, reddit, zhihu, douban, ncpssd")
         try:
             AuthHandler.import_state(normalized_site_name, import_path)
         except Exception as e:

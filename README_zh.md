@@ -279,7 +279,7 @@ surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lan
 
 ### 认证功能 (--login / --export-auth / --import-auth / --clear-auth)
 
-对于需要登录的网站（如小红书、Twitter/X、Reddit、知乎、NCPSSD），可以先准备并复用 Playwright 登录态：
+对于需要登录的网站（如小红书、Twitter/X、Reddit、知乎、豆瓣、NCPSSD），可以先准备并复用 Playwright 登录态：
 
 ```bash
 # 首次登录小红书
@@ -300,6 +300,11 @@ surf --login twitter
 surf --login reddit
 surf --export-auth reddit ./reddit_state.json
 surf --import-auth reddit ./reddit_state.json
+
+# 可选：登录豆瓣（保存的 Cookie 会复用于直接请求和浏览器回退）
+surf --login douban
+surf --export-auth douban ./douban_state.json
+surf --import-auth douban ./douban_state.json
 
 # 优先使用 twitter-cli 和本机浏览器 Cookie
 surf --twitter-backend cli "https://x.com/username/status/1234567890"
