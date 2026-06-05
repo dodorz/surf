@@ -208,6 +208,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - **默认不翻译**
 - 支持 `surf --login zhihu` 保存知乎登录态；保存的 Cookie 会同时用于 **API / 镜像页 `requests` 请求** 与 Playwright 浏览器抓取（未登录时 API 常见 403，属预期，将自动走镜像与浏览器回退）
 - 知乎专用链路失败后不会再进入通用回退链路，避免把安全验证页当作正文
+- 正文中以 `https://zhida.zhihu.com/search` 开头的链接会被过滤，仅保留可见文本
 - 来源 URL、作者、创建时间、更新时间写入 front matter，不再作为正文开头段落输出
 - 赞同数 / 评论数不再额外输出为正文一行
 

@@ -58,6 +58,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Default: no proxy, no translation.
 - Uses Zhihu-specific API/mirror/browser chain.
 - Reuses saved Zhihu cookies for API/mirror requests when available.
+- Filters links starting with `https://zhida.zhihu.com/search` from the extracted body while preserving visible text.
 - Source URL, author, created time, and updated time are written to front matter instead of leading body paragraphs.
 - Upvote/comment counts are not emitted into the body.
 

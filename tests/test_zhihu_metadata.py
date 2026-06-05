@@ -59,3 +59,19 @@ def test_extract_metadata_reads_zhihu_meta_fields():
     assert metadata["author"] == "Alice"
     assert metadata["created"] == "2026-06-05T10:20"
     assert metadata["updated"] == "2026-06-05T12:34"
+
+
+def test_build_zhihu_html_filters_zhida_search_links():
+    html = surf.Fetcher._build_zhihu_html(
+        title="Answer Title",
+        content_html=(
+            '<p>Prefix <a href="https://zhida.zhihu.com/search?content_id=1&content_type=Answer">'
+            "blocked jump"
+            "</a> suffix.</p>"
+        ),
+        source_url="https://www.zhihu.com/question/1/answer/2",
+    )
+
+    assert html is not None
+    assert "https://zhida.zhihu.com/search" not in html
+    assert "blocked jump" in html

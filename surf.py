@@ -3652,6 +3652,20 @@ class Fetcher:
             return ""
 
     @staticmethod
+    def _clean_zhihu_content_html(content_html):
+        """Remove Zhihu internal search jump links while preserving visible text."""
+        content_html = (content_html or "").strip()
+        if not content_html:
+            return ""
+
+        soup = BeautifulSoup(content_html, "html.parser")
+        for anchor in soup.find_all("a", href=True):
+            href = (anchor.get("href") or "").strip()
+            if re.match(r"^https://zhida\.zhihu\.com/search(?:[/?#]|$)", href, re.IGNORECASE):
+                anchor.unwrap()
+        return str(soup)
+
+    @staticmethod
     def _build_zhihu_html(
         title,
         content_html,
@@ -3665,7 +3679,7 @@ class Fetcher:
     ):
         """Build a compact HTML document from Zhihu structured content."""
         display_title = (title or question_title or "Zhihu").strip()
-        content_html = (content_html or "").strip()
+        content_html = Fetcher._clean_zhihu_content_html(content_html)
         if not content_html:
             return None
 
