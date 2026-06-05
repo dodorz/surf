@@ -13,6 +13,7 @@ import tempfile
 import io
 import locale
 import ssl
+import socket
 import requests  # type: ignore
 import threading
 import queue
@@ -32,7 +33,7 @@ import trafilatura
 import re
 import unicodedata
 import signal
-from urllib.parse import parse_qs, parse_qsl, quote, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
 
 def _build_direct_markdown_payload(
@@ -741,6 +742,93 @@ _SYSTEM_TRUST_REQUESTS_SESSION.mount("https://", _SystemTrustHTTPAdapter())
 def _requests_get_with_system_trust_interruptibly(*args, **kwargs):
     """Requests.get via a session that uses the system default trust chain."""
     return _session_get_interruptibly(_SYSTEM_TRUST_REQUESTS_SESSION, *args, **kwargs)
+
+
+def _get_local_dns_addresses(hostname):
+    addresses = []
+    if not hostname:
+        return addresses
+    seen = set()
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            infos = socket.getaddrinfo(hostname, None, family, socket.SOCK_STREAM)
+        except Exception:
+            continue
+        for info in infos:
+            address = ((info[4] or [None])[0] or "").strip()
+            if address and address not in seen:
+                seen.add(address)
+                addresses.append(address)
+    return addresses
+
+
+def _resolve_host_via_google_doh(hostname, timeout=10):
+    if not hostname:
+        return []
+    try:
+        response = _requests_get_interruptibly(
+            "https://dns.google/resolve",
+            params={"name": hostname, "type": "A"},
+            headers={"Accept": "application/dns-json", "User-Agent": "Mozilla/5.0"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    addresses = []
+    seen = set()
+    for item in payload.get("Answer") or []:
+        if not isinstance(item, dict) or item.get("type") != 1:
+            continue
+        address = str(item.get("data") or "").strip()
+        if address and address not in seen:
+            seen.add(address)
+            addresses.append(address)
+    return addresses
+
+
+def _diagnose_network_fetch_failure(url, error):
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
+        return None
+
+    error_text = str(error or "").lower()
+    suspicious_markers = (
+        "unexpected_eof_while_reading",
+        "err_connection_closed",
+        "connection was reset",
+        "connection reset",
+        "could not connect to server",
+        "failed to connect",
+        "timed out",
+    )
+    if not any(marker in error_text for marker in suspicious_markers):
+        return None
+
+    local_addresses = _get_local_dns_addresses(hostname)
+    doh_addresses = _resolve_host_via_google_doh(hostname)
+    if local_addresses and doh_addresses and set(local_addresses).isdisjoint(set(doh_addresses)):
+        return (
+            f"Possible DNS pollution or network interception for {hostname}: "
+            f"local DNS resolved to {', '.join(local_addresses[:3])}, "
+            f"but trusted DNS resolved to {', '.join(doh_addresses[:3])}. "
+            "Try a working proxy or a different network."
+        )
+
+    if doh_addresses:
+        return (
+            f"Possible network block while reaching {hostname}. "
+            f"Trusted DNS resolved to {', '.join(doh_addresses[:3])}, but the connection still failed. "
+            "Try a working proxy or a different network."
+        )
+
+    return None
 
 
 def _resolve_proxy_args(args, parser, config):
@@ -1522,7 +1610,7 @@ class Fetcher:
         }
 
     @staticmethod
-    def _tag_twitter_html_content(html_content, kind):
+    def _tag_twitter_html_content(html_content, kind, author=None):
         """Annotate generated Twitter/X HTML so later stages can distinguish tweet vs article."""
         if not html_content or kind not in {"tweet", "article"}:
             return html_content
@@ -1555,6 +1643,14 @@ class Fetcher:
                 source_meta.attrs["name"] = "surf-source-site"
                 head.append(source_meta)
             source_meta.attrs["content"] = "twitter"
+
+            if author:
+                author_meta = soup.find("meta", attrs={"name": "surf-author"})
+                if not author_meta:
+                    author_meta = soup.new_tag("meta")
+                    author_meta.attrs["name"] = "surf-author"
+                    head.append(author_meta)
+                author_meta.attrs["content"] = str(author).strip()
             return str(soup)
         except Exception:
             return html_content
@@ -1664,6 +1760,20 @@ class Fetcher:
             or ""
         )
         return str(name).strip(), str(screen_name).strip()
+
+    @staticmethod
+    def _get_twitter_author_label(author_name="", screen_name="", source_url=None):
+        author_name = str(author_name or "").strip()
+        screen_name = str(screen_name or "").strip().lstrip("@")
+        if screen_name:
+            return f"@{screen_name}"
+        if author_name:
+            return author_name
+        if source_url:
+            match = re.match(r"^https?://(www\.)?(twitter|x)\.com/([^/]+)/status/\d+", source_url, re.IGNORECASE)
+            if match:
+                return f"@{match.group(3)}"
+        return ""
 
     @staticmethod
     def _render_twitter_entities_to_html(text, entities):
@@ -2432,20 +2542,20 @@ class Fetcher:
         if not title:
             title = "X Post" if kind == "tweet" else "X Article"
 
+        author_label = Fetcher._get_twitter_author_label(source_url=source_url)
+
         html_parts = [
             "<html><head><meta charset='utf-8'>",
             f"<title>{escape(title)}</title>",
             "</head><body><article>",
         ]
-        if source_url:
-            html_parts.append(f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>")
         for kind_name, value in blocks:
             if kind_name == "image":
                 html_parts.append(f"<p><img src='{escape(value)}' alt='tweet media'></p>")
             else:
                 html_parts.append(value)
         html_parts.append("</article></body></html>")
-        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind, author=author_label)
 
     @staticmethod
     def _convert_twitter_cli_json_to_html(payload, source_url):
@@ -2469,6 +2579,7 @@ class Fetcher:
 
         article_title = data.get("articleTitle") or data.get("article_title") or data.get("title") or ""
         author_name, screen_name = Fetcher._extract_twitter_author_info(data)
+        author_label = Fetcher._get_twitter_author_label(author_name, screen_name, source_url=source_url)
         kind = "article" if str(article_title).strip() else "tweet"
         title_base = str(article_title).strip() or author_name or (f"@{screen_name}" if screen_name else "X Post")
         doc_title = title_base if kind == "article" else f"{title_base} - X Post"
@@ -2491,12 +2602,7 @@ class Fetcher:
             f"<meta name='surf-twitter-kind' content='{escape(kind)}'>",
             "</head><body><article>",
             f"<h1>{escape(title_base)}</h1>",
-            f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>",
         ]
-        if screen_name:
-            html_parts.append(f"<p>Author: @{escape(screen_name)}</p>")
-        elif author_name:
-            html_parts.append(f"<p>Author: {escape(author_name)}</p>")
 
         for line in lines:
             html_parts.append(f"<p>{line}</p>")
@@ -2505,7 +2611,7 @@ class Fetcher:
             html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
 
         html_parts.append("</article></body></html>")
-        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind, author=author_label)
 
     @staticmethod
     def _repair_twitter_cli_mojibake_text(text):
@@ -2918,6 +3024,11 @@ class Fetcher:
         custom_proxy_override=None,
         timeout=20,
     ):
+        normalized_douban = Fetcher._normalize_douban_url(url)
+        if normalized_douban != url:
+            logger.info(f"Normalized Douban URL for processing: {url} -> {normalized_douban}")
+            return normalized_douban
+
         if not Fetcher._is_common_short_url(url):
             return url
 
@@ -3034,6 +3145,7 @@ class Fetcher:
         user = data.get("user") or {}
         user_name = (user.get("name") or "").strip()
         screen_name = (user.get("screen_name") or "").strip()
+        author_label = Fetcher._get_twitter_author_label(user_name, screen_name, source_url=url)
         title_base = user_name or (f"@{screen_name}" if screen_name else "X Post")
         title = f"{title_base} - X Post"
 
@@ -3042,7 +3154,6 @@ class Fetcher:
             f"<title>{escape(title)}</title>",
             "</head><body><article>",
             f"<h1>{escape(title_base)}</h1>",
-            f"<p><a href='{escape(url)}'>{escape(url)}</a></p>",
         ]
 
         for para in [p.strip() for p in text.splitlines() if p.strip()]:
@@ -3057,7 +3168,7 @@ class Fetcher:
                 html_parts.append(f"<p><img src='{escape(media_url)}' alt='tweet media'></p>")
 
         html_parts.append("</article></body></html>")
-        return Fetcher._tag_twitter_html_content("".join(html_parts), "tweet")
+        return Fetcher._tag_twitter_html_content("".join(html_parts), "tweet", author=author_label)
 
     @staticmethod
     def _fetch_twitter_fxapi_html(url, proxies=None):
@@ -3091,6 +3202,7 @@ class Fetcher:
         author = tweet.get("author") or {}
         author_name = (author.get("name") or "").strip()
         screen_name = (author.get("screen_name") or "").strip()
+        author_label = Fetcher._get_twitter_author_label(author_name, screen_name, source_url=url)
         title_base = author_name or (f"@{screen_name}" if screen_name else "X Post")
 
         article = tweet.get("article") or {}
@@ -3110,15 +3222,12 @@ class Fetcher:
             f"<title>{escape(doc_title)}</title>",
             "</head><body><article>",
             f"<h1>{escape(doc_title)}</h1>",
-            f"<p><a href='{escape(url)}'>{escape(url)}</a></p>",
         ]
-        if screen_name:
-            html_parts.append(f"<p>Author: @{escape(screen_name)}</p>")
 
         html_parts.extend(body_blocks)
 
         html_parts.append("</article></body></html>")
-        return Fetcher._tag_twitter_html_content("".join(html_parts), kind)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), kind, author=author_label)
 
     @staticmethod
     def _fetch_twitter_status_fallbacks(url, proxies=None, article_target_url=None):
@@ -3225,12 +3334,11 @@ class Fetcher:
         ]
         if title:
             html_parts.append(f"<h1>{escape(title)}</h1>")
-        if source_url:
-            html_parts.append(f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>")
         for para in paragraphs:
             html_parts.append(f"<p>{escape(para)}</p>")
         html_parts.append("</article></body></html>")
-        return "".join(html_parts)
+        author_label = Fetcher._get_twitter_author_label(source_url=source_url)
+        return Fetcher._tag_twitter_html_content("".join(html_parts), "tweet", author=author_label)
 
     @staticmethod
     def _get_twitter_forced_proxies(config, proxy_mode_override=None, custom_proxy_override=None):
@@ -3518,29 +3626,27 @@ class Fetcher:
         if not content_html:
             return None
 
-        metadata_parts = [f"<p><a href='{escape(source_url)}'>{escape(source_url)}</a></p>"]
+        head_parts = [
+            "<html><head><meta charset='utf-8'>",
+            "<meta name='referrer' content='no-referrer-when-downgrade'>",
+            "<meta name='surf-source-site' content='zhihu'>",
+        ]
+        if author_name and author_name.strip():
+            head_parts.append(f"<meta name='surf-author' content='{escape(author_name.strip())}'>")
+        if created_time:
+            head_parts.append(f"<meta name='surf-created' content='{escape(created_time)}'>")
+        if updated_time and updated_time != created_time:
+            head_parts.append(f"<meta name='surf-updated' content='{escape(updated_time)}'>")
+        head_parts.append(f"<title>{escape(display_title)}</title>")
+        head_parts.append("</head><body><article>")
+
+        metadata_parts = []
         if question_title and question_title.strip() and question_title.strip() != display_title:
             metadata_parts.append(f"<p>Question: {escape(question_title.strip())}</p>")
-        if author_name and author_name.strip():
-            metadata_parts.append(f"<p>Author: {escape(author_name.strip())}</p>")
-        if created_time:
-            metadata_parts.append(f"<p>Created: {escape(created_time)}</p>")
-        if updated_time and updated_time != created_time:
-            metadata_parts.append(f"<p>Updated: {escape(updated_time)}</p>")
-        stats = []
-        if isinstance(voteup_count, int):
-            stats.append(f"Upvotes: {voteup_count}")
-        if isinstance(comment_count, int):
-            stats.append(f"Comments: {comment_count}")
-        if stats:
-            metadata_parts.append(f"<p>{escape(' | '.join(stats))}</p>")
 
         return "".join(
             [
-                "<html><head><meta charset='utf-8'>",
-                "<meta name='referrer' content='no-referrer-when-downgrade'>",
-                f"<title>{escape(display_title)}</title>",
-                "</head><body><article>",
+                "".join(head_parts),
                 f"<h1>{escape(display_title)}</h1>",
                 "".join(metadata_parts),
                 content_html,
@@ -5237,6 +5343,19 @@ class Fetcher:
 
         cleaned_query = urlencode(cleaned_params, doseq=True)
         return urlunparse(parsed._replace(query=cleaned_query, fragment=""))
+
+    @staticmethod
+    def _canonicalize_douban_source_url(url):
+        if not url:
+            return url
+
+        normalized = Fetcher._normalize_douban_url(url)
+        parsed = urlparse(normalized)
+        hostname = (parsed.netloc or "").lower()
+        if "douban.com" not in hostname:
+            return normalized
+
+        return urlunparse(parsed._replace(query="", fragment=""))
 
     @staticmethod
     def _canonicalize_xiaohongshu_image_url(url):
@@ -6993,6 +7112,36 @@ class Fetcher:
         return bool(url and re.match(r"^https?://([^.]+\.)?douban\.com/", url, re.IGNORECASE))
 
     @staticmethod
+    def _normalize_douban_url(url):
+        if not url:
+            return url
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "douban.com":
+            return url
+        path = parsed.path or ""
+        if path != "/doubanapp/dispatch":
+            return url
+
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        uri_values = query_params.get("uri") or []
+        if not uri_values:
+            return url
+        decoded_uri = unquote(uri_values[0]).strip()
+        if not decoded_uri:
+            return url
+        if decoded_uri.startswith("/"):
+            return urlunparse(("https", "www.douban.com", decoded_uri, "", "", ""))
+        if re.match(r"^https?://([^.]+\.)?douban\.com/", decoded_uri, re.IGNORECASE):
+            return decoded_uri
+        return url
+
+    @staticmethod
     def _normalize_reddit_url(url):
         """Normalize Reddit URLs to canonical post/comment URLs on www.reddit.com."""
         parsed = urlparse(url)
@@ -8668,6 +8817,22 @@ class OutputHandler:
             metadata["source"] = Fetcher._canonicalize_xiaohongshu_source_url(metadata["source"])
         elif source_site == "v2ex" and metadata["source"]:
             metadata["source"] = Fetcher._canonicalize_v2ex_source_url(metadata["source"])
+        elif source_site == "douban" and metadata["source"]:
+            metadata["source"] = Fetcher._canonicalize_douban_source_url(metadata["source"])
+        elif metadata["source"] and Fetcher._is_douban_url(metadata["source"]):
+            metadata["source"] = Fetcher._canonicalize_douban_source_url(metadata["source"])
+
+        twitter_author_tag = soup.find("meta", attrs={"name": "surf-author"})
+        if source_site == "twitter" and twitter_author_tag:
+            author_value = (twitter_author_tag.get("content") or "").strip()
+            if author_value:
+                metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
+        elif source_site == "zhihu":
+            zhihu_author_tag = soup.find("meta", attrs={"name": "surf-author"})
+            if zhihu_author_tag:
+                author_value = (zhihu_author_tag.get("content") or "").strip()
+                if author_value:
+                    metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
 
         def _format_front_matter_datetime(dt):
             """Format datetime values as local ISO timestamps without timezone suffix."""
@@ -8699,6 +8864,36 @@ class OutputHandler:
             if published:
                 try:
                     parsed_date = date_parser.parse(published)
+                    metadata["created"] = _format_front_matter_datetime(parsed_date)
+                except (ValueError, TypeError):
+                    pass
+        elif source_site == "zhihu":
+            created_tag = soup.find("meta", attrs={"name": "surf-created"})
+            updated_tag = soup.find("meta", attrs={"name": "surf-updated"})
+            if created_tag:
+                created_value = (created_tag.get("content") or "").strip()
+                if created_value:
+                    try:
+                        metadata["created"] = _format_front_matter_datetime(date_parser.parse(created_value))
+                    except (ValueError, TypeError):
+                        pass
+            if updated_tag:
+                updated_value = (updated_tag.get("content") or "").strip()
+                if updated_value:
+                    try:
+                        metadata["updated"] = _format_front_matter_datetime(date_parser.parse(updated_value))
+                    except (ValueError, TypeError):
+                        pass
+        elif source_url and re.match(r"^https?://www\.douban\.com/topic/\d+/?(?:[?#].*)?$", source_url, re.IGNORECASE):
+            author_tag = soup.select_one("div.article-main div.article-meta a.author-name, div.article-main div.article-meta a#author-name")
+            if author_tag and author_tag.get_text(strip=True):
+                metadata["author"] = OutputHandler.normalize_markdown_encoding(author_tag.get_text(strip=True))
+
+            created_tag = soup.select_one("div.article-main div.article-meta div.topic-meta span.create-time")
+            if created_tag and created_tag.get_text(strip=True):
+                created_value = OutputHandler.normalize_markdown_encoding(created_tag.get_text(strip=True))
+                try:
+                    parsed_date = date_parser.parse(created_value)
                     metadata["created"] = _format_front_matter_datetime(parsed_date)
                 except (ValueError, TypeError):
                     pass
@@ -8755,7 +8950,8 @@ class OutputHandler:
                     metadata["tags"] = tags
 
         # 设置updated为当前日期（保持既有格式）
-        metadata["updated"] = datetime.now().strftime("%Y-%m-%d")
+        if not metadata.get("updated"):
+            metadata["updated"] = datetime.now().strftime("%Y-%m-%d")
 
         return metadata
 
@@ -8773,16 +8969,13 @@ class OutputHandler:
         lines = ["---"]
 
         if metadata.get("title"):
-            # 转义特殊字符
-            title = metadata["title"].replace('"', '\\"')
-            lines.append(f'title: "{title}"')
+            lines.append(f"title: {metadata['title']}")
 
         if metadata.get("description"):
-            description = metadata["description"].replace('"', '\\"')
-            lines.append(f'description: "{description}"')
+            lines.append(f"description: {metadata['description']}")
 
         if metadata.get("author"):
-            lines.append(f'author: "{metadata["author"].replace(chr(34), r"\"")}"')
+            lines.append(f"author: {metadata['author']}")
 
         if metadata.get("created"):
             lines.append(f"created: {metadata['created']}")
@@ -8793,7 +8986,7 @@ class OutputHandler:
         if metadata.get("tags") and len(metadata["tags"]) > 0:
             lines.append("tags:")
             for tag in metadata["tags"]:
-                lines.append(f'  - "{tag}"')
+                lines.append(f"  - {tag}")
 
         if metadata.get("source"):
             lines.append(f"source: {metadata['source']}")
@@ -10259,6 +10452,9 @@ Twitter/X Backend:
         )
     except Exception as e:
         logger.error(f"Failed to fetch {args.url}: {e}")
+        diagnosis = _diagnose_network_fetch_failure(args.url, e)
+        if diagnosis:
+            logger.error(diagnosis)
         sys.exit(1)
 
     if not html_content:

@@ -34,6 +34,7 @@ Each site entry may define:
 10. V2EX
 11. Reddit
 12. NCPSSD
+13. Douban
 
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 
@@ -46,6 +47,8 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Reuses local/browser cookies when possible.
 - Includes fallback chain for login walls and unreachable `x.com` scenarios.
 - Supports thread expansion with `--thread after|before|both|off` and `--thread-author same|all`.
+- For tweet/article pages, the source URL stays in front matter `source`; it is no longer repeated at the top of the body.
+- Author/screen name is written to front matter `author` instead of a leading `Author:` paragraph.
 
 ### WeChat / Xiaohongshu
 - Default: no proxy, no translation (unless overridden).
@@ -55,6 +58,8 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Default: no proxy, no translation.
 - Uses Zhihu-specific API/mirror/browser chain.
 - Reuses saved Zhihu cookies for API/mirror requests when available.
+- Source URL, author, created time, and updated time are written to front matter instead of leading body paragraphs.
+- Upvote/comment counts are not emitted into the body.
 
 ### Social Thread Sites (Twitter/X, Bluesky, Weibo, Threads)
 - Default thread direction: `after`; default author scope: `all`.
@@ -67,6 +72,14 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Main post content is extracted from the top-level `t3` payload; link posts preserve the outbound target as `Link: ...`.
 - Replies are included only when the user explicitly enables thread fetching with `--thread after|both` or `-t`; there is no Reddit-specific default thread expansion.
 - `--thread-author same` keeps only comments written by the original post author.
+
+### Douban
+- Scope: topic posts matching `https://www.douban.com/topic/<id>/`.
+- Normalizes `https://www.douban.com/doubanapp/dispatch?uri=...` into the canonical `https://www.douban.com/...` page URL before site matching/fetching.
+- Reuses saved `douban.com` cookies from `surf --login douban` for direct requests and browser fallback when available.
+- For topic posts, front matter extracts the author from `div.article-main div.article-meta a.author-name`.
+- For topic posts, front matter extracts the created time from `div.article-main div.article-meta div.topic-meta span.create-time`.
+- Front matter `source` strips Douban tracking query suffixes such as `?_spm_id=...&_dtcc=1`.
 
 ### V2EX
 - Scope: `https://v2ex.com/t/<id>` and `https://www.v2ex.com/t/<id>` topic pages.

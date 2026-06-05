@@ -107,18 +107,34 @@ def test_repair_twitter_cli_mojibake_text():
     assert Fetcher._repair_twitter_cli_mojibake_text(mojibake) == "借AI之算力"
 
 
+def test_convert_twitter_cli_html_moves_author_and_source_to_metadata():
+    payload = {
+        "data": {
+            "author": {"name": "Li Jigang", "screen_name": "lijigang"},
+            "full_text": "原帖正文第一句。第二句。",
+        }
+    }
+
+    html = Fetcher._convert_twitter_cli_json_to_html(payload, "https://x.com/lijigang/status/1")
+
+    assert html is not None
+    assert 'name="surf-author"' in html
+    assert 'content="@lijigang"' in html
+    assert "https://x.com/lijigang/status/1</a>" not in html
+    assert "Author: @lijigang" not in html
+
+
 def test_thread_context_does_not_replace_twitter_source_title():
     html = """
     <html>
       <head>
         <title>李继刚 - X Post</title>
         <meta name="surf-source-site" content="twitter">
+        <meta name="surf-author" content="@lijigang">
       </head>
       <body>
         <article>
           <h1>李继刚</h1>
-          <p><a href="https://x.com/lijigang/status/1">https://x.com/lijigang/status/1</a></p>
-          <p>Author: @lijigang</p>
           <p>原帖正文第一句。第二句。</p>
           <section class="surf-thread-context">
             <h2>Thread Context</h2>
@@ -139,3 +155,28 @@ def test_thread_context_does_not_replace_twitter_source_title():
     )
 
     assert title == "原帖正文第一句。"
+
+
+def test_extract_metadata_reads_twitter_author_from_meta():
+    html = """
+    <html>
+      <head>
+        <title>李继刚 - X Post</title>
+        <meta name="surf-source-site" content="twitter">
+        <meta name="surf-author" content="@lijigang">
+      </head>
+      <body>
+        <article>
+          <h1>李继刚</h1>
+          <p>原帖正文第一句。第二句。</p>
+        </article>
+      </body>
+    </html>
+    """
+
+    metadata = OutputHandler._extract_metadata(
+        html,
+        source_url="https://x.com/lijigang/status/1",
+    )
+
+    assert metadata["author"] == "@lijigang"

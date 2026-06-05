@@ -69,6 +69,33 @@ def test_non_short_url_is_not_resolved(monkeypatch):
     assert resolved == "https://example.com/article"
 
 
+def test_douban_dispatch_url_is_normalized_before_fetch():
+    resolved = Fetcher._resolve_common_short_url(
+        "https://www.douban.com/doubanapp/dispatch?uri=%2Ftopic%2F484985482",
+        _FakeConfig(),
+    )
+
+    assert resolved == "https://www.douban.com/topic/484985482"
+
+
+def test_douban_dispatch_url_normalizes_before_short_url_resolution(monkeypatch):
+    def _should_not_resolve(*args, **kwargs):
+        raise AssertionError("Douban dispatch URLs should normalize without redirect resolution")
+
+    monkeypatch.setattr(
+        Fetcher,
+        "_resolve_url_with_redirects",
+        staticmethod(_should_not_resolve),
+    )
+
+    resolved = Fetcher._resolve_common_short_url(
+        "https://www.douban.com/doubanapp/dispatch?uri=%2Ftopic%2F484985482",
+        _FakeConfig(),
+    )
+
+    assert resolved == "https://www.douban.com/topic/484985482"
+
+
 def test_web_process_resolves_short_url_before_fetch_and_metadata(monkeypatch):
     long_url = "https://x.com/user/status/1234567890"
 
