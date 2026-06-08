@@ -1,12 +1,16 @@
 import time
 
 import surf_web
+from bs4 import BeautifulSoup
 from surf import (
     ContentProcessor,
     Fetcher,
     OutputHandler,
     _build_direct_markdown_payload,
     _convert_embedded_html_in_markdown,
+    _prepare_inline_svgs_for_markdown,
+    _svg_is_content_illustration,
+    _svg_is_decorative,
     _translation_was_performed,
 )
 
@@ -391,6 +395,33 @@ def test_direct_markdown_embedded_svg_becomes_image():
     assert "![LLVM IR Machine code](data:image/svg+xml;base64," in converted
     assert "<svg" not in converted
     assert "LLVM IRMachine code" not in converted
+
+
+def test_svg_helpers_tolerate_missing_attrs_dict():
+    soup = BeautifulSoup(
+        """
+        <article>
+          <div class="post-media post-media--svg-board">
+            <svg viewBox="0 0 120 60">
+              <text x="10" y="20">LLVM IR</text>
+              <text x="10" y="40">Machine code</text>
+            </svg>
+          </div>
+        </article>
+        """,
+        "html.parser",
+    )
+    svg = soup.find("svg")
+    assert svg is not None
+    svg.attrs = None
+
+    assert _svg_is_decorative(svg) is False
+    assert _svg_is_content_illustration(svg) is True
+
+    rendered = _prepare_inline_svgs_for_markdown(str(soup))
+
+    assert "data:image/svg+xml;base64," in rendered
+    assert "<svg" not in rendered
 
 
 def test_web_auto_proxy_uses_cli_implicit_proxy_resolution(monkeypatch):

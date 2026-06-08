@@ -1,6 +1,22 @@
 import surf
 
 
+def test_network_failure_analysis_marks_dns_pollution(monkeypatch):
+    monkeypatch.setattr(surf, "_get_local_dns_addresses", lambda hostname: ["199.59.148.102"])
+    monkeypatch.setattr(surf, "_resolve_host_via_google_doh", lambda hostname, timeout=10: ["104.18.22.18", "104.18.23.18"])
+
+    analysis = surf._analyze_network_fetch_failure(
+        "https://www.newyorker.com/magazine/2026/06/08/the-paperboys-secret",
+        Exception("Page.goto: net::ERR_CONNECTION_CLOSED"),
+    )
+
+    assert analysis is not None
+    assert analysis["hostname"] == "www.newyorker.com"
+    assert analysis["dns_polluted"] is True
+    assert analysis["trusted_addresses"][0] == "104.18.22.18"
+    assert "Possible DNS pollution or network interception" in analysis["message"]
+
+
 def test_network_diagnostic_reports_dns_pollution(monkeypatch):
     monkeypatch.setattr(surf, "_get_local_dns_addresses", lambda hostname: ["199.59.148.102"])
     monkeypatch.setattr(surf, "_resolve_host_via_google_doh", lambda hostname, timeout=10: ["104.18.22.18", "104.18.23.18"])

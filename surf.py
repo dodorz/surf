@@ -246,12 +246,22 @@ text{font-family:Arial,"Noto Sans",sans-serif}
 
 
 def _tag_classes(tag):
-    classes = tag.get("class") if tag else []
+    attrs = getattr(tag, "attrs", None) if tag is not None else None
+    if not isinstance(attrs, dict):
+        return set()
+    classes = attrs.get("class")
     if not classes:
         return set()
     if isinstance(classes, str):
         return set(classes.split())
     return {str(cls) for cls in classes}
+
+
+def _tag_get(tag, key, default=None):
+    attrs = getattr(tag, "attrs", None) if tag is not None else None
+    if not isinstance(attrs, dict):
+        return default
+    return attrs.get(key, default)
 
 
 def _svg_numeric_size(svg):
@@ -261,9 +271,9 @@ def _svg_numeric_size(svg):
         match = re.match(r"\s*(\d+(?:\.\d+)?)", str(value))
         return float(match.group(1)) if match else None
 
-    width = parse_dimension(svg.get("width"))
-    height = parse_dimension(svg.get("height"))
-    viewbox = svg.get("viewBox") or svg.get("viewbox")
+    width = parse_dimension(_tag_get(svg, "width"))
+    height = parse_dimension(_tag_get(svg, "height"))
+    viewbox = _tag_get(svg, "viewBox") or _tag_get(svg, "viewbox")
     if (width is None or height is None) and viewbox:
         numbers = re.findall(r"-?\d+(?:\.\d+)?", str(viewbox))
         if len(numbers) >= 4:
@@ -274,7 +284,7 @@ def _svg_numeric_size(svg):
 
 def _svg_alt_text(svg):
     for attr in ("aria-label", "title", "alt"):
-        value = (svg.get(attr) or "").strip()
+        value = (_tag_get(svg, attr) or "").strip()
         if value:
             return re.sub(r"\s+", " ", value)
 
@@ -300,7 +310,7 @@ def _svg_is_decorative(svg):
     classes = _tag_classes(svg)
     text = svg.get_text(" ", strip=True)
     width, height = _svg_numeric_size(svg)
-    if (svg.get("aria-hidden") or "").strip().lower() == "true":
+    if (_tag_get(svg, "aria-hidden") or "").strip().lower() == "true":
         return True
     if "lucide" in classes:
         return True
@@ -334,6 +344,8 @@ def _svg_is_content_illustration(svg):
 
 def _normalize_svg_attribute_case(svg):
     for tag in [svg] + list(svg.find_all(True)):
+        if not isinstance(getattr(tag, "attrs", None), dict):
+            continue
         for lower_name, proper_name in _SVG_ATTR_CASE_MAP.items():
             if lower_name in tag.attrs and proper_name not in tag.attrs:
                 tag.attrs[proper_name] = tag.attrs.pop(lower_name)
@@ -342,7 +354,9 @@ def _normalize_svg_attribute_case(svg):
 def _sanitize_svg_for_markdown(svg):
     for unsafe in svg.find_all(["script", "foreignObject", "iframe", "object", "embed"]):
         unsafe.decompose()
-    if not svg.get("xmlns"):
+    if not isinstance(getattr(svg, "attrs", None), dict):
+        svg.attrs = {}
+    if not _tag_get(svg, "xmlns"):
         svg["xmlns"] = "http://www.w3.org/2000/svg"
     _normalize_svg_attribute_case(svg)
 
@@ -832,7 +846,7 @@ def _resolve_host_via_google_doh(hostname, timeout=10):
     return addresses
 
 
-def _diagnose_network_fetch_failure(url, error):
+def _analyze_network_fetch_failure(url, error):
     try:
         parsed = urlparse(url)
     except Exception:
@@ -856,22 +870,36 @@ def _diagnose_network_fetch_failure(url, error):
 
     local_addresses = _get_local_dns_addresses(hostname)
     doh_addresses = _resolve_host_via_google_doh(hostname)
-    if local_addresses and doh_addresses and set(local_addresses).isdisjoint(set(doh_addresses)):
-        return (
+    dns_polluted = bool(local_addresses and doh_addresses and set(local_addresses).isdisjoint(set(doh_addresses)))
+
+    if dns_polluted:
+        message = (
             f"Possible DNS pollution or network interception for {hostname}: "
             f"local DNS resolved to {', '.join(local_addresses[:3])}, "
             f"but trusted DNS resolved to {', '.join(doh_addresses[:3])}. "
             "Try a working proxy or a different network."
         )
-
-    if doh_addresses:
-        return (
+    elif doh_addresses:
+        message = (
             f"Possible network block while reaching {hostname}. "
             f"Trusted DNS resolved to {', '.join(doh_addresses[:3])}, but the connection still failed. "
             "Try a working proxy or a different network."
         )
+    else:
+        message = None
 
-    return None
+    return {
+        "hostname": hostname,
+        "local_addresses": local_addresses,
+        "trusted_addresses": doh_addresses,
+        "dns_polluted": dns_polluted,
+        "message": message,
+    }
+
+
+def _diagnose_network_fetch_failure(url, error):
+    analysis = _analyze_network_fetch_failure(url, error)
+    return analysis.get("message") if analysis else None
 
 
 def _resolve_proxy_args(args, parser, config):
@@ -4355,6 +4383,7 @@ class Fetcher:
         proxy_mode_override=None,
         custom_proxy_override=None,
         is_twitter_article=False,
+        trusted_host_map=None,
     ):
         logger.info("Launching browser...")
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -4423,6 +4452,13 @@ class Fetcher:
                         "--disable-extensions",
                     ],
                 }
+                if trusted_host_map:
+                    resolver_rules = ", ".join(
+                        f"MAP {host} {address}" for host, address in trusted_host_map.items() if host and address
+                    )
+                    if resolver_rules:
+                        launch_args["args"].append(f"--host-resolver-rules={resolver_rules}")
+                        logger.info("Playwright Host Resolver Rules: %s", resolver_rules)
                 if pw_proxy:
                     launch_args["proxy"] = pw_proxy
 
@@ -4608,6 +4644,25 @@ class Fetcher:
                     if fxapi_html:
                         logger.info("Using fxTwitter API fallback content")
                         return fxapi_html
+                if not trusted_host_map:
+                    analysis = _analyze_network_fetch_failure(url, e)
+                    if analysis and analysis.get("dns_polluted") and analysis.get("trusted_addresses"):
+                        hostname = analysis.get("hostname")
+                        trusted_ip = analysis["trusted_addresses"][0]
+                        if hostname and trusted_ip:
+                            logger.warning(
+                                "Browser fetch failed and local DNS looks polluted; retrying with trusted DNS mapping %s -> %s",
+                                hostname,
+                                trusted_ip,
+                            )
+                            return Fetcher.fetch_with_browser(
+                                url,
+                                config,
+                                proxy_mode_override=proxy_mode_override,
+                                custom_proxy_override=custom_proxy_override,
+                                is_twitter_article=is_twitter_article,
+                                trusted_host_map={hostname: trusted_ip},
+                            )
                 logger.error(f"Browser fetch failed: {e}")
                 raise
             finally:
