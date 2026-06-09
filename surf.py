@@ -7467,6 +7467,489 @@ class Fetcher:
             logger.warning(f"Reddit handler failed: {e}")
             return None
 
+    # ─────────────────────────────────────────────────────────────────
+    # Paywall detection signals
+    # ─────────────────────────────────────────────────────────────────
+    _KNOWN_PAYWALL_DOMAINS = {
+        "medium.com", "nytimes.com", "wsj.com", "bloomberg.com",
+        "ft.com", "economist.com", "washingtonpost.com", "latimes.com",
+        "theatlantic.com", "newyorker.com", "wired.com", "hbr.org",
+        "barrons.com", "businessinsider.com", "telegraph.co.uk",
+        "thetimes.co.uk", "scientificamerican.com", "technologyreview.com",
+        "newrepublic.com", "foreignaffairs.com", "nationalgeographic.com",
+        "vanityfair.com", "vogue.com", "newyorkmag.com", "nymag.com",
+        "seattletimes.com", "bostonglobe.com", "chicagotribune.com",
+        "sfchronicle.com", "staradvertiser.com", "denverpost.com",
+        "dallasnews.com", "orlandosentinel.com", "sun-sentinel.com",
+        "theinformation.com", "themarkup.org", "restofworld.org",
+        "defector.com", "404media.co", "theguardian.com",
+        "independent.co.uk", "haaretz.com", "timesofisrael.com",
+        "lemonde.fr", "lefigaro.fr", "lesechos.fr", "spiegel.de",
+        "zeit.de", "faz.net", "sueddeutsche.de", "handelsblatt.com",
+        "corriere.it", "ilsole24ore.com", "elpais.com", "elmundo.es",
+        "expansion.com", "nikkei.com", "asahi.com", "mainichi.jp",
+        "caixinglobal.com", "thepaper.cn", "jiemian.com",
+    }
+    _PAYWALL_CSS_PATTERNS = re.compile(
+        r"(paywall|paywall-content|paywall-overlay|paywall-banner|paywall-modal|"
+        r"metered-content|metered-paywall|meter-wall|meter_overlay|meter-modal|"
+        r"article-blur|article-locked|article-gated|content-gate|content-locked|"
+        r"premium-content|premium-article|premium-wall|premium-gate|"
+        r"subscriber-content|subscriber-only|subscriber-wall|subscription-wall|"
+        r"register-wall|sign-in-wall|login-wall|login-required|"
+        r"hard-paywall|soft-paywall|dynamic-paywall|regwall|reg-wall|"
+        r"gate-content|gated-content|locked-content|blocked-content|"
+        r"barrier|piano-paywall|piano-container|piano-wall|"
+        r"tp-modal|tp-container|tp-backdrop|tp-iframe|"
+        r"fc-ab-root|fc-dialog-container|fc-dialog-overlay|"
+        r"evolok-paywall|pelcro-paywall|zephr-paywall|"
+        r"wall\.paywall|wall-paywall|content-gating)",
+        re.IGNORECASE,
+    )
+    _PAYWALL_TEXT_PATTERNS = [
+        re.compile(r"To\s+(continue\s+)?read(ing)?\s+(this\s+)?(article|story|content)", re.IGNORECASE),
+        re.compile(r"Subscribe\s+(to|for|now)\s+(continue|read|unlock|access)", re.IGNORECASE),
+        re.compile(r"(Sign|Log)\s*in\s+to\s+(continue|read|access|view)", re.IGNORECASE),
+        re.compile(r"Create\s+(a|your|an)\s+(free\s+)?account\s+to\s+(continue|read)", re.IGNORECASE),
+        re.compile(r"You('ve| have) reached (your|the) (free\s+)?article\s+limit", re.IGNORECASE),
+        re.compile(r"(free|complimentary)\s+articles?\s+(remaining|left)", re.IGNORECASE),
+        re.compile(r"This\s+(article|content)\s+is\s+(reserved|exclusive)\s+for\s+subscribers", re.IGNORECASE),
+        re.compile(r"Unlock\s+(this|the)\s+(article|content|story)", re.IGNORECASE),
+        re.compile(r"Start\s+your\s+(free\s+)?(trial|subscription)", re.IGNORECASE),
+        re.compile(r"(become|join)\s+(a|our)\s+(member|subscriber)", re.IGNORECASE),
+        re.compile(r"view(s)?\s+(our|subscription|access)\s+options", re.IGNORECASE),
+        re.compile(r"register\s+(now|today|free)\s+to\s+(read|continue|access)", re.IGNORECASE),
+        re.compile(r"(already\s+(a|our)\s+)?subscriber\?(\s*sign\s*in)?", re.IGNORECASE),
+        re.compile(r"Enjoying\s+this\s+article\?", re.IGNORECASE),
+        re.compile(r"Subscribe\s+for\s+unlimited\s+access", re.IGNORECASE),
+    ]
+    _PAYWALL_META_KEYWORDS = {
+        "paywall", "metered", "premium", "subscriber-only", "subscription", "gated",
+    }
+    _ANTI_BOT_CAPTCHA_DOMAINS = {
+        "captcha-delivery.com", "geo.captcha-delivery.com",
+        "challenges.cloudflare.com", "hcaptcha.com", "recaptcha.net",
+        "gstatic.com/recaptcha",
+    }
+    _ANTI_BOT_TEXT_PATTERNS = [
+        re.compile(r"please\s+enable\s+(js|javascript)\s+and\s+disable", re.IGNORECASE),
+        re.compile(r"(verify|confirm)\s+(you|that\s+you)\s+(are|'?re)\s+(a\s+)?human", re.IGNORECASE),
+        re.compile(r"checking\s+(if\s+the\s+site\s+connection\s+is\s+secure|your\s+browser)", re.IGNORECASE),
+        re.compile(r"(dd\s*=\s*\{|data-cfasync\s*=\s*[\"']false[\"'])", re.IGNORECASE),
+    ]
+
+    # ─────────────────────────────────────────────────────────────────
+    # Paywall detection
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _detect_paywall(html_content, url=None):
+        """Multi-signal paywall detection.  Returns {detected, reason, confidence}."""
+        if not html_content:
+            return {"detected": False, "reason": None, "confidence": 0.0}
+        signals = []
+        confidence = 0.0
+
+        # ── Known domain ──
+        if url:
+            try:
+                host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+                host = ".".join(host.rsplit(".", 2)[-3:]) if host.count(".") >= 2 else host
+                for domain in Fetcher._KNOWN_PAYWALL_DOMAINS:
+                    if host.endswith(domain):
+                        signals.append(f"known paywall domain: {domain}")
+                        confidence += 0.3
+                        break
+            except Exception:
+                pass
+
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        # ── Anti-bot CAPTCHA on known domain ──
+        if confidence >= 0.3:
+            captcha_detected = False
+            for tag_name, attr in [("script", "src"), ("iframe", "src")]:
+                for el in soup.find_all(tag_name):
+                    val = (el.get(attr) or "").lower()
+                    for cd in Fetcher._ANTI_BOT_CAPTCHA_DOMAINS:
+                        if cd in val:
+                            captcha_detected = True
+                            signals.append(f"anti-bot CAPTCHA: {cd}")
+                            break
+                    if captcha_detected:
+                        break
+                if captcha_detected:
+                    break
+            if not captcha_detected:
+                text_raw = soup.get_text(" ", strip=True)
+                for ap in Fetcher._ANTI_BOT_TEXT_PATTERNS:
+                    if ap.search(text_raw):
+                        captcha_detected = True
+                        signals.append("anti-bot text pattern matched")
+                        break
+            if captcha_detected:
+                confidence += 0.40
+
+        # ── Bare-domain title ──
+        title_tag = soup.find("title")
+        title_text = title_tag.get_text(" ", strip=True) if title_tag else ""
+        if title_text and url:
+            host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
+            title_clean = title_text.lower().rstrip("/")
+            host_bare = ".".join(host.rsplit(".", 2)[-3:]) if host.count(".") >= 2 else host
+            if title_clean in {host, host_bare, host.lstrip("www."), host.removeprefix("www.")}:
+                signals.append(f"bare-domain title: {title_text}")
+                confidence += 0.45
+            elif re.match(r"^[\w.-]+\.[a-z]{2,}$", title_clean, re.IGNORECASE):
+                tp = title_clean.split(".")
+                hp = host.lstrip("www.").split(".")
+                if len(tp) >= 2 and len(hp) >= 2 and tp[-2:] == hp[-2:]:
+                    signals.append(f"bare-domain title: {title_text}")
+                    confidence += 0.40
+
+        # ── CSS class / id patterns ──
+        paywall_elements = []
+        for element in soup.select(
+            "[class*='paywall'], [id*='paywall'], "
+            "[class*='metered'], [class*='meter-'], [class*='premium'], "
+            "[class*='subscriber'], [class*='subscription'], "
+            "[class*='register-wall'], [class*='sign-in-wall'], [class*='login-wall'], "
+            "[class*='content-gate'], [class*='content-locked'], "
+            "[class*='article-locked'], [class*='article-gated'], "
+            "[data-paywall], [data-metered], "
+            "[class*='tp-modal'], [class*='tp-container'], [class*='tp-backdrop'], "
+            "[class*='fc-ab-root'], [class*='fc-dialog'], "
+            "[class*='piano-paywall'], [class*='pelcro'], [class*='zephr']"
+        ):
+            paywall_elements.append(element)
+        for tag in soup.find_all(True):
+            cls = (tag.get("class") or [])
+            cls_str = " ".join(cls) if isinstance(cls, list) else str(cls)
+            elem_id = str(tag.get("id") or "")
+            if Fetcher._PAYWALL_CSS_PATTERNS.search(f"{cls_str} {elem_id}"):
+                if tag not in paywall_elements:
+                    paywall_elements.append(tag)
+        if paywall_elements:
+            signals.append(f"paywall CSS elements: {len(paywall_elements)} found")
+            confidence += 0.50
+
+        # ── Paywall text snippets ──
+        text_content = soup.get_text(" ", strip=True).lower()
+        text_matches = 0
+        for pattern in Fetcher._PAYWALL_TEXT_PATTERNS:
+            if pattern.search(text_content):
+                text_matches += 1
+        if text_matches >= 2:
+            signals.append(f"paywall text patterns: {text_matches} matched")
+            confidence += 0.35
+        elif text_matches == 1:
+            signals.append(f"paywall text pattern: 1 matched")
+            confidence += 0.20
+
+        # ── Meta tag keywords ──
+        for meta in soup.find_all("meta"):
+            combined = " ".join([
+                (meta.get("name") or "").lower(),
+                (meta.get("content") or "").lower(),
+                (meta.get("property") or "").lower(),
+            ])
+            for keyword in Fetcher._PAYWALL_META_KEYWORDS:
+                if keyword in combined:
+                    signals.append(f"meta keyword: {keyword}")
+                    confidence += 0.10
+                    break
+
+        # ── Content truncation ──
+        if confidence >= 0.3:
+            article_text = ""
+            for sel in ("article", "[role='main']", "main",
+                        ".post-content", ".article-content", ".story-content",
+                        ".article-body", ".post-body"):
+                article_el = soup.select_one(sel)
+                if article_el:
+                    article_text = article_el.get_text(" ", strip=True)
+                    break
+            if not article_text:
+                article_text = text_content
+            if len(article_text) < 800:
+                signals.append(f"truncated content: {len(article_text)} chars")
+                confidence += 0.15
+
+        detected = confidence >= 0.50
+        return {
+            "detected": detected,
+            "reason": "; ".join(signals) if signals else None,
+            "confidence": min(confidence, 1.0),
+        }
+
+    # ─────────────────────────────────────────────────────────────────
+    # archive.is snapshot fallback
+    # ─────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _has_captcha(page):
+        try:
+            found = page.locator(
+                "iframe[src*='recaptcha'], iframe[src*='captcha'], "
+                "div.g-recaptcha, div[class*='captcha'], "
+                ".g-recaptcha, #captcha, [id*='captcha']"
+            )
+            return found.count() > 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _wait_for_captcha_resolution(page, step_label, timeout_seconds=120, *, headless=False):
+        import time as _time
+        if not Fetcher._has_captcha(page):
+            return True
+        if headless:
+            logger.info(
+                f"archive.is: CAPTCHA detected ({step_label}) in headless mode; "
+                "will retry with visible browser."
+            )
+            return False
+        logger.info(
+            f"archive.is: CAPTCHA detected ({step_label}). "
+            f"Waiting for manual completion (timeout: {timeout_seconds}s)..."
+        )
+        print(f"\n{'─' * 56}")
+        print(f"  ⚠ archive.is 需要完成 CAPTCHA 验证（{step_label}）")
+        print(f"  请在打开的浏览器窗口中完成验证，程序将自动继续...")
+        print(f"  超时时间：{timeout_seconds} 秒")
+        print(f"{'─' * 56}\n")
+        deadline = _time.monotonic() + timeout_seconds
+        while _time.monotonic() < deadline:
+            _time.sleep(2)
+            try:
+                has = Fetcher._has_captcha(page)
+            except Exception:
+                # Playwright hiccup — assume page may have changed, check
+                # again next cycle.
+                logger.debug("archive.is: CAPTCHA check failed transiently, retrying...")
+                continue
+            if not has:
+                logger.info("archive.is: CAPTCHA resolved by user.")
+                _time.sleep(1.5)
+                return True
+            # Periodic progress message
+            remaining = max(0, deadline - _time.monotonic())
+            if remaining < 10 or int(remaining) % 20 == 0:
+                logger.debug(f"archive.is: still waiting for CAPTCHA... (~{int(remaining)}s left)")
+        logger.warning("archive.is: CAPTCHA was not completed within the timeout.")
+        return False
+
+    @staticmethod
+    def _fetch_archiveis_snapshot(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Try to fetch the latest archive.is snapshot for *url*.
+
+        Navigates directly to ``https://archive.is/<url>``, handles
+        CAPTCHA (headless → visible fallback), picks the latest snapshot
+        from the listing page, and returns ``(html_content, snapshot_url)``
+        or ``(None, None)``.
+        """
+        try:
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+        except ImportError:
+            logger.warning("Playwright is not installed; cannot fetch from archive.is")
+            return None, None
+
+        logger.info(f"Trying archive.is snapshot for: {url}")
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-web-security", "--no-first-run",
+            "--no-default-browser-check", "--disable-infobars",
+            "--disable-background-timer-throttling",
+            "--disable-popup-blocking", "--disable-extensions",
+        ]
+
+        def _launch_browser(p, headless):
+            kwargs = {"headless": headless, "args": list(browser_args)}
+            if pw_proxy:
+                kwargs["proxy"] = pw_proxy
+            return p.chromium.launch(**kwargs)
+
+        def _run_workflow(page, headless=False):
+            """Core archive.is flow: go to listing page → pick snapshot → extract."""
+
+            def _ensure_no_captcha(label, timeout_s=60):
+                import time as _time
+                _time.sleep(1.5)
+                return Fetcher._wait_for_captcha_resolution(
+                    page, label, timeout_seconds=timeout_s, headless=headless,
+                )
+
+            # ── navigate to archive.is/<url> ──
+            listing_url = f"https://archive.is/{quote(url, safe='')}"
+            logger.info(f"archive.is: opening listing page: {listing_url}")
+            try:
+                page.goto(listing_url, wait_until="networkidle", timeout=20000)
+            except PlaywrightTimeoutError:
+                logger.warning("archive.is: timeout loading listing page")
+                return None, None
+            page.wait_for_timeout(2000)
+            if not _ensure_no_captcha("listing page", timeout_s=120):
+                return None, None
+
+            # ── find snapshot ──
+            snapshot_url = None
+            current_url = page.url
+
+            # Did archive.is redirect us directly to a snapshot?
+            if re.search(r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$", current_url, re.IGNORECASE):
+                if "run=1" not in current_url and "search=" not in current_url.lower():
+                    snapshot_url = current_url
+                    logger.info(f"archive.is: redirected to snapshot: {snapshot_url}")
+
+            if not snapshot_url:
+                # Scan links for snapshot shortcodes
+                all_links = page.locator("a[href]")
+                link_count = all_links.count()
+                candidates = []
+                for i in range(min(link_count, 200)):
+                    try:
+                        href = all_links.nth(i).get_attribute("href") or ""
+                    except Exception:
+                        continue
+                    if not href or href.startswith("#") or href.startswith("javascript:"):
+                        continue
+                    # Match snapshot shortcodes: /<alphanum>  (e.g. /WOQ7d)
+                    # But NOT the listing /search/run URLs
+                    abs_href = urljoin("https://archive.is/", href)
+                    m = re.search(
+                        r"archive\.(is|ph|today|fo|li|vn|md)/([0-9a-zA-Z]{3,20})$",
+                        abs_href, re.IGNORECASE,
+                    )
+                    if m:
+                        code = m.group(2)
+                        # Exclude known non-snapshot paths
+                        if code.lower() in {"search", "submit", "faq", "about", "blog", "domain"}:
+                            continue
+                        # Try to get text/label for this link
+                        try:
+                            link_text = all_links.nth(i).inner_text().strip()[:200]
+                        except Exception:
+                            link_text = ""
+                        candidates.append((abs_href, link_text, i))
+                        logger.info(f"archive.is: candidate snapshot [{i}]: {abs_href}  ({link_text[:60]})")
+                if candidates:
+                    # First one is usually the latest
+                    snapshot_url = candidates[0][0]
+                    logger.info(f"archive.is: selected latest snapshot: {snapshot_url}")
+
+            if not snapshot_url:
+                logger.warning(f"archive.is: no snapshot found for {url}")
+                return None, None
+
+            # ── open snapshot page ──
+            logger.info(f"archive.is: navigating to snapshot: {snapshot_url}")
+            try:
+                page.goto(snapshot_url, wait_until="networkidle", timeout=20000)
+            except PlaywrightTimeoutError:
+                logger.warning("archive.is: timeout loading snapshot page")
+                return None, None
+            page.wait_for_timeout(2000)
+            if not _ensure_no_captcha("snapshot page", timeout_s=30):
+                return None, None
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeoutError:
+                pass
+
+            # Archive.is typically embeds the real content inside an
+            # iframe within #DIVALREADYARCHIVEDPAGE.  page.content()
+            # only returns the outer frame, so we must reach into the
+            # iframe when present.
+            html_content = page.content()
+
+            content_iframe = page.locator("#DIVALREADYARCHIVEDPAGE iframe").first
+            if content_iframe.count() > 0:
+                logger.info("archive.is: content is in an iframe, switching to frame content")
+                try:
+                    frame = content_iframe.content_frame()
+                    if frame is not None:
+                        html_content = frame.content()
+                except Exception as exc:
+                    logger.warning(f"archive.is: could not read content iframe: {exc}")
+
+            if not html_content or len(html_content) < 500:
+                logger.warning("archive.is: snapshot content too short")
+                return None, None
+
+            # Remove archive.is toolbar / framing elements while
+            # keeping #DIVALREADYARCHIVEDPAGE which contains the actual
+            # archived page content.
+            soup = BeautifulSoup(html_content, "html.parser")
+            for toolbar in soup.select(
+                "#HEADER, #__teaser, "
+                "#disclaimer, #toolbar, .toolbar, #archive-header"
+            ):
+                toolbar.decompose()
+
+            # Inject <base href> so relative URLs (images, links) resolve
+            # through archive.is's CDN instead of the original domain.
+            base_href = snapshot_url.rstrip("/") + "/"
+            head = soup.find("head")
+            if not head:
+                head = soup.new_tag("head")
+                if soup.html:
+                    soup.html.insert(0, head)
+                else:
+                    html_tag = soup.new_tag("html")
+                    html_tag.append(head)
+                    body = soup.new_tag("body")
+                    for child in list(soup.contents):
+                        body.append(child.extract())
+                    html_tag.append(body)
+                    soup.append(html_tag)
+            base_tag = soup.find("base")
+            if base_tag:
+                base_tag["href"] = base_href
+            else:
+                base_tag = soup.new_tag("base", href=base_href)
+                head.insert(0, base_tag)
+
+            html_content = str(soup)
+
+            logger.info(f"archive.is: snapshot fetched successfully: {snapshot_url}")
+            return html_content, snapshot_url
+
+        # ── Main: headless first, then visible fallback ──
+        try:
+            with sync_playwright() as p:
+                browser = _launch_browser(p, headless=True)
+                context = Fetcher._create_stealth_context(browser, "https://archive.is/")
+                page = context.new_page()
+                page.set_default_timeout(30000)
+                html_result, snap_url = _run_workflow(page, headless=True)
+                browser.close()
+                if html_result is not None:
+                    return html_result, snap_url
+
+                logger.info(
+                    "archive.is: headless attempt failed; "
+                    "retrying with visible browser for manual CAPTCHA completion..."
+                )
+                print(
+                    "\n" + "=" * 60 + "\n"
+                    + "  archive.is 需要人工完成 CAPTCHA 验证\n"
+                    + "  正在打开可见浏览器窗口...\n"
+                    + "  请在新窗口中完成验证，完成后程序将自动继续\n"
+                    + "=" * 60 + "\n"
+                )
+                browser2 = _launch_browser(p, headless=False)
+                context2 = Fetcher._create_stealth_context(browser2, "https://archive.is/")
+                page2 = context2.new_page()
+                page2.set_default_timeout(30000)
+                html_result, snap_url = _run_workflow(page2, headless=False)
+                browser2.close()
+                return html_result, snap_url
+        except Exception as e:
+            logger.warning(f"archive.is fetch failed: {e}")
+            return None, None
+
 
 # =============================================================================
 # Special Site Handlers
@@ -10595,6 +11078,31 @@ Twitter/X Backend:
             logger.error(f"Failed to fetch usable content from {args.url}.")
         sys.exit(1)
 
+    # ── Paywall detection and archive.is fallback ──
+    archive_is_url = None
+    paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
+    if paywall_result and paywall_result.get("detected"):
+        logger.warning(
+            f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
+            f"{paywall_result.get('reason', 'unknown')}"
+        )
+        logger.info("Attempting to fetch from archive.is...")
+        archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+            args.url,
+            config=config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+        if archived_html:
+            logger.info("archive.is snapshot fetched successfully, using it as content source.")
+            archive_is_url = snapshot_url
+            html_content = archived_html
+        else:
+            logger.error("内容受付费墙控制，未抓取全文")
+            logger.error(f"  原始 URL: {args.url}")
+            logger.error("  提示：可手动访问 https://archive.is/ 搜索该页面获取快照。")
+            sys.exit(1)
+
     _raise_if_interrupted()
     try:
         processed = _process_fetched_content(
@@ -10685,8 +11193,10 @@ Twitter/X Backend:
             except Exception as e:
                 logger.warning(f"Could not get LLM config for translator: {e}")
 
-        archive_url = None
-        if args.archive and not args.no_front_matter and output_path != "-":
+        # archive_url: prioritize archive.is snapshot (paywall fallback),
+        # then explicit Wayback Machine --archive flag.
+        archive_url = archive_is_url
+        if not archive_url and args.archive and not args.no_front_matter and output_path != "-":
             archive_url = Fetcher.save_wayback_snapshot(
                 source_url,
                 config=config,

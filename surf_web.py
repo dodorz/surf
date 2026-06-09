@@ -1985,6 +1985,35 @@ def process_url():
             )
             if not html_content:
                 return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
+
+            # Paywall detection and archive.is fallback
+            archive_is_url = None
+            paywall_result = Fetcher._detect_paywall(html_content, url=url)
+            if paywall_result and paywall_result.get("detected"):
+                logger.warning(
+                    f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
+                    f"{paywall_result.get('reason', 'unknown')}"
+                )
+                logger.info("Attempting to fetch from archive.is...")
+                archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+                    url,
+                    config=config,
+                    proxy_mode_override=proxy_override,
+                    custom_proxy_override=custom_proxy,
+                )
+                if archived_html:
+                    logger.info("archive.is snapshot fetched successfully, using it as content source.")
+                    archive_is_url = snapshot_url
+                    html_content = archived_html
+                else:
+                    return jsonify({
+                        "success": False,
+                        "error": "内容受付费墙控制，未抓取全文",
+                        "paywall": True,
+                        "original_url": url,
+                        "hint": "可手动访问 https://archive.is/ 搜索该页面获取快照。",
+                    })
+
             pipeline_lang_mode = "raw" if lang_mode in {"trans", "both"} else lang_mode
             processed = _process_fetched_content(
                 html_content,
@@ -2012,8 +2041,9 @@ def process_url():
                 title = original_title
                 md_content = original_md
 
-        archive_url = None
-        if data.get("archive_source") and not data.get("no_front_matter", False):
+        # archive_url: prioritize archive.is snapshot (from paywall fallback)
+        archive_url = archive_is_url
+        if not archive_url and data.get("archive_source") and not data.get("no_front_matter", False):
             archive_url = Fetcher.save_wayback_snapshot(
                 source_url,
                 config=config,
