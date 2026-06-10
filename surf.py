@@ -7785,10 +7785,15 @@ class Fetcher:
             listing_url = f"https://archive.is/{quote(url, safe='')}"
             logger.info(f"archive.is: opening listing page: {listing_url}")
             try:
-                page.goto(listing_url, wait_until="networkidle", timeout=20000)
+                page.goto(listing_url, wait_until="domcontentloaded", timeout=20000)
             except PlaywrightTimeoutError:
                 logger.warning("archive.is: timeout loading listing page")
                 return None, None
+            # Let the page settle — listing pages may have deferred scripts.
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass
             page.wait_for_timeout(2000)
             if not _ensure_no_captcha("listing page", timeout_s=120):
                 return None, None
@@ -7844,19 +7849,33 @@ class Fetcher:
                 return None, None
 
             # ── open snapshot page ──
-            logger.info(f"archive.is: navigating to snapshot: {snapshot_url}")
-            try:
-                page.goto(snapshot_url, wait_until="networkidle", timeout=20000)
-            except PlaywrightTimeoutError:
-                logger.warning("archive.is: timeout loading snapshot page")
+            # archive.is injects tracking pixels into archived pages that
+            # keep the network busy forever, so we use domcontentloaded
+            # (DOM ready) instead of networkidle, then wait manually.
+            _snap_loaded = False
+            for _attempt in range(3):
+                logger.info(f"archive.is: navigating to snapshot: {snapshot_url}")
+                try:
+                    page.goto(snapshot_url, wait_until="domcontentloaded", timeout=30000)
+                    _snap_loaded = True
+                except PlaywrightTimeoutError:
+                    logger.warning(
+                        f"archive.is: timeout loading snapshot page (attempt {_attempt+1}/3)"
+                    )
+                    continue
+                page.wait_for_timeout(3000)
+                if not _ensure_no_captcha("snapshot page", timeout_s=30):
+                    continue
+                # Give embedded content a moment to render.
+                try:
+                    page.wait_for_load_state("load", timeout=10000)
+                except PlaywrightTimeoutError:
+                    pass
+                break
+
+            if not _snap_loaded:
+                logger.warning("archive.is: failed to load snapshot page after 3 attempts")
                 return None, None
-            page.wait_for_timeout(2000)
-            if not _ensure_no_captcha("snapshot page", timeout_s=30):
-                return None, None
-            try:
-                page.wait_for_load_state("networkidle", timeout=15000)
-            except PlaywrightTimeoutError:
-                pass
 
             # Archive.is typically embeds the real content inside an
             # iframe within #DIVALREADYARCHIVEDPAGE.  page.content()
@@ -7888,28 +7907,42 @@ class Fetcher:
             ):
                 toolbar.decompose()
 
-            # Inject <base href> so relative URLs (images, links) resolve
-            # through archive.is's CDN instead of the original domain.
-            base_href = snapshot_url.rstrip("/") + "/"
-            head = soup.find("head")
-            if not head:
-                head = soup.new_tag("head")
-                if soup.html:
-                    soup.html.insert(0, head)
-                else:
-                    html_tag = soup.new_tag("html")
-                    html_tag.append(head)
-                    body = soup.new_tag("body")
-                    for child in list(soup.contents):
-                        body.append(child.extract())
-                    html_tag.append(body)
-                    soup.append(html_tag)
-            base_tag = soup.find("base")
-            if base_tag:
-                base_tag["href"] = base_href
-            else:
-                base_tag = soup.new_tag("base", href=base_href)
-                head.insert(0, base_tag)
+            # Rewrite every relative URL to be absolute against the
+            # archive.is snapshot URL.  The <base> tag approach is not
+            # sufficient because _convert_markdown_urls_to_absolute uses
+            # its own base URL (source_url) and ignores the <base> tag.
+            # By physically rewriting URLs we make the base URL choice
+            # irrelevant for downstream processing.
+            _base = snapshot_url.rstrip("/") + "/"
+            _url_attrs = (
+                "src", "href", "srcset", "data-src", "data-original",
+                "data-url", "data-srcset", "poster", "content",
+            )
+            for tag in soup.find_all(True):
+                for attr in _url_attrs:
+                    val = tag.get(attr)
+                    if not val:
+                        continue
+                    if attr == "srcset":
+                        parts = []
+                        for entry in val.split(","):
+                            entry = entry.strip()
+                            tokens = entry.rsplit(" ", 1)
+                            url_part = tokens[0].strip()
+                            resolved = urljoin(_base, url_part)
+                            if len(tokens) == 2:
+                                parts.append(f"{resolved} {tokens[1]}")
+                            else:
+                                parts.append(resolved)
+                        tag[attr] = ", ".join(parts)
+                    elif attr == "content":
+                        # Only rewrite if it looks like a URL
+                        if re.match(r"^https?://", val, re.IGNORECASE) or not re.match(r"^https?://|^data:", val, re.IGNORECASE):
+                            tag[attr] = urljoin(_base, val)
+                    else:
+                        resolved = urljoin(_base, val)
+                        if resolved != val or not re.match(r"^(https?://|data:)", val, re.IGNORECASE):
+                            tag[attr] = resolved
 
             html_content = str(soup)
 
@@ -7924,7 +7957,10 @@ class Fetcher:
                 page = context.new_page()
                 page.set_default_timeout(30000)
                 html_result, snap_url = _run_workflow(page, headless=True)
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
                 if html_result is not None:
                     return html_result, snap_url
 
