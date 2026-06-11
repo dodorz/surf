@@ -556,6 +556,8 @@ def _process_fetched_content(
     md_content = (md_content or "").lstrip("\r\n")
     original_md = md_content
     original_title = title
+    original_description = OutputHandler._extract_html_meta_description(html_content)
+    translated_description = None
     translated_title = None
     translation_performed = False
     skip_title_translation = site_config.get("skip_title_translation", False) if site_config else False
@@ -577,6 +579,14 @@ def _process_fetched_content(
             translated_title,
             title_was_translated=not skip_title_translation,
         )
+        if original_description and translated_md != original_md:
+            translated_description, _ = ContentProcessor.translate_if_needed(
+                original_description,
+                title=None,
+                target_lang=config.get("Output", "target_language", fallback="zh-cn"),
+                config=config,
+                llm_provider=llm_provider,
+            )
 
         if skip_title_translation:
             translated_title = original_title
@@ -604,6 +614,8 @@ def _process_fetched_content(
         "markdown": md_content,
         "raw_markdown": original_md,
         "original_title": original_title,
+        "original_description": original_description,
+        "translated_description": translated_description,
         "translated_title": translated_title,
         "translation_performed": translation_performed,
         "source_url": source_url,
@@ -8899,6 +8911,20 @@ class OutputHandler:
         return best
 
     @staticmethod
+    def _extract_html_meta_description(html_content):
+        """Extract normalized HTML meta description content when available."""
+        if not html_content:
+            return None
+        soup = BeautifulSoup(html_content, "html.parser")
+        description_tag = soup.find("meta", attrs={"name": "description"})
+        if not description_tag:
+            return None
+        description_value = description_tag.get("content") or description_tag.get("value")
+        if not description_value:
+            return None
+        return OutputHandler.normalize_markdown_encoding(description_value.strip())
+
+    @staticmethod
     def _sanitize_filename(filename):
         return "".join([c for c in filename if c.alpha() or c.isdigit() or c in " ._-"]).rstrip()
 
@@ -9429,7 +9455,7 @@ class OutputHandler:
         return md_content
 
     @staticmethod
-    def _extract_metadata(html_content, source_url=None, translator=None, archive_url=None):
+    def _extract_metadata(html_content, source_url=None, translator=None, archive_url=None, description_override=None):
         """
         从HTML中提取元数据用于YAML front matter。
 
@@ -9487,7 +9513,7 @@ class OutputHandler:
                 return None
             if getattr(dt, "tzinfo", None) is not None:
                 dt = dt.astimezone().replace(tzinfo=None)
-            return dt.isoformat(timespec="minutes")
+            return dt.isoformat(timespec="seconds")
 
         def _extract_direct_markdown_field(pattern):
             direct_markdown = soup.find(id="surf-direct-markdown")
@@ -9571,11 +9597,11 @@ class OutputHandler:
         if twitter_title:
             metadata["title"] = OutputHandler.normalize_markdown_encoding(twitter_title)
 
-        description_tag = soup.find("meta", attrs={"name": "description"})
-        if description_tag:
-            description_value = description_tag.get("content") or description_tag.get("value")
-            if description_value:
-                metadata["description"] = OutputHandler.normalize_markdown_encoding(description_value.strip())
+        extracted_description = OutputHandler._extract_html_meta_description(html_content)
+        if extracted_description:
+            metadata["description"] = extracted_description
+        if description_override:
+            metadata["description"] = OutputHandler.normalize_markdown_encoding(description_override)
 
         # 提取发布日期 - 尝试多种常见的meta标签
         date_selectors = [
