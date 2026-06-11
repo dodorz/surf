@@ -1565,22 +1565,30 @@ HTML_TEMPLATE = """
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
             const inputUrl = container.dataset.inputUrl || '';
             const formData = getCurrentFormData(inputUrl);
+            const translationJobId = container.dataset.translationJobId || resultData.translation_job_id || '';
+            const translationPending = !!(resultData.translation_pending && translationJobId);
+
+            const body = {
+                fileType,
+                saveDir,
+                customTitle,
+                data: resultData,
+                speak
+            };
+            if (translationPending) {
+                body.translation_job_id = translationJobId;
+            } else {
+                body.formData = formData;
+            }
 
             try {
-                showStatus('processing', '正在提交后台保存...');
+                showStatus('processing', translationPending ? '翻译进行中，将在翻译完成后自动保存...' : '正在提交后台保存...');
                 const response = await fetch('/api/save-async', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        fileType,
-                        saveDir,
-                        customTitle,
-                        data: resultData,
-                        formData: formData,
-                        speak
-                    })
+                    body: JSON.stringify(body)
                 });
 
                 const result = await parseJsonResponse(response);
@@ -1902,9 +1910,12 @@ def _run_web_save_job(job_id):
         customTitle = (data.get("customTitle") or "").strip()
         speak = bool(data.get("speak"))
 
-        # Use current form settings to re-process if provided; otherwise fall back to cached resultData
+        # Resolve resultData: pending translation > form re-process > cached data
+        translation_job_id = data.get("translation_job_id")
         formData = data.get("formData")
-        if formData:
+        if translation_job_id:
+            resultData = _wait_for_translation_and_get_result(translation_job_id)
+        elif formData:
             result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
             resultData = result
         else:
@@ -2017,9 +2028,26 @@ def _enqueue_web_save_job(save_data):
     threading.Thread(target=_run_web_save_job, args=(job_id,), daemon=True).start()
     return job_id
 
+def _wait_for_translation_and_get_result(translation_job_id, timeout=300, poll_interval=2):
+    """Poll an async translation job until completion, then return the translated result."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = _get_translation_job(translation_job_id)
+        if not job:
+            raise ValueError(f"Translation job {translation_job_id} not found")
+        status = job.get("status")
+        if status == "done":
+            result = job.get("result")
+            if not result:
+                raise ValueError("Translation job completed but returned no result")
+            return result
+        if status == "error":
+            raise ValueError(f"Translation failed: {job.get('error', 'unknown error')}")
+        time.sleep(poll_interval)
+    raise TimeoutError(f"Translation job {translation_job_id} did not complete within {timeout}s")
+
 
 def build_combined_result_payload(results):
-    """Merge multiple result payloads into a single saveable payload."""
     valid_results = [item for item in (results or []) if isinstance(item, dict)]
     if not valid_results:
         return None
