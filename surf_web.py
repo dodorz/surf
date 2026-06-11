@@ -1551,9 +1551,14 @@ def extract_text_post_title(value):
     return OutputHandler._extract_first_sentence(text) or "Untitled"
 
 
+def _normalize_web_text_newlines(value):
+    """Normalize user-entered text to LF for consistent Web processing."""
+    return (value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def build_text_post_html(text, title):
     """Wrap free-form text in a minimal article HTML document."""
-    normalized = (text or "").strip()
+    normalized = _normalize_web_text_newlines(text).strip()
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n", normalized) if part.strip()]
     if not paragraphs:
         paragraphs = [normalized] if normalized else []
@@ -1929,6 +1934,7 @@ def process_url():
         original_title = "Untitled"
         translated_title = None
         content_base_url = None
+        archive_is_url = None
         translation_performed = False
         translation_pending = False
 

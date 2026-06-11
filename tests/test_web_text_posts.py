@@ -95,6 +95,41 @@ def test_process_url_can_force_full_text_save_even_when_text_contains_url(monkey
     assert payload["metadata"]["source_url"] is None
 
 
+def test_build_text_post_html_normalizes_crlf_and_cr_newlines():
+    html = surf_web.build_text_post_html("第一段第一行\r\n第一段第二行\r\r第二段\r第三行", "标题")
+
+    assert "<p>第一段第一行<br>第一段第二行</p>" in html
+    assert "<p>第二段<br>第三行</p>" in html
+
+
+def test_process_url_full_text_save_accepts_windows_newlines(monkeypatch):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
+
+    def _should_not_fetch(*args, **kwargs):
+        raise AssertionError("Fetcher.fetch should not be called when full-text save is enabled")
+
+    monkeypatch.setattr(surf_web.Fetcher, "fetch", _should_not_fetch)
+
+    client = surf_web.app.test_client()
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "标题在这里 https://example.com/page\r\n\r\n第一段第一行\r\n第一段第二行\r\n\r\n第二段",
+            "lang": "raw",
+            "save_full_text": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert "标题在这里 https://example.com/page" in payload["markdown"]
+    assert "第一段第一行" in payload["markdown"]
+    assert "第一段第二行" in payload["markdown"]
+    assert "第二段" in payload["markdown"]
+    assert payload["metadata"]["source_url"] is None
+
+
 def test_processed_markdown_strips_leading_blank_lines(monkeypatch):
     monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
     monkeypatch.setattr(
