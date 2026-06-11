@@ -1910,16 +1910,26 @@ def _run_web_save_job(job_id):
         customTitle = (data.get("customTitle") or "").strip()
         speak = bool(data.get("speak"))
 
-        # Resolve resultData: pending translation > form re-process > cached data
+        # Resolve resultData: explicit translation_job_id > resultData's own pending >
+        # form re-process > cached data
         translation_job_id = data.get("translation_job_id")
         formData = data.get("formData")
         if translation_job_id:
             resultData = _wait_for_translation_and_get_result(translation_job_id)
         elif formData:
-            result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
-            resultData = result
+            # Check if the cached resultData itself has a pending translation
+            cached = data.get("data", {})
+            if cached.get("translation_pending") and cached.get("translation_job_id"):
+                logger.info("Save worker: resultData has pending translation, waiting for job %s", cached["translation_job_id"])
+                resultData = _wait_for_translation_and_get_result(cached["translation_job_id"])
+            else:
+                result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
+                resultData = result
         else:
             resultData = data.get("data", {})
+            # Last-resort: if cached data has pending translation, wait for it
+            if resultData.get("translation_pending") and resultData.get("translation_job_id"):
+                resultData = _wait_for_translation_and_get_result(resultData["translation_job_id"])
             if data.get("combine_all"):
                 resultData = build_combined_result_payload(data.get("results", [])) or {}
 
