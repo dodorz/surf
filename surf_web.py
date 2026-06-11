@@ -1560,29 +1560,22 @@ HTML_TEMPLATE = """
                 showStatus('error', '没有可保存的内容');
                 return;
             }
-
             const speak = !!options.speak;
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
             const inputUrl = container.dataset.inputUrl || '';
             const formData = getCurrentFormData(inputUrl);
-            const translationJobId = container.dataset.translationJobId || resultData.translation_job_id || '';
-            const translationPending = !!(resultData.translation_pending && translationJobId);
 
             const body = {
                 fileType,
                 saveDir,
                 customTitle,
                 data: resultData,
+                formData: formData,
                 speak
             };
-            if (translationPending) {
-                body.translation_job_id = translationJobId;
-            } else {
-                body.formData = formData;
-            }
 
             try {
-                showStatus('processing', translationPending ? '翻译进行中，将在翻译完成后自动保存...' : '正在提交后台保存...');
+                showStatus('processing', '正在提交后台保存...');
                 const response = await fetch('/api/save-async', {
                     method: 'POST',
                     headers: {
@@ -1593,10 +1586,8 @@ HTML_TEMPLATE = """
 
                 const result = await parseJsonResponse(response);
                 if (result.success && result.job_id) {
-                    const queuedMsg = translationPending
-                        ? `${fileType.toUpperCase()} 已加入保存队列，将在翻译完成后自动保存`
-                        : `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL`;
-                    showStatus('success', queuedMsg);
+                    showStatus('success', `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL`);
+                    pollSaveJob(result.job_id);
                 } else {
                     showStatus('error', '保存提交失败: ' + (result.error || 'unknown error'));
                 }
@@ -1912,8 +1903,8 @@ def _run_web_save_job(job_id):
         customTitle = (data.get("customTitle") or "").strip()
         speak = bool(data.get("speak"))
 
-        # Resolve resultData: explicit translation_job_id > resultData's own pending >
-        # form re-process > cached data
+        # Resolve resultData: formData always wins (save-time settings),
+        # then explicit translation_job_id, then cached data as last resort
         translation_job_id = data.get("translation_job_id")
         formData = data.get("formData")
         cached_pending = (data.get("data") or {}).get("translation_pending")
@@ -1922,26 +1913,22 @@ def _run_web_save_job(job_id):
             "Save worker resolving: tid=%s formData=%s dataPending=%s dataTid=%s",
             bool(translation_job_id), bool(formData), bool(cached_pending), bool(cached_tjid),
         )
-        if translation_job_id:
+        if formData:
+            logger.warning("Save worker: re-processing with formData (lang=%s)", formData.get("lang"))
+            result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
+            resultData = result
+        elif translation_job_id:
             logger.warning("Save worker: using explicit translation_job_id=%s", translation_job_id)
             resultData = _wait_for_translation_and_get_result(translation_job_id)
-        elif formData:
-            cached = data.get("data", {})
-            if cached.get("translation_pending") and cached.get("translation_job_id"):
-                logger.warning("Save worker: resultData has pending translation, waiting for job %s", cached["translation_job_id"])
-                resultData = _wait_for_translation_and_get_result(cached["translation_job_id"])
-            else:
-                logger.info("Save worker: re-processing with formData (lang=%s)", formData.get("lang"))
-                result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
-                resultData = result
         else:
             resultData = data.get("data", {})
-            logger.info("Save worker: using cached resultData, pending=%s", bool(resultData.get("translation_pending")))
+            logger.warning("Save worker: using cached resultData, pending=%s", bool(resultData.get("translation_pending")))
             if resultData.get("translation_pending") and resultData.get("translation_job_id"):
-                logger.info("Save worker: cached resultData has pending translation, waiting for job %s", resultData["translation_job_id"])
+                logger.warning("Save worker: cached resultData has pending translation, waiting for job %s", resultData["translation_job_id"])
                 resultData = _wait_for_translation_and_get_result(resultData["translation_job_id"])
             if data.get("combine_all"):
                 resultData = build_combined_result_payload(data.get("results", [])) or {}
+
         defaultDirs = {
             "md": config.get_path("Output", "md_dir", fallback="notes"),
             "html": config.get_path("Output", "html_dir", fallback="web"),
@@ -1949,11 +1936,11 @@ def _run_web_save_job(job_id):
             "audio": config.get_path("Output", "audio_dir", fallback="audio"),
         }
 
+
         if saveDir:
             targetDir = resolve_user_path(saveDir)
         else:
             targetDir = defaultDirs.get(fileType, ".")
-
         os.makedirs(targetDir, exist_ok=True)
 
         title = customTitle or resultData.get("title", "Untitled")
