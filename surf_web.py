@@ -1537,6 +1537,24 @@ HTML_TEMPLATE = """
             }
         }
 
+        function getCurrentFormData(inputUrl) {
+            // Collect all current form field values as a plain dict matching /api/process contract
+            const form = document.getElementById('surfForm');
+            const fd = new FormData(form);
+            const data = Object.fromEntries(fd.entries());
+            if (!data.proxy) {
+                data.proxy = getCheckedRadioValue('proxy') || 'no';
+            }
+            data.url = inputUrl || (data.url || '').trim();
+            data.lang_touched = langModeTouched;
+            data.browser = data.browser === 'on';
+            data.html_inline = data.html_inline === 'on';
+            data.no_front_matter = data.no_front_matter === 'on';
+            data.archive_source = data.archive_source === 'on';
+            data.save_full_text = data.save_full_text === 'on';
+            return data;
+        }
+
         async function saveFile(container, resultData, fileType, options = {}) {
             if (!resultData) {
                 showStatus('error', '没有可保存的内容');
@@ -1545,6 +1563,8 @@ HTML_TEMPLATE = """
 
             const speak = !!options.speak;
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
+            const inputUrl = container.dataset.inputUrl || '';
+            const formData = getCurrentFormData(inputUrl);
 
             try {
                 showStatus('processing', '正在提交后台保存...');
@@ -1558,6 +1578,7 @@ HTML_TEMPLATE = """
                         saveDir,
                         customTitle,
                         data: resultData,
+                        formData: formData,
                         speak
                     })
                 });
@@ -1574,7 +1595,6 @@ HTML_TEMPLATE = """
                 showStatus('error', '请求失败: ' + error.message);
             }
         }
-    </script>
 </body>
 </html>
 """
@@ -1880,10 +1900,17 @@ def _run_web_save_job(job_id):
         fileType = data.get("fileType")
         saveDir = (data.get("saveDir") or "").strip()
         customTitle = (data.get("customTitle") or "").strip()
-        resultData = data.get("data", {})
-        if data.get("combine_all"):
-            resultData = build_combined_result_payload(data.get("results", [])) or {}
         speak = bool(data.get("speak"))
+
+        # Use current form settings to re-process if provided; otherwise fall back to cached resultData
+        formData = data.get("formData")
+        if formData:
+            result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
+            resultData = result
+        else:
+            resultData = data.get("data", {})
+            if data.get("combine_all"):
+                resultData = build_combined_result_payload(data.get("results", [])) or {}
 
         defaultDirs = {
             "md": config.get_path("Output", "md_dir", fallback="notes"),
@@ -2140,11 +2167,16 @@ def translation_job_status(job_id):
     return jsonify(payload)
 
 
-@app.route("/api/process", methods=["POST"])
-def process_url():
-    """Process a URL or free-form text post and return the result."""
 
-    data = request.get_json(silent=True) or {}
+def _process_web_request(data, translate_sync=False):
+    """Core URL/text-post processing shared by /api/process and async save.
+
+    When *translate_sync* is True, translation runs inline (suitable for
+    background threads).  When False, the caller is responsible for spawning
+    an async translation job — the returned result will have the raw content
+    and set ``translation_pending`` to True.
+    """
+
     raw_url_input = data.get("url")
     save_full_text = bool(data.get("save_full_text", False))
     url = None if save_full_text else extract_url_from_text(raw_url_input)
@@ -2153,170 +2185,175 @@ def process_url():
 
     config = get_config()
 
-    try:
-        original_md = ""
-        original_title = "Untitled"
-        translated_title = None
-        content_base_url = None
+    original_md = ""
+    original_title = "Untitled"
+    translated_title = None
+    content_base_url = None
+    archive_is_url = None
+    translation_performed = False
+    translation_pending = False
+
+    # Fetch content
+    proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
+    proxy_override = get_web_proxy_override(proxy_mode)
+    custom_proxy = (data.get("custom_proxy") or "").strip() or None
+    if proxy_mode == "custom" and not custom_proxy:
+        raise ValueError("custom 代理模式需要填写自定义代理地址")
+
+    # Language mode
+    lang_mode = data.get("lang", "trans")
+    if is_text_post:
+        source_url = None
+        site_name = "text"
+        site_config = {}
+        title = extract_text_post_title(raw_text)
+        cleaned_html = build_text_post_html(raw_text, title)
+        html_content = cleaned_html
+        md_content = ContentProcessor.to_markdown(cleaned_html)
+        original_md = md_content
+        original_title = title
+        translation_pending = lang_mode in {"trans", "both"}
+    else:
+        if not url:
+            raise ValueError("A valid http/https URL is required")
+
+        url = Fetcher._resolve_common_short_url(
+            url,
+            config,
+            proxy_mode_override=proxy_override,
+            custom_proxy_override=custom_proxy,
+        )
+        _, site_name, site_config = _get_handler_for_url(url)
+        fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
+        fetch_thread_author = resolve_web_thread_author(data)
+        if site_config:
+            if (
+                site_config.get("default_no_translate")
+                and lang_mode == "trans"
+                and not data.get("lang_touched", False)
+            ):
+                logger.info(f"Web: {site_name} using default 'no translate'")
+                lang_mode = "raw"
+
+        html_content = Fetcher.fetch(
+            url,
+            config=config,
+            use_browser=data.get("browser", False),
+            proxy_mode_override=proxy_override,
+            custom_proxy_override=custom_proxy,
+            fetch_thread=fetch_thread,
+            fetch_thread_author=fetch_thread_author,
+        )
+        if not html_content:
+            raise ValueError(f"Failed to fetch usable content from {url}")
+
+        # Paywall detection and archive.is fallback
         archive_is_url = None
-        translation_performed = False
-        translation_pending = False
-
-        # Fetch content
-        proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
-        proxy_override = get_web_proxy_override(proxy_mode)
-        custom_proxy = (data.get("custom_proxy") or "").strip() or None
-        if proxy_mode == "custom" and not custom_proxy:
-            return jsonify({"success": False, "error": "custom 代理模式需要填写自定义代理地址"})
-        
-        # Language mode
-        lang_mode = data.get("lang", "trans")
-        if is_text_post:
-            source_url = None
-            site_name = "text"
-            site_config = {}
-            title = extract_text_post_title(raw_text)
-            cleaned_html = build_text_post_html(raw_text, title)
-            html_content = cleaned_html
-            md_content = ContentProcessor.to_markdown(cleaned_html)
-            original_md = md_content
-            original_title = title
-            translation_pending = lang_mode in {"trans", "both"}
-        else:
-            if not url:
-                return jsonify({"success": False, "error": "A valid http/https URL is required"})
-
-            url = Fetcher._resolve_common_short_url(
-                url,
-                config,
-                proxy_mode_override=proxy_override,
-                custom_proxy_override=custom_proxy,
+        paywall_result = Fetcher._detect_paywall(html_content, url=url)
+        if paywall_result and paywall_result.get("detected"):
+            logger.warning(
+                f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
+                f"{paywall_result.get('reason', 'unknown')}"
             )
-            _, site_name, site_config = _get_handler_for_url(url)
-            fetch_thread = resolve_web_thread_mode(data, site_name, site_config)
-            fetch_thread_author = resolve_web_thread_author(data)
-            if site_config:
-                if (
-                    site_config.get("default_no_translate")
-                    and lang_mode == "trans"
-                    and not data.get("lang_touched", False)
-                ):
-                    logger.info(f"Web: {site_name} using default 'no translate'")
-                    lang_mode = "raw"
-
-            html_content = Fetcher.fetch(
+            logger.info("Attempting to fetch from archive.is...")
+            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
                 url,
                 config=config,
-                use_browser=data.get("browser", False),
-                proxy_mode_override=proxy_override,
-                custom_proxy_override=custom_proxy,
-                fetch_thread=fetch_thread,
-                fetch_thread_author=fetch_thread_author,
-            )
-            if not html_content:
-                return jsonify({"success": False, "error": f"Failed to fetch usable content from {url}"})
-
-            # Paywall detection and archive.is fallback
-            archive_is_url = None
-            paywall_result = Fetcher._detect_paywall(html_content, url=url)
-            if paywall_result and paywall_result.get("detected"):
-                logger.warning(
-                    f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
-                    f"{paywall_result.get('reason', 'unknown')}"
-                )
-                logger.info("Attempting to fetch from archive.is...")
-                archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
-                    url,
-                    config=config,
-                    proxy_mode_override=proxy_override,
-                    custom_proxy_override=custom_proxy,
-                )
-                if archived_html:
-                    logger.info("archive.is snapshot fetched successfully, using it as content source.")
-                    archive_is_url = snapshot_url
-                    html_content = archived_html
-                else:
-                    return jsonify({
-                        "success": False,
-                        "error": "内容受付费墙控制，未抓取全文",
-                        "paywall": True,
-                        "original_url": url,
-                        "hint": "可手动访问 https://archive.is/ 搜索该页面获取快照。",
-                    })
-
-            pipeline_lang_mode = "raw" if lang_mode in {"trans", "both"} else lang_mode
-            processed = _process_fetched_content(
-                html_content,
-                url,
-                config,
-                site_name=site_name,
-                site_config=site_config,
-                lang_mode=pipeline_lang_mode,
-                ocr_args=build_web_ocr_args(data),
-                proxy_mode_override=proxy_override,
-                custom_proxy_override=custom_proxy,
-                llm_provider=(data.get("llm") or "").strip() or None,
-            )
-            source_url = processed["source_url"]
-            content_base_url = processed["content_base_url"]
-            title = processed["title"]
-            cleaned_html = processed["cleaned_html"]
-            md_content = processed["markdown"]
-            original_md = processed["raw_markdown"]
-            original_title = processed["original_title"]
-            translated_title = processed["translated_title"]
-            translation_performed = processed["translation_performed"]
-            translation_pending = lang_mode in {"trans", "both"}
-            if translation_pending:
-                title = original_title
-                md_content = original_md
-
-        # archive_url: prioritize archive.is snapshot (from paywall fallback)
-        archive_url = archive_is_url
-        if not archive_url and data.get("archive_source") and not data.get("no_front_matter", False):
-            archive_url = Fetcher.save_wayback_snapshot(
-                source_url,
-                config=config,
                 proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
             )
+            if archived_html:
+                logger.info("archive.is snapshot fetched successfully, using it as content source.")
+                archive_is_url = snapshot_url
+                html_content = archived_html
+            else:
+                raise ValueError("内容受付费墙控制，未抓取全文")
 
-        # Get default directories for frontend
-        defaultDirs = {
-            "md": config.get_path("Output", "md_dir", fallback="notes"),
-            "html": config.get_path("Output", "html_dir", fallback="web"),
-            "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
-            "audio": config.get_path("Output", "audio_dir", fallback="audio"),
-        }
-        defaultSaveTitle = build_default_filename_stem(
-            title,
-            source_url=source_url,
-            html_content=html_content,
+        pipeline_lang_mode = lang_mode
+        if not translate_sync and lang_mode in {"trans", "both"}:
+            pipeline_lang_mode = "raw"
+        processed = _process_fetched_content(
+            html_content,
+            url,
+            config,
+            site_name=site_name,
+            site_config=site_config,
+            lang_mode=pipeline_lang_mode,
+            ocr_args=build_web_ocr_args(data),
+            proxy_mode_override=proxy_override,
+            custom_proxy_override=custom_proxy,
+            llm_provider=(data.get("llm") or "").strip() or None,
+        )
+        source_url = processed["source_url"]
+        content_base_url = processed["content_base_url"]
+        title = processed["title"]
+        cleaned_html = processed["cleaned_html"]
+        md_content = processed["markdown"]
+        original_md = processed["raw_markdown"]
+        original_title = processed["original_title"]
+        translated_title = processed["translated_title"]
+        translation_performed = processed["translation_performed"]
+        translation_pending = (not translate_sync) and lang_mode in {"trans", "both"}
+        if translation_pending:
+            title = original_title
+            md_content = original_md
+
+    # archive_url: prioritize archive.is snapshot (from paywall fallback)
+    archive_url = archive_is_url
+    if not archive_url and data.get("archive_source") and not data.get("no_front_matter", False):
+        archive_url = Fetcher.save_wayback_snapshot(
+            source_url,
+            config=config,
+            proxy_mode_override=proxy_override,
+            custom_proxy_override=custom_proxy,
         )
 
-        result = {
-            "success": True,
+    # Get default directories for frontend
+    defaultDirs = {
+        "md": config.get_path("Output", "md_dir", fallback="notes"),
+        "html": config.get_path("Output", "html_dir", fallback="web"),
+        "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
+        "audio": config.get_path("Output", "audio_dir", fallback="audio"),
+    }
+    defaultSaveTitle = build_default_filename_stem(
+        title,
+        source_url=source_url,
+        html_content=html_content,
+    )
+
+    result = {
+        "title": title,
+        "markdown": md_content,
+        "html": cleaned_html,
+        "raw": original_md,
+        "raw_markdown": original_md,
+        "original_title": original_title,
+        "defaultDirs": defaultDirs,
+        "defaultSaveTitle": defaultSaveTitle,
+        "translation_performed": translation_performed,
+        "translated_title": translated_title if translation_performed else None,
+        "translation_pending": translation_pending,
+        "metadata": {
             "title": title,
-            "markdown": md_content,
-            "html": cleaned_html,
-            "raw": original_md,
-            "raw_markdown": original_md,
-            "original_title": title,
-            "defaultDirs": defaultDirs,
-            "defaultSaveTitle": defaultSaveTitle,
-            "translation_performed": translation_performed,
+            "html_content": html_content,
+            "add_front_matter": not data.get("no_front_matter", False),
             "translated_title": translated_title if translation_performed else None,
-            "metadata": {
-                "title": title,
-                "html_content": html_content,
-                "add_front_matter": not data.get("no_front_matter", False),
-                "translated_title": translated_title if translation_performed else None,
-                "source_url": source_url,
-                "archive_url": archive_url,
-                "translator": None,
-                "html_inline": data.get("html_inline", False),
-            },
-        }
+            "source_url": source_url,
+            "archive_url": archive_url,
+            "translator": None,
+            "html_inline": data.get("html_inline", False),
+        },
+    }
+    return result, lang_mode, translation_pending
+@app.route("/api/process", methods=["POST"])
+def process_url():
+    """Process a URL or free-form text post and return the result."""
+
+    data = request.get_json(silent=True) or {}
+
+    try:
+        result, lang_mode, translation_pending = _process_web_request(data, translate_sync=False)
+        result["success"] = True
         if translation_pending:
             llm_provider = (data.get("llm") or "").strip() or None
             job_id = _enqueue_web_translation_job(copy.deepcopy(result), llm_provider, lang_mode)
@@ -2324,11 +2361,11 @@ def process_url():
             result["translation_job_id"] = job_id
         return jsonify(result)
 
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)})
     except Exception as e:
         logger.error(f"Processing failed: {e}")
         return jsonify({"success": False, "error": str(e)})
-
-
 @app.route("/download/<filename>")
 def download_file(filename):
     """Download a generated file."""
