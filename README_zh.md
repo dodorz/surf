@@ -252,7 +252,7 @@ surf "https://x.com/user/status/123" --thread both --thread-author same
 surf "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
 surf "https://v2ex.com/t/1208365" -r      # V2EX 默认只抓主贴，并自动使用已配置代理
 surf "https://v2ex.com/t/1208365" -r -t   # V2EX 包含回帖
-surf "https://example.com" --llm L2    # 指定 LLM 提供方
+surf "https://example.com" --llm L2    # 指定 LLM 提供方（名称大小写不敏感）
 surf "https://example.com" --config myconfig.ini  # 指定配置文件
 surf "https://example.com" --verbose   # 详细日志输出
 surf --version                         # 查看版本

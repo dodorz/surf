@@ -226,6 +226,9 @@ uv run surf.py "https://example.com" -c
 
 # Disable proxy
 uv run surf.py "https://example.com" -n
+
+# Override the configured LLM provider (provider names are case-insensitive)
+uv run surf.py "https://example.com" --llm l2
 ```
 
 ### Save Note (-n)

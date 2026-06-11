@@ -1019,6 +1019,20 @@ class Config:
         value = self.get(section, key, fallback=fallback)
         return resolve_user_path(value)
 
+    def _resolve_llm_section_name(self, provider_name):
+        """Resolve an LLM provider section name case-insensitively."""
+        if not provider_name:
+            return None
+        requested = provider_name.strip()
+        requested_folded = requested.casefold()
+        for section in self.config.sections():
+            if not section.startswith("LLM."):
+                continue
+            available_provider = section.split(".", 1)[1]
+            if available_provider.casefold() == requested_folded:
+                return section
+        return None
+
     def get_llm_config(self, provider_override=None):
         """Get LLM configuration for the specified provider or the default one.
 
@@ -1032,9 +1046,9 @@ class Config:
             ValueError: If the specified LLM provider is not found in the config.
         """
         provider = provider_override or self.llm_provider
-        section = f"LLM.{provider}"
+        section = self._resolve_llm_section_name(provider)
 
-        if not self.config.has_section(section):
+        if not section:
             raise ValueError(
                 f"LLM provider '{provider}' not found in config. "
                 f"Available providers: {self._get_available_llm_providers()}"
@@ -10879,7 +10893,7 @@ Twitter/X Backend:
     parser.add_argument("--set-proxy", help="Custom proxy URL for --proxy custom (overrides config custom_proxy)")
 
     # LLM
-    parser.add_argument("--llm", help="Override the default LLM provider")
+    parser.add_argument("--llm", help="Override the default LLM provider (case-insensitive)")
 
     # Other options
     parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
