@@ -1054,21 +1054,17 @@ HTML_TEMPLATE = """
             const saveLinks = container.querySelector('.save-links');
             saveLinks.innerHTML = '';
 
-            const buttons = [
-                ['md', 'save-md', '📄 保存 Markdown', {}],
-                ['html', 'save-html', '🌐 保存 HTML', {}],
-                ['pdf', 'save-pdf', '📕 保存 PDF', {}],
-                ['audio', 'save-audio', '🔊 保存 Audio', {}],
-                ['audio', 'save-audio play-btn', '▶ 播放语音', { speak: true }],
-            ];
+            const saveBtn = document.createElement('button');
+            saveBtn.className = 'save-btn save-main';
+            saveBtn.innerHTML = '💾 保存';
+            saveBtn.onclick = () => saveFile(container, result);
+            saveLinks.appendChild(saveBtn);
 
-            for (const [fileType, className, label, options] of buttons) {
-                const btn = document.createElement('button');
-                btn.className = 'save-btn ' + className;
-                btn.innerHTML = label;
-                btn.onclick = () => saveFile(container, result, fileType, options);
-                saveLinks.appendChild(btn);
-            }
+            const playBtn = document.createElement('button');
+            playBtn.className = 'save-btn play-btn';
+            playBtn.innerHTML = '▶ 朗读';
+            playBtn.onclick = () => playAudio(container, result);
+            saveLinks.appendChild(playBtn);
         }
 
         function stripMarkdownHeading(markdownText, title) {
@@ -1555,11 +1551,12 @@ HTML_TEMPLATE = """
             return data;
         }
 
-        async function saveFile(container, resultData, fileType, options = {}) {
+        async function saveFile(container, resultData, options = {}) {
             if (!resultData) {
                 showStatus('error', '没有可保存的内容');
                 return;
             }
+            const fileType = getCheckedRadioValue('format') || 'md';
             const speak = !!options.speak;
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
             const inputUrl = container.dataset.inputUrl || '';
@@ -1578,18 +1575,38 @@ HTML_TEMPLATE = """
                 showStatus('processing', '正在提交后台保存...');
                 const response = await fetch('/api/save-async', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
                 });
-
                 const result = await parseJsonResponse(response);
                 if (result.success && result.job_id) {
                     showStatus('success', `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL`);
                     pollSaveJob(result.job_id);
                 } else {
                     showStatus('error', '保存提交失败: ' + (result.error || 'unknown error'));
+                }
+            } catch (error) {
+                showStatus('error', '请求失败: ' + error.message);
+            }
+        }
+
+        async function playAudio(container, resultData) {
+            if (!resultData) {
+                showStatus('error', '没有可朗读的内容');
+                return;
+            }
+            try {
+                showStatus('processing', '正在生成语音...');
+                const response = await fetch('/api/play-audio', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ data: resultData })
+                });
+                const result = await parseJsonResponse(response);
+                if (result.success) {
+                    showStatus('success', '语音播放中...');
+                } else {
+                    showStatus('error', '语音生成失败: ' + (result.error || 'unknown error'));
                 }
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
@@ -2450,6 +2467,31 @@ def save_job_status(job_id):
     elif job.get("status") == "error":
         payload["error"] = job.get("error") or "Save failed"
     return jsonify(payload)
+
+@app.route("/api/play-audio", methods=["POST"])
+def play_audio():
+    """Generate and play TTS audio without saving a file."""
+    data = request.get_json(silent=True) or {}
+    resultData = data.get("data", {})
+    if not resultData:
+        return jsonify({"success": False, "error": "No content to play"})
+    try:
+        config = get_config()
+        title = resultData.get("title", "Untitled")
+        md_content = resultData.get("markdown", "")
+        if not md_content.strip():
+            return jsonify({"success": False, "error": "No text content to speak"})
+        threading.Thread(
+            target=TTSHandler.run_tts,
+            args=(title, md_content, config),
+            kwargs={"speak": True, "save_path": None},
+            daemon=True,
+        ).start()
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error("Play audio failed: %s", e)
+        return jsonify({"success": False, "error": str(e)})
+
 
 @app.route("/api/save", methods=["POST"])
 def save_file():
