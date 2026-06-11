@@ -1592,10 +1592,11 @@ HTML_TEMPLATE = """
                 });
 
                 const result = await parseJsonResponse(response);
-
                 if (result.success && result.job_id) {
-                    showStatus('success', `${fileType.toUpperCase()} 已提交后台保存，可继续处理其他 URL`);
-                    pollSaveJob(result.job_id);
+                    const queuedMsg = translationPending
+                        ? `${fileType.toUpperCase()} 已加入保存队列，将在翻译完成后自动保存`
+                        : `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL`;
+                    showStatus('success', queuedMsg);
                 } else {
                     showStatus('error', '保存提交失败: ' + (result.error || 'unknown error'));
                 }
