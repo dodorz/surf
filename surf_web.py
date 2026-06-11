@@ -1603,6 +1603,7 @@ HTML_TEMPLATE = """
                 showStatus('error', '请求失败: ' + error.message);
             }
         }
+    </script>
 </body>
 </html>
 """
