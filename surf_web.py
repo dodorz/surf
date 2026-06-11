@@ -83,6 +83,8 @@ from surf import (
 app = Flask(__name__)
 _TRANSLATION_JOBS = {}
 _TRANSLATION_JOBS_LOCK = threading.Lock()
+_SAVE_JOBS = {}
+_SAVE_JOBS_LOCK = threading.Lock()
 
 @app.errorhandler(Exception)
 def handle_api_error(error):
@@ -450,7 +452,43 @@ HTML_TEMPLATE = """
             color: #721c24;
             border: 1px solid #f5c6cb;
         }
-        
+
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: 380px;
+        }
+
+        .toast {
+            padding: 12px 18px;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+            animation: toastIn 0.3s ease-out;
+            cursor: pointer;
+            opacity: 1;
+            transition: opacity 0.3s;
+        }
+
+        .toast.fade-out {
+            opacity: 0;
+        }
+
+        .toast-success { background: #28a745; }
+        .toast-error { background: #dc3545; }
+        .toast-info { background: #17a2b8; }
+
+        @keyframes toastIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
         .spinner {
             display: inline-block;
             width: 20px;
@@ -773,6 +811,7 @@ HTML_TEMPLATE = """
         </div>
         
         <div id="resultsContainer"></div>
+        <div id="toastContainer" class="toast-container"></div>
         
         <div class="version-info">
             Surf v{{ version }} | 运行本地服务器
@@ -1386,9 +1425,29 @@ HTML_TEMPLATE = """
             statusDiv.style.display = 'block';
         }
 
+
+        function showToast(type, message, duration = 5000) {
+            const container = document.getElementById('toastContainer');
+            if (!container) return;
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-' + type;
+            toast.textContent = message;
+            toast.addEventListener('click', () => {
+                toast.classList.add('fade-out');
+                setTimeout(() => toast.remove(), 300);
+            });
+            container.appendChild(toast);
+            if (duration > 0) {
+                setTimeout(() => {
+                    toast.classList.add('fade-out');
+                    setTimeout(() => toast.remove(), 300);
+                }, duration);
+            }
+        }
         // Store result data for saving
         let currentResults = [];
         const translationJobIds = new Set();
+        const saveJobIds = new Set();
 
         function refreshAggregateCard() {
             renderAggregateSaveCard(currentResults);
@@ -1443,6 +1502,41 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function pollSaveJob(jobId) {
+            if (!jobId || saveJobIds.has(jobId)) {
+                return;
+            }
+            saveJobIds.add(jobId);
+
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            while (true) {
+                await delay(2000);
+                try {
+                    const response = await fetch(`/api/save-jobs/${encodeURIComponent(jobId)}`);
+                    const job = await parseJsonResponse(response);
+                    if (!job.success) {
+                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'done') {
+                        const fileTypeLabel = (job.fileType || '').toUpperCase();
+                        showToast('success', `${fileTypeLabel} 已保存到: ${job.savePath}`, 8000);
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'error') {
+                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                } catch (error) {
+                    // Silently retry
+                }
+            }
+        }
+
         async function saveFile(container, resultData, fileType, options = {}) {
             if (!resultData) {
                 showStatus('error', '没有可保存的内容');
@@ -1453,8 +1547,8 @@ HTML_TEMPLATE = """
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
 
             try {
-                showStatus('processing', `正在保存 ${fileType.toUpperCase()} 文件...`);
-                const response = await fetch('/api/save', {
+                showStatus('processing', '正在提交后台保存...');
+                const response = await fetch('/api/save-async', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -1470,14 +1564,11 @@ HTML_TEMPLATE = """
 
                 const result = await parseJsonResponse(response);
 
-                if (result.success) {
-                    if (speak) {
-                        showStatus('success', `语音已播放，音频文件已保存到: ${result.savePath}`);
-                    } else {
-                        showStatus('success', `${fileType.toUpperCase()} 文件已保存到: ${result.savePath}`);
-                    }
+                if (result.success && result.job_id) {
+                    showStatus('success', `${fileType.toUpperCase()} 已提交后台保存，可继续处理其他 URL`);
+                    pollSaveJob(result.job_id);
                 } else {
-                    showStatus('error', '保存失败: ' + result.error);
+                    showStatus('error', '保存提交失败: ' + (result.error || 'unknown error'));
                 }
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
@@ -1764,6 +1855,139 @@ def _enqueue_web_translation_job(source_result, llm_provider, lang_mode):
         },
     )
     threading.Thread(target=_run_web_translation_job, args=(job_id,), daemon=True).start()
+    return job_id
+
+def _store_save_job(job_id, payload):
+    with _SAVE_JOBS_LOCK:
+        _SAVE_JOBS[job_id] = payload
+
+
+def _get_save_job(job_id):
+    with _SAVE_JOBS_LOCK:
+        job = _SAVE_JOBS.get(job_id)
+        return copy.deepcopy(job) if job else None
+
+
+def _run_web_save_job(job_id):
+    job = _get_save_job(job_id)
+    if not job:
+        return
+
+    _store_save_job(job_id, {**job, "status": "running", "updated_at": time.time()})
+    try:
+        config = get_config()
+        data = job["data"]
+        fileType = data.get("fileType")
+        saveDir = (data.get("saveDir") or "").strip()
+        customTitle = (data.get("customTitle") or "").strip()
+        resultData = data.get("data", {})
+        if data.get("combine_all"):
+            resultData = build_combined_result_payload(data.get("results", [])) or {}
+        speak = bool(data.get("speak"))
+
+        defaultDirs = {
+            "md": config.get_path("Output", "md_dir", fallback="notes"),
+            "html": config.get_path("Output", "html_dir", fallback="web"),
+            "pdf": config.get_path("Output", "pdf_dir", fallback="pdf"),
+            "audio": config.get_path("Output", "audio_dir", fallback="audio"),
+        }
+
+        if saveDir:
+            targetDir = resolve_user_path(saveDir)
+        else:
+            targetDir = defaultDirs.get(fileType, ".")
+
+        os.makedirs(targetDir, exist_ok=True)
+
+        title = customTitle or resultData.get("title", "Untitled")
+        metadata = resultData.get("metadata", {})
+        html_content = metadata.get("html_content", "")
+        source_url = metadata.get("source_url")
+
+        if fileType == "md":
+            md_content = resultData.get("markdown", "")
+            output_path = build_output_path(
+                title, "md", targetDir, source_url=source_url, html_content=html_content
+            )
+            save_path = OutputHandler.save_markdown(
+                title,
+                md_content,
+                config,
+                output_path=output_path,
+                html_content=html_content,
+                add_front_matter=metadata.get("add_front_matter", True),
+                translated_title=metadata.get("translated_title"),
+                source_url=metadata.get("source_url"),
+                translator=metadata.get("translator"),
+                archive_url=metadata.get("archive_url"),
+            )
+        elif fileType == "html":
+            cleaned_html = resultData.get("html", "")
+            output_path = build_output_path(
+                title, "html", targetDir, source_url=source_url, html_content=html_content
+            )
+            save_path = OutputHandler.save_html(
+                title,
+                cleaned_html,
+                config,
+                inline=metadata.get("html_inline", False),
+                output_path=output_path,
+            )
+        elif fileType == "pdf":
+            md_content = resultData.get("markdown", "")
+            output_path = build_output_path(
+                title, "pdf", targetDir, source_url=source_url, html_content=html_content
+            )
+            save_path = OutputHandler.generate_pdf(
+                title, md_content, config, output_path=output_path
+            )
+        elif fileType == "audio":
+            md_content = resultData.get("markdown", "")
+            output_path = build_output_path(
+                title, "mp3", targetDir, source_url=source_url, html_content=html_content
+            )
+            TTSHandler.run_tts(
+                title, md_content, config, speak=speak, save_path=output_path
+            )
+            save_path = output_path
+        else:
+            raise ValueError(f"Unsupported file type: {fileType}")
+
+        _store_save_job(
+            job_id,
+            {
+                **job,
+                "status": "done",
+                "updated_at": time.time(),
+                "savePath": save_path,
+                "fileType": fileType,
+            },
+        )
+    except Exception as exc:
+        logger.error("Web save job failed: %s", exc)
+        _store_save_job(
+            job_id,
+            {
+                **job,
+                "status": "error",
+                "updated_at": time.time(),
+                "error": str(exc),
+            },
+        )
+
+
+def _enqueue_web_save_job(save_data):
+    job_id = uuid.uuid4().hex
+    _store_save_job(
+        job_id,
+        {
+            "status": "pending",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "data": save_data,
+        },
+    )
+    threading.Thread(target=_run_web_save_job, args=(job_id,), daemon=True).start()
     return job_id
 
 
@@ -2118,6 +2342,43 @@ def download_file(filename):
 
     return jsonify({"error": "File not found"}), 404
 
+
+
+@app.route("/api/save-async", methods=["POST"])
+def save_file_async():
+    """Enqueue a background save job and return immediately."""
+    data = request.get_json(silent=True) or {}
+    fileType = data.get("fileType")
+    if not fileType:
+        return jsonify({"success": False, "error": "File type is required"})
+    try:
+        job_id = _enqueue_web_save_job(data)
+        return jsonify({"success": True, "job_id": job_id})
+    except Exception as exc:
+        logger.error("Failed to enqueue save job: %s", exc)
+        return jsonify({"success": False, "error": str(exc)})
+
+
+@app.route("/api/save-jobs/<job_id>", methods=["GET"])
+def save_job_status(job_id):
+    """Fetch the current status of an async save job."""
+    job = _get_save_job(job_id)
+    if not job:
+        return jsonify({"success": False, "error": "Save job not found"}), 404
+
+    payload = {
+        "success": True,
+        "job_id": job_id,
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    if job.get("status") == "done":
+        payload["savePath"] = job.get("savePath")
+        payload["fileType"] = job.get("fileType")
+    elif job.get("status") == "error":
+        payload["error"] = job.get("error") or "Save failed"
+    return jsonify(payload)
 
 @app.route("/api/save", methods=["POST"])
 def save_file():
