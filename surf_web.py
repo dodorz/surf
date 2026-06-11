@@ -1914,25 +1914,32 @@ def _run_web_save_job(job_id):
         # form re-process > cached data
         translation_job_id = data.get("translation_job_id")
         formData = data.get("formData")
+        cached_pending = (data.get("data") or {}).get("translation_pending")
+        cached_tjid = (data.get("data") or {}).get("translation_job_id")
+        logger.warning(
+            "Save worker resolving: tid=%s formData=%s dataPending=%s dataTid=%s",
+            bool(translation_job_id), bool(formData), bool(cached_pending), bool(cached_tjid),
+        )
         if translation_job_id:
+            logger.warning("Save worker: using explicit translation_job_id=%s", translation_job_id)
             resultData = _wait_for_translation_and_get_result(translation_job_id)
         elif formData:
-            # Check if the cached resultData itself has a pending translation
             cached = data.get("data", {})
             if cached.get("translation_pending") and cached.get("translation_job_id"):
-                logger.info("Save worker: resultData has pending translation, waiting for job %s", cached["translation_job_id"])
+                logger.warning("Save worker: resultData has pending translation, waiting for job %s", cached["translation_job_id"])
                 resultData = _wait_for_translation_and_get_result(cached["translation_job_id"])
             else:
+                logger.info("Save worker: re-processing with formData (lang=%s)", formData.get("lang"))
                 result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
                 resultData = result
         else:
             resultData = data.get("data", {})
-            # Last-resort: if cached data has pending translation, wait for it
+            logger.info("Save worker: using cached resultData, pending=%s", bool(resultData.get("translation_pending")))
             if resultData.get("translation_pending") and resultData.get("translation_job_id"):
+                logger.info("Save worker: cached resultData has pending translation, waiting for job %s", resultData["translation_job_id"])
                 resultData = _wait_for_translation_and_get_result(resultData["translation_job_id"])
             if data.get("combine_all"):
                 resultData = build_combined_result_payload(data.get("results", [])) or {}
-
         defaultDirs = {
             "md": config.get_path("Output", "md_dir", fallback="notes"),
             "html": config.get_path("Output", "html_dir", fallback="web"),
