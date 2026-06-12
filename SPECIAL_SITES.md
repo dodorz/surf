@@ -28,13 +28,14 @@ Each site entry may define:
 4. Xiaohongshu
 5. GitHub
 6. Wikipedia
-7. Bluesky
-8. Weibo
-9. Threads
-10. V2EX
-11. Reddit
-12. NCPSSD
-13. Douban
+7. arXiv
+8. Bluesky
+9. Weibo
+10. Threads
+11. V2EX
+12. Reddit
+13. NCPSSD
+14. Douban
 
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 
@@ -89,6 +90,12 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Use `-t` / `--thread` to include replies. Reply pages (`?p=...`) are fetched and deduplicated when pagination is present.
 - Uses a V2EX-specific DOM parser and direct Markdown payload so generic readability does not mistake replies for the main post.
 
+### arXiv
+- Scope: `https://arxiv.org/abs/<id>`, `https://arxiv.org/pdf/<id>`, and `https://arxiv.org/html/<id>`.
+- Fetches the HTML version of the paper (`/html/<id>v1`) which has the full paper content.
+- Extracts metadata (title, authors, abstract, subjects) from the abstract page.
+- Falls back to abstract page content extraction if the HTML version is unavailable.
+
 ### GitHub
 - Repo URLs such as `https://github.com/USER/REPO` fetch the best matching README Markdown file directly, while front matter `source` remains the repo URL.
 - Branchless Markdown URLs such as `https://github.com/USER/REPO/PATH/TO/FILE.md` fetch from `main`/`master` candidates, while front matter `source` remains the branchless URL.
@@ -127,5 +134,5 @@ Typical change triggers:
 
 ---
 
-**Last Updated**: 2026-05-19
+**Last Updated**: 2026-06-12
 **Doc Version**: 1.0

@@ -375,7 +375,33 @@ surf "https://www.xiaohongshu.com/..." -l trans
 
 ---
 
-### 7. Bluesky
+### 7. arXiv
+
+**域名**: `arxiv.org`
+
+**匹配规则**:
+```regex
+^https?://arxiv\.org/abs/\d{4}\.\d{4,5}
+^https?://arxiv\.org/pdf/\d{4}\.\d{4,5}
+^https?://arxiv\.org/html/\d{4}\.\d{4,5}
+```
+
+**处理函数**: `Fetcher._fetch_arxiv`
+
+**处理流程**:
+1. 从 URL 中提取论文 ID（如 `2605.15184`）
+2. 获取摘要页（`/abs/<id>`）提取元数据：标题、作者、摘要、学科分类
+3. 获取 HTML 版本（`/html/<id>v1`），提取 `<div class="ltx_page_main">` 中的完整论文内容
+4. 构建包含元数据和论文正文的结构化 HTML 文档
+
+**特殊说明**:
+- `/abs/` 页面的 BibTeX 弹窗常被 Readability 误提取，因此优先获取 `/html/` 版本
+- HTML 版本由 LaTeXML 生成，包含完整的论文正文、公式、表格和参考文献
+- 如果 HTML 版本不可用，回退到摘要页内容提取
+
+---
+
+### 8. Bluesky
 
 **域名**: `bsky.app`
 
@@ -407,7 +433,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 
 ---
 
-### 8. 微博 (Weibo)
+### 9. 微博 (Weibo)
 
 **域名**:
 - `weibo.com`
@@ -432,7 +458,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 
 ---
 
-### 9. Threads
+### 10. Threads
 
 **域名**: `threads.net`
 
@@ -454,7 +480,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 
 ---
 
-### 10. V2EX
+### 11. V2EX
 
 **域名**: `v2ex.com` / `www.v2ex.com`
 
@@ -481,7 +507,7 @@ surf "https://v2ex.com/t/1208365" -r -t
 
 ---
 
-### 11. 国家哲学社会科学文献中心 (NCPSSD)
+### 12. 国家哲学社会科学文献中心 (NCPSSD)
 
 **域名**:
 - `ncpssd.cn`

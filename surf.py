@@ -6703,6 +6703,137 @@ class Fetcher:
                 browser.close()
 
     @staticmethod
+    def _fetch_arxiv(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch arxiv paper content.
+
+        Strategy: For /abs/ URLs, redirect to the /html/ version which has the full paper content.
+        The /abs/ page often only returns the BibTeX modal due to Readability extraction issues,
+        while the /html/ version has well-structured content in <div class="ltx_page_main">.
+
+        Also extracts metadata (title, authors, abstract) from the abstract page and includes it.
+        """
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        path = parsed.path
+
+        # Extract paper ID from various arxiv URL formats
+        # e.g., /abs/2605.15184, /abs/2605.15184v1, /pdf/2605.15184
+        paper_id_match = re.match(r"/(?:abs|pdf|html)/(\d{4}\.\d{4,5}(?:v\d+)?)", path)
+        if not paper_id_match:
+            logger.warning(f"Cannot extract paper ID from arxiv URL: {url}")
+            return None
+
+        paper_id_full = paper_id_match.group(1)
+        # Strip version suffix for HTML URL construction
+        paper_id = re.sub(r"v\d+$", "", paper_id_full)
+
+        logger.info(f"Fetching arxiv paper: {paper_id}")
+
+        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        # Fetch the abstract page to extract metadata
+        abs_url = f"https://arxiv.org/abs/{paper_id}"
+        html_url = f"https://arxiv.org/html/{paper_id}v1"
+
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            abs_response = _requests_get_with_system_trust_interruptibly(abs_url, headers=headers, timeout=15)
+            abs_response.raise_for_status()
+            abs_html = Fetcher._decode_response_text(abs_response)
+        except Exception as e:
+            logger.warning(f"Failed to fetch arxiv abstract page: {e}")
+            abs_html = ""
+
+        # Extract metadata from abstract page using regex (no BS4 dependency needed)
+        title = ""
+        abstract = ""
+        authors = []
+        subjects = ""
+
+        title_match = re.search(r'<h1 class="title mathjax"><span class="descriptor">Title:</span>\s*(.*?)</h1>', abs_html, re.DOTALL)
+        if title_match:
+            title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
+
+        abstract_match = re.search(r'<blockquote class="abstract mathjax">\s*<span class="descriptor">Abstract:</span>\s*(.*?)</blockquote>', abs_html, re.DOTALL)
+        if abstract_match:
+            abstract = re.sub(r"<[^>]+>", "", abstract_match.group(1)).strip()
+
+        authors_match = re.search(r'<div class="authors"><span class="descriptor">Authors:</span>(.*?)</div>', abs_html, re.DOTALL)
+        if authors_match:
+            authors = [re.sub(r"<[^>]+>", "", a).strip() for a in re.findall(r"<a[^>]*>(.*?)</a>", authors_match.group(1))]
+
+        subjects_match = re.search(r'<span class="primary-subject">(.*?)</span>', abs_html)
+        if subjects_match:
+            subjects = re.sub(r"<[^>]+>", "", subjects_match.group(1)).strip()
+
+        # Fetch the HTML version of the paper
+        try:
+            html_response = _requests_get_with_system_trust_interruptibly(html_url, headers=headers, timeout=30)
+            html_response.raise_for_status()
+            paper_html = Fetcher._decode_response_text(html_response)
+        except Exception as e:
+            logger.warning(f"Failed to fetch arxiv HTML version: {e}")
+            paper_html = ""
+
+        if not paper_html:
+            # Fallback: try to extract from abstract page directly
+            # The abstract page has the content in #abs div
+            if abs_html:
+                abs_content_match = re.search(r'<div id="content-inner">(.*?)<div class="submission-history">', abs_html, re.DOTALL)
+                if abs_content_match:
+                    content = abs_content_match.group(1)
+                    content = re.sub(r'<div class="extra-services">.*', "", content, flags=re.DOTALL)
+                    content = re.sub(r'<div class="endorsers">.*', "", content, flags=re.DOTALL)
+                    return f"<html><head><meta charset='utf-8'><title>{title}</title></head><body>{content}</body></html>"
+            return None
+
+        # Extract main content from HTML version
+        main_content_match = re.search(r'<div class="ltx_page_main">(.*?)</div>\s*</div>\s*<footer', paper_html, re.DOTALL)
+        if not main_content_match:
+            # Try broader match
+            main_content_match = re.search(r'<div class="ltx_page_main">(.*?)<footer', paper_html, re.DOTALL)
+
+        main_content = main_content_match.group(1) if main_content_match else ""
+
+        if not main_content:
+            # Try article tag
+            article_match = re.search(r"<article[^>]*>(.*?)</article>", paper_html, re.DOTALL)
+            main_content = article_match.group(1) if article_match else ""
+
+        # Build final HTML with metadata
+        html_parts = [
+            "<!DOCTYPE html>",
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{title}</title>",
+            "</head><body>",
+        ]
+
+        if title:
+            html_parts.append(f"<h1>{title}</h1>")
+
+        if authors:
+            html_parts.append(f"<p><strong>Authors:</strong> {', '.join(authors)}</p>")
+
+        if subjects:
+            html_parts.append(f"<p><strong>Subjects:</strong> {subjects}</p>")
+
+        html_parts.append(f'<p><strong>arXiv:</strong> <a href="{abs_url}">{paper_id}</a></p>')
+
+        if abstract:
+            html_parts.append(f"<div><h2>Abstract</h2><p>{abstract}</p></div>")
+
+        if main_content:
+            html_parts.append(main_content)
+
+        html_parts.append("</body></html>")
+
+        return "".join(html_parts)
+
+    @staticmethod
     def _fetch_wikipedia(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Wikipedia article with content optimization.
@@ -8086,6 +8217,14 @@ SPECIAL_SITE_HANDLERS = {
         ],
         "handler": Fetcher._fetch_github_readme,
         "skip_title_translation": True,  # Don't translate GitHub repo names, but content can be translated
+    },
+    "arxiv": {
+        "patterns": [
+            r"^https?://arxiv\.org/abs/\d{4}\.\d{4,5}",
+            r"^https?://arxiv\.org/pdf/\d{4}\.\d{4,5}",
+            r"^https?://arxiv\.org/html/\d{4}\.\d{4,5}",
+        ],
+        "handler": Fetcher._fetch_arxiv,
     },
     "wikipedia": {
         "patterns": [
