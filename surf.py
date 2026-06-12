@@ -6753,6 +6753,7 @@ class Fetcher:
         abstract = ""
         authors = []
         subjects = ""
+        created_time = ""
 
         title_match = re.search(r'<h1 class="title mathjax"><span class="descriptor">Title:</span>\s*(.*?)</h1>', abs_html, re.DOTALL)
         if title_match:
@@ -6769,6 +6770,21 @@ class Fetcher:
         subjects_match = re.search(r'<span class="primary-subject">(.*?)</span>', abs_html)
         if subjects_match:
             subjects = re.sub(r"<[^>]+>", "", subjects_match.group(1)).strip()
+
+        # Extract initial submission time from submission history
+        # Format: [v1] Thu, 14 May 2026 17:58:41 UTC (516 KB)
+        submission_match = re.search(r'\[v1\].*?(\w+,\s+\d+\s+\w+\s+\d{4}\s+\d{2}:\d{2}:\d{2}\s+UTC)', abs_html, re.DOTALL)
+        if submission_match:
+            raw_time = submission_match.group(1).strip()
+            try:
+                from email.utils import parsedate_to_datetime
+                from datetime import datetime, timezone
+                # Parse: "Thu, 14 May 2026 17:58:41 UTC"
+                dt = datetime.strptime(raw_time, "%a, %d %b %Y %H:%M:%S %Z")
+                dt = dt.replace(tzinfo=timezone.utc)
+                created_time = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                created_time = raw_time
 
         # Fetch the HTML version of the paper
         try:
@@ -6805,12 +6821,20 @@ class Fetcher:
             main_content = article_match.group(1) if article_match else ""
 
         # Build final HTML with metadata
+        from html import escape
         html_parts = [
             "<!DOCTYPE html>",
             "<html><head><meta charset='utf-8'>",
-            f"<title>{title}</title>",
-            "</head><body>",
+            "<meta name='surf-source-site' content='arxiv'>",
         ]
+
+        if authors:
+            html_parts.append(f"<meta name='surf-author' content='{escape(', '.join(authors))}'>")
+        if created_time:
+            html_parts.append(f"<meta name='surf-created' content='{escape(created_time)}'>")
+
+        html_parts.append(f"<title>{title}</title>")
+        html_parts.append("</head><body>")
 
         if title:
             html_parts.append(f"<h1>{title}</h1>")
