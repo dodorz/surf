@@ -88,4 +88,26 @@ print(f"  reason: {r6['reason']}")
 assert not r6['detected'], "FAIL: Normal site flagged as paywall"
 print("  PASS")
 
+# ---- Test 7: Free article on known paywall domain with anti-bot CAPTCHA (Wired) ----
+wired_free_article = """<html lang="en"><head>
+<title>All the Ways Europe Is Ditching American Technology | WIRED</title>
+<meta property="article:content_tier" content="free"/>
+<meta property="og:title" content="All the Ways Europe Is Ditching American Technology"/>
+</head><body>
+<script data-cfasync="false" src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+<article>
+<h1>All the Ways Europe Is Ditching American Technology</h1>
+<p>A WIRED timeline shows how dozens of governments, companies, and other organizations across Europe are moving, or planning to shift, away from US Big Tech.</p>
+<p>The movement has accelerated in recent months, with several European governments announcing plans to reduce their dependence on American cloud providers, software platforms, and infrastructure services.</p>
+<p>This shift represents one of the most significant realignments in the global technology landscape since the rise of Silicon Valley dominance in the early 2000s.</p>
+</article>
+</body></html>"""
+r7 = Fetcher._detect_paywall(wired_free_article, url="https://www.wired.com/story/all-the-ways-europe-is-ditching-american-technology/")
+print(f"\nTest 7 — Free article on Wired with Cloudflare CAPTCHA:")
+print(f"  detected: {r7['detected']} (expected: False)")
+print(f"  confidence: {r7['confidence']:.0%}")
+print(f"  reason: {r7['reason']}")
+assert not r7['detected'], "FAIL: Free article on Wired incorrectly flagged as paywall"
+print("  PASS")
+
 print("\nAll tests passed!")

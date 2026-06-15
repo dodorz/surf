@@ -1617,8 +1617,8 @@ class Fetcher:
                 decoded_text = Fetcher._decode_response_text(response)
 
                 # Check if likely dynamic (heuristic: very short content or explicit noscript)
-                if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
-                    logger.info("Content seems short or requires JS. Switching to browser...")
+                if len(decoded_text) < 1000 or "<noscript>" in decoded_text or Fetcher._is_cloudflare_challenge(decoded_text):
+                    logger.info("Content seems short, requires JS, or is a Cloudflare challenge. Switching to browser...")
                     should_use_browser = True
                 else:
                     return decoded_text
@@ -1630,8 +1630,8 @@ class Fetcher:
                         response = _requests_get_with_system_trust_interruptibly(url, headers=headers, timeout=10)
                         response.raise_for_status()
                         decoded_text = Fetcher._decode_response_text(response)
-                        if len(decoded_text) < 1000 or "<noscript>" in decoded_text:
-                            logger.info("Direct retry succeeded but content still seems short or requires JS. Switching to browser...")
+                        if len(decoded_text) < 1000 or "<noscript>" in decoded_text or Fetcher._is_cloudflare_challenge(decoded_text):
+                            logger.info("Direct retry succeeded but content still seems short, requires JS, or is a Cloudflare challenge. Switching to browser...")
                             should_use_browser = True
                         else:
                             return decoded_text
@@ -7654,7 +7654,7 @@ class Fetcher:
     _KNOWN_PAYWALL_DOMAINS = {
         "medium.com", "nytimes.com", "wsj.com", "bloomberg.com",
         "ft.com", "economist.com", "washingtonpost.com", "latimes.com",
-        "theatlantic.com", "newyorker.com", "wired.com", "hbr.org",
+        "theatlantic.com", "newyorker.com", "hbr.org",
         "barrons.com", "businessinsider.com", "telegraph.co.uk",
         "thetimes.co.uk", "scientificamerican.com", "technologyreview.com",
         "newrepublic.com", "foreignaffairs.com", "nationalgeographic.com",
@@ -7718,6 +7718,18 @@ class Fetcher:
         re.compile(r"checking\s+(if\s+the\s+site\s+connection\s+is\s+secure|your\s+browser)", re.IGNORECASE),
         re.compile(r"(dd\s*=\s*\{|data-cfasync\s*=\s*[\"']false[\"'])", re.IGNORECASE),
     ]
+
+    @staticmethod
+    def _is_cloudflare_challenge(html_content):
+        if not html_content:
+            return False
+        lower = html_content.lower()
+        if "challenges.cloudflare.com" in lower:
+            return True
+        for pattern in Fetcher._ANTI_BOT_TEXT_PATTERNS:
+            if pattern.search(lower):
+                return True
+        return False
 
     # ─────────────────────────────────────────────────────────────────
     # Paywall detection
@@ -7855,11 +7867,26 @@ class Fetcher:
                 signals.append(f"truncated content: {len(article_text)} chars")
                 confidence += 0.15
 
+        # ── Explicit free-content signals ──
+        # Some sites (e.g. Wired) mark articles as free via meta tags.
+        # Respect these to avoid false positives on mixed free/paid domains.
+        for meta in soup.find_all("meta"):
+            prop = (meta.get("property") or meta.get("name") or "").lower()
+            content = (meta.get("content") or "").lower()
+            if prop == "article:content_tier" and content in ("free", "non-subscriber", "non-subscription"):
+                signals.append(f"explicit free tier: {prop}={content}")
+                confidence -= 0.60
+                break
+            if prop == "article:access" and content == "public":
+                signals.append(f"explicit free tier: {prop}={content}")
+                confidence -= 0.60
+                break
+
         detected = confidence >= 0.50
         return {
             "detected": detected,
             "reason": "; ".join(signals) if signals else None,
-            "confidence": min(confidence, 1.0),
+            "confidence": max(min(confidence, 1.0), 0.0),
         }
 
     # ─────────────────────────────────────────────────────────────────
