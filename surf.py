@@ -7804,7 +7804,6 @@ class Fetcher:
         for element in soup.select(
             "[class*='paywall'], [id*='paywall'], "
             "[class*='metered'], [class*='meter-'], [class*='premium'], "
-            "[class*='subscriber'], [class*='subscription'], "
             "[class*='register-wall'], [class*='sign-in-wall'], [class*='login-wall'], "
             "[class*='content-gate'], [class*='content-locked'], "
             "[class*='article-locked'], [class*='article-gated'], "
