@@ -1367,9 +1367,40 @@ HTML_TEMPLATE = """
                         result.input_url = input;
                         currentResults.push(result);
                         window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
-                        const card = renderResultCard(result, i, inputs.length);
-                        if (result.translation_pending && result.translation_job_id) {
-                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
+                        if (data.save_full_text) {
+                            showStatus('processing', '全文保存模式，正在直接保存...');
+                            const fileType = getCheckedRadioValue('format') || 'md';
+                            const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
+                            const autoTitle = (result.defaultSaveTitle || '').trim();
+                            const saveBody = {
+                                fileType,
+                                saveDir,
+                                customTitle: autoTitle,
+                                data: result,
+                                formData: data,
+                                speak: false
+                            };
+                            try {
+                                const saveResp = await fetch('/api/save-async', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(saveBody)
+                                });
+                                const saveResult = await parseJsonResponse(saveResp);
+                                if (saveResult.success && saveResult.job_id) {
+                                    showStatus('success', '全文保存已加入后台队列');
+                                    pollSaveJob(saveResult.job_id);
+                                } else {
+                                    showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
+                                }
+                            } catch (saveErr) {
+                                showStatus('error', '全文保存请求失败: ' + saveErr.message);
+                            }
+                        } else {
+                            const card = renderResultCard(result, i, inputs.length);
+                            if (result.translation_pending && result.translation_job_id) {
+                                pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
+                            }
                         }
                         successCount += 1;
                     } else {
