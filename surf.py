@@ -4266,10 +4266,24 @@ class Fetcher:
 
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, proxy=pw_proxy) if pw_proxy else p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile MicroMessenger/8.0.30"
-            )
+            launch_args = {
+                "headless": True,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-web-security",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-infobars",
+                    "--disable-background-timer-throttling",
+                    "--disable-popup-blocking",
+                    "--disable-extensions",
+                ],
+            }
+            if pw_proxy:
+                launch_args["proxy"] = pw_proxy
+            browser = p.chromium.launch(**launch_args)
+            context = Fetcher._create_stealth_context(browser, url)
             page = context.new_page()
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
