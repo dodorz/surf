@@ -7,6 +7,7 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
+- **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
 - **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), and NCPSSD with reusable saved authentication support.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
@@ -208,6 +209,40 @@ uv run surf.py "https://example.com"
 ```
 
 On Windows, path-style arguments such as `--config`, `-o/--output`, `--export-auth`, and `--import-auth` also accept Unix-style input. For example, `~/Note/out.md` resolves under `%USERPROFILE%`.
+
+### Local Files
+
+Surf can read and process local HTML, Markdown, and text files directly. Supported input formats:
+
+- **OS paths**: `/tmp/article.html`, `~/docs/readme.md`, `C:\Temp\notes.txt`
+- **Unix-style on Windows**: `C:/Temp/article.md` (auto-converts `/` to `\`)
+- **file:// URIs**: `file:///tmp/article.html`
+
+Supported file types: `.html`, `.htm`, `.md`, `.txt`, `.rst`, `.adoc` (others are treated as plain text).
+
+```bash
+# Read a local HTML file
+uv run surf.py /tmp/article.html
+
+# Read a local Markdown file (translated by default)
+uv run surf.py ~/docs/readme.md
+
+# Local file with Windows path
+uv run surf.py "C:\Temp\notes.txt"
+
+# file:// URI
+uv run surf.py file:///tmp/article.html
+
+# Keep original language (no translation)
+uv run surf.py /tmp/article.md -r
+
+# Generate PDF from local HTML
+uv run surf.py /tmp/article.html -p
+```
+
+- `.html`/`.htm` files are processed as-is.
+- `.md` files are read as Markdown content and passed through the standard translation/output pipeline.
+- `.txt` and other files are converted to HTML paragraphs before processing.
 
 ### Proxy Modes (-x / -c / -n)
 

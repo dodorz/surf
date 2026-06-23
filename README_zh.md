@@ -7,6 +7,7 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
+- **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
 - **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD 等网站优化处理，支持复用已保存的登录态。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
@@ -186,6 +187,40 @@ surf "https://example.com"
 ```
 
 在 Windows 上，`--config`、`-o/--output`、`--export-auth`、`--import-auth` 等路径参数都支持这种写法，例如 `~/Note/out.md`。
+
+### 本地文件
+
+Surf 可以直接读取和处理本地 HTML、Markdown 和文本文件。支持的输入格式：
+
+- **操作系统路径**：`/tmp/article.html`、`~/docs/readme.md`、`C:\Temp\notes.txt`
+- **Windows 下 Unix 风格路径**：`C:/Temp/article.md`（自动将 `/` 转换为 `\`）
+- **file:// URI**：`file:///tmp/article.html`
+
+支持的文件类型：`.html`、`.htm`、`.md`、`.txt`、`.rst`、`.adoc`（其他类型按纯文本处理）。
+
+```bash
+# 读取本地 HTML 文件
+surf /tmp/article.html
+
+# 读取本地 Markdown 文件（默认翻译）
+surf ~/docs/readme.md
+
+# Windows 路径
+surf "C:\Temp\notes.txt"
+
+# file:// URI
+surf file:///tmp/article.html
+
+# 保留原文（不翻译）
+surf /tmp/article.md -r
+
+# 从本地 HTML 生成 PDF
+surf /tmp/article.html -p
+```
+
+- `.html`/`.htm` 文件按原样处理。
+- `.md` 文件作为 Markdown 内容读取，经过标准翻译/输出流程处理。
+- `.txt` 和其他文件会先转换为 HTML 段落再处理。
 
 ### 输出路径 (-o / -O)
 

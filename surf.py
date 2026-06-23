@@ -988,6 +988,178 @@ def resolve_user_path(path):
     return os.path.expanduser(raw_path)
 
 
+_LOCAL_FILE_EXTENSIONS = {".html", ".htm", ".md", ".txt", ".rst", ".adoc"}
+
+
+def _is_local_file_input(url_string):
+    """
+    Detect whether the user-supplied string refers to a local file.
+
+    Returns True for:
+    - file:// URIs  (e.g. file:///tmp/foo.html, file://C:/Temp/foo.md)
+    - Bare OS paths (e.g. C:\\Temp\\foo.html, /tmp/foo.md, ~/docs/readme.md)
+    """
+    if not url_string:
+        return False
+
+    raw = url_string.strip()
+
+    if raw.lower().startswith("file://"):
+        return True
+
+    if raw.startswith("-"):
+        return False
+
+    resolved = resolve_user_path(raw)
+    if resolved and os.path.isfile(resolved):
+        return True
+
+    ext = os.path.splitext(raw)[1].lower()
+    if ext in _LOCAL_FILE_EXTENSIONS:
+        return True
+
+    return False
+
+
+def _resolve_file_url_input(url_string):
+    """
+    Turn a local-file input string into an absolute filesystem path.
+
+    Accepts file:// URIs, OS paths, and Unix-style paths on Windows.
+    Returns the resolved absolute path, or None if the file does not exist.
+    """
+    if not url_string:
+        return None
+
+    raw = url_string.strip()
+
+    if raw.lower().startswith("file://"):
+        parsed = urlparse(raw)
+        file_path = unquote(parsed.path)
+        if os.name == "nt" and file_path.startswith("/") and len(file_path) > 2 and file_path[2] == ":":
+            file_path = file_path[1:]
+        elif os.name == "nt" and file_path.startswith("/"):
+            file_path = file_path.lstrip("/")
+        file_path = resolve_user_path(file_path)
+        if file_path and os.path.isfile(file_path):
+            return file_path
+        return None
+
+    resolved = resolve_user_path(raw)
+    if resolved and os.path.isfile(resolved):
+        return resolved
+
+    return None
+
+
+def _detect_file_encoding(file_path):
+    """Best-effort encoding detection for a local text file."""
+    try:
+        from chardet import detect as chardet_detect
+    except ImportError:
+        pass
+
+    try:
+        with open(file_path, "rb") as f:
+            raw = f.read(65536)
+    except OSError:
+        return "utf-8"
+
+    try:
+        from chardet import detect as chardet_detect
+
+        result = chardet_detect(raw)
+        if result and result.get("encoding"):
+            enc = result["encoding"]
+            confidence = result.get("confidence", 0)
+            if confidence > 0.5:
+                return enc
+    except (ImportError, Exception):
+        pass
+
+    if raw[:3] == b"\xef\xbb\xbf":
+        return "utf-8-sig"
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return "utf-16"
+
+    if b"\x00\x00" in raw[:1024]:
+        return "utf-16"
+
+    return "utf-8"
+
+
+def _read_local_file(file_path):
+    """
+    Read a local file and return (html_content, display_path).
+
+    - .html/.htm files are read as-is.
+    - .md files are wrapped in a direct-markdown payload.
+    - .txt files are wrapped in <pre> paragraphs.
+    """
+    file_path = os.path.abspath(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    basename = os.path.basename(file_path)
+
+    encoding = _detect_file_encoding(file_path)
+    try:
+        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+            content = f.read()
+    except OSError as e:
+        raise ValueError(f"Cannot read local file {file_path}: {e}")
+
+    if not content.strip():
+        raise ValueError(f"Local file is empty: {file_path}")
+
+    if ext in {".html", ".htm"}:
+        logger.info(f"Reading local HTML file: {file_path}")
+        return content, file_path
+
+    if ext == ".md":
+        logger.info(f"Reading local Markdown file: {file_path}")
+        html_payload = _build_direct_markdown_payload(
+            markdown_text=content,
+            title=basename,
+            source_url=f"file:///{file_path.replace(os.sep, '/')}",
+            site_name="local-markdown",
+        )
+        return html_payload, file_path
+
+    if ext == ".txt":
+        logger.info(f"Reading local text file: {file_path}")
+        paragraphs = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped:
+                paragraphs.append(f"<p>{escape(stripped)}</p>")
+            else:
+                paragraphs.append("<br>")
+        body = "\n".join(paragraphs)
+        html_content = (
+            f"<html><head><meta charset='utf-8'>"
+            f"<title>{escape(basename)}</title>"
+            f"<meta name='surf-source-site' content='local-text'>"
+            f"</head><body><article>\n{body}\n</article></body></html>"
+        )
+        return html_content, file_path
+
+    logger.info(f"Reading local file as text: {file_path}")
+    paragraphs = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped:
+            paragraphs.append(f"<p>{escape(stripped)}</p>")
+        else:
+            paragraphs.append("<br>")
+    body = "\n".join(paragraphs)
+    html_content = (
+        f"<html><head><meta charset='utf-8'>"
+        f"<title>{escape(basename)}</title>"
+        f"<meta name='surf-source-site' content='local-file'>"
+        f"</head><body><article>\n{body}\n</article></body></html>"
+    )
+    return html_content, file_path
+
+
 def _get_default_config_path():
     """
     Resolve the default config path.
@@ -10930,7 +11102,7 @@ def main():
     _install_interrupt_handler()
     parser = argparse.ArgumentParser(
         prog="uv run surf",
-        description="Surf - Convert URL to Markdown/PDF/HTML/Audio",
+        description="Surf - Convert URL or local file to Markdown/PDF/HTML/Audio",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
         epilog="""
@@ -10949,6 +11121,14 @@ Examples:
   surf -t https://x.com/user/status/123         # Fetch later replies in the thread
   surf --thread before https://x.com/user/status/123
   surf --thread both --thread-author same https://x.com/user/status/123
+
+Local Files:
+  surf /tmp/article.html                        # Read local HTML file
+  surf ~/docs/readme.md                         # Read local Markdown file
+  surf C:\\Temp\\notes.txt                      # Windows path
+  surf file:///tmp/article.html                 # file:// URI
+  surf /tmp/article.md -r                       # Local file, keep original language
+  surf /tmp/article.html -p                     # Local HTML to PDF
 
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
@@ -10996,7 +11176,7 @@ Twitter/X Backend:
     parser.add_argument(
         "url",
         nargs="?",
-        help="URL to process (not required for auth-management commands such as --login, --export-auth, --import-auth, or --clear-auth)",
+        help="URL or local file path to process (supports http(s)://, file://, OS paths like /tmp/doc.md or C:\\doc.html). Not required for auth-management commands.",
     )
 
     # Output format
@@ -11239,12 +11419,19 @@ Twitter/X Backend:
     if not args.url:
         parser.error("URL is required (unless using --login or --clear-auth)")
 
-    args.url = Fetcher._resolve_common_short_url(
-        args.url,
-        config,
-        proxy_mode_override=proxy_mode,
-        custom_proxy_override=custom_proxy,
-    )
+    local_file_path = None
+    if _is_local_file_input(args.url):
+        local_file_path = _resolve_file_url_input(args.url)
+        if not local_file_path:
+            parser.error(f"Local file not found: {args.url}")
+        logger.info(f"Detected local file: {local_file_path}")
+    else:
+        args.url = Fetcher._resolve_common_short_url(
+            args.url,
+            config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
 
     # Determine final format
     output_format = "md"  # default
@@ -11329,58 +11516,65 @@ Twitter/X Backend:
 
     # 1. Fetch
     _raise_if_interrupted()
-    try:
-        html_content = Fetcher.fetch(
-            args.url,
-            config=config,
-            use_browser=args.browser,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-            fetch_thread=fetch_thread,
-            fetch_thread_author=fetch_thread_author,
-            twitter_backend=args.twitter_backend,
-            twitter_cli_bin=args.twitter_cli_bin,
-            twitter_browser=args.twitter_browser,
-            twitter_profile=args.twitter_profile,
-        )
-    except Exception as e:
-        logger.error(f"Failed to fetch {args.url}: {e}")
-        diagnosis = _diagnose_network_fetch_failure(args.url, e)
-        if diagnosis:
-            logger.error(diagnosis)
-        sys.exit(1)
-
-    if not html_content:
-        if Fetcher._is_twitter_url(args.url):
-            logger.error("Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue).")
-        else:
-            logger.error(f"Failed to fetch usable content from {args.url}.")
-        sys.exit(1)
-
-    # ── Paywall detection and archive.is fallback ──
     archive_is_url = None
-    paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
-    if paywall_result and paywall_result.get("detected"):
-        logger.warning(
-            f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
-            f"{paywall_result.get('reason', 'unknown')}"
-        )
-        logger.info("Attempting to fetch from archive.is...")
-        archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
-            args.url,
-            config=config,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-        )
-        if archived_html:
-            logger.info("archive.is snapshot fetched successfully, using it as content source.")
-            archive_is_url = snapshot_url
-            html_content = archived_html
-        else:
-            logger.error("内容受付费墙控制，未抓取全文")
-            logger.error(f"  原始 URL: {args.url}")
-            logger.error("  提示：可手动访问 https://archive.is/ 搜索该页面获取快照。")
+    if local_file_path:
+        try:
+            html_content, _ = _read_local_file(local_file_path)
+        except Exception as e:
+            logger.error(f"Failed to read local file: {e}")
             sys.exit(1)
+    else:
+        try:
+            html_content = Fetcher.fetch(
+                args.url,
+                config=config,
+                use_browser=args.browser,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+                fetch_thread=fetch_thread,
+                fetch_thread_author=fetch_thread_author,
+                twitter_backend=args.twitter_backend,
+                twitter_cli_bin=args.twitter_cli_bin,
+                twitter_browser=args.twitter_browser,
+                twitter_profile=args.twitter_profile,
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch {args.url}: {e}")
+            diagnosis = _diagnose_network_fetch_failure(args.url, e)
+            if diagnosis:
+                logger.error(diagnosis)
+            sys.exit(1)
+
+        if not html_content:
+            if Fetcher._is_twitter_url(args.url):
+                logger.error("Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue).")
+            else:
+                logger.error(f"Failed to fetch usable content from {args.url}.")
+            sys.exit(1)
+
+        # ── Paywall detection and archive.is fallback ──
+        paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
+        if paywall_result and paywall_result.get("detected"):
+            logger.warning(
+                f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
+                f"{paywall_result.get('reason', 'unknown')}"
+            )
+            logger.info("Attempting to fetch from archive.is...")
+            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+                args.url,
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+            if archived_html:
+                logger.info("archive.is snapshot fetched successfully, using it as content source.")
+                archive_is_url = snapshot_url
+                html_content = archived_html
+            else:
+                logger.error("内容受付费墙控制，未抓取全文")
+                logger.error(f"  原始 URL: {args.url}")
+                logger.error("  提示：可手动访问 https://archive.is/ 搜索该页面获取快照。")
+                sys.exit(1)
 
     _raise_if_interrupted()
     try:
