@@ -42,7 +42,7 @@ surf "https://example.com" -r
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
-- **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr-images` or `[OCR].enabled = true`.
+- **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
 - **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
@@ -342,29 +342,29 @@ uv run surf.py "https://v2ex.com/t/1208365" -r
 uv run surf.py "https://v2ex.com/t/1208365" -r -t
 ```
 
-### Image OCR (--ocr-images / --no-ocr-images)
+### Image OCR (--ocr / --no-ocr)
 
 Run local OCR on article images and append recognized text below each image:
 
 ```bash
-uv run surf.py "https://example.com/article" --ocr-images
-uv run surf.py "https://www.xiaohongshu.com/explore/..." --no-ocr-images
-uv run surf.py "https://example.com/article" --ocr-images --ocr-lang eng
-uv run surf.py "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
+uv run surf.py "https://example.com/article" --ocr
+uv run surf.py "https://www.xiaohongshu.com/explore/..." --no-ocr
+uv run surf.py "https://example.com/article" --ocr --ocr-lang eng
+uv run surf.py "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
 ```
 
 #### Direct Image OCR
 
-When `--ocr-images` is followed by a local image file path, Surf runs OCR directly on the image and prints the recognized text:
+When `--ocr` is followed by a local image file path, Surf runs OCR directly on the image and prints the recognized text:
 
 ```bash
 # OCR a local image (any supported format: jpg, png, bmp, tiff, gif, webp)
-surf --ocr-images /path/to/image.png
-surf --ocr-images C:\Users\me\scan.jpg
-surf --ocr-images file:///tmp/screenshot.png
+surf --ocr /path/to/image.png
+surf --ocr C:\Users\me\scan.jpg
+surf --ocr file:///tmp/screenshot.png
 
 # With specific engine and language
-surf --ocr-images photo.png --ocr-engine tesseract --ocr-lang eng
+surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 ```
 
 Notes:

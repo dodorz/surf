@@ -8518,7 +8518,7 @@ SPECIAL_SITE_HANDLERS = {
         "handler": Fetcher._fetch_xiaohongshu,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
         "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
-        "default_ocr_images": True,
+        "default_ocr": True,
     },
     "ncpssd": {
         "patterns": [
@@ -8966,11 +8966,11 @@ class ContentProcessor:
 class OcrHandler:
     @staticmethod
     def _is_enabled_for_site(site_name, site_config, args, config):
-        if getattr(args, "no_ocr_images", False):
+        if getattr(args, "no_ocr", False):
             return False
-        if getattr(args, "ocr_images", False):
+        if getattr(args, "ocr", False):
             return True
-        if site_config and site_config.get("default_ocr_images"):
+        if site_config and site_config.get("default_ocr"):
             return True
         value = config.get("OCR", "enabled", fallback="false")
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -11244,9 +11244,9 @@ Authentication:
   surf --clear-auth douban                   # Clear auth for Douban
 
 OCR:
-  surf --ocr-images URL                      # Run local OCR on article images
-  surf --ocr-images /path/to/image.png       # OCR a local image directly
-  surf --no-ocr-images URL                   # Disable OCR, including Xiaohongshu default
+  surf --ocr URL                             # Run local OCR on article images
+  surf --ocr /path/to/image.png              # OCR a local image directly
+  surf --no-ocr URL                          # Disable OCR, including Xiaohongshu default
   surf --ocr-engine rapidocr URL             # Prefer RapidOCR, fallback to Tesseract
   surf --ocr-engine tesseract URL            # Force Tesseract only
   Xiaohongshu:                              OCR on images is enabled by default
@@ -11261,7 +11261,7 @@ Twitter/X Backend:
     parser.add_argument(
         "url",
         nargs="?",
-        help="URL, local file path, or image path to process (supports http(s)://, file://, OS paths; --ocr-images with image paths enables direct OCR). Not required for auth-management commands.",
+        help="URL, local file path, or image path to process (supports http(s)://, file://, OS paths; --ocr with image paths enables direct OCR). Not required for auth-management commands.",
     )
 
     # Output format
@@ -11346,12 +11346,12 @@ Twitter/X Backend:
 
     ocr_group = parser.add_mutually_exclusive_group()
     ocr_group.add_argument(
-        "--ocr-images",
+        "--ocr",
         action="store_true",
         help="Run local OCR on article images; also enables direct OCR when followed by a local image path",
     )
     ocr_group.add_argument(
-        "--no-ocr-images",
+        "--no-ocr",
         action="store_true",
         help="Disable image OCR, including sites that enable it by default",
     )
@@ -11504,7 +11504,7 @@ Twitter/X Backend:
     if not args.url:
         parser.error("URL is required (unless using --login or --clear-auth)")
 
-    # Direct image OCR mode: --ocr-images with a local image path
+    # Direct image OCR mode: --ocr with a local image path
     if _is_local_image_input(args.url):
         image_path = _resolve_image_path(args.url)
         if not image_path:

@@ -1743,8 +1743,8 @@ def build_web_ocr_args(data):
     """Build an args-like object for OCR settings reused from the CLI pipeline."""
     ocr_mode = str(data.get("ocr_mode", "default")).strip().lower()
     return SimpleNamespace(
-        ocr_images=ocr_mode == "on",
-        no_ocr_images=ocr_mode == "off",
+        ocr=ocr_mode == "on",
+        no_ocr=ocr_mode == "off",
         ocr_lang=(data.get("ocr_lang") or "").strip() or None,
         ocr_engine=(data.get("ocr_engine") or "").strip() or None,
     )
@@ -2180,7 +2180,7 @@ def resolve_web_site_defaults(config, url=None):
     if url:
         _, site_name, site_config = _get_handler_for_url(url)
 
-    args = SimpleNamespace(ocr_images=False, no_ocr_images=False)
+    args = SimpleNamespace(ocr=False, no_ocr=False)
     ocr_enabled = OcrHandler._is_enabled_for_site(site_name, site_config, args, config)
     lang_mode = (
         "raw"

@@ -25,7 +25,7 @@
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
 - **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用，也适用于 Reddit 等需要 Cookie 的站点。
-- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr-images` 或在 `[OCR].enabled = true` 中开启。
+- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr` 或在 `[OCR].enabled = true` 中开启。
 - **内嵌 SVG 插图保留**：会将正文中的内嵌 SVG 图表转换为 Markdown 图片引用，同时过滤装饰性图标。
 
 ### 特殊网站策略
@@ -293,29 +293,29 @@ surf "https://example.com" --verbose   # 详细日志输出
 surf --version                         # 查看版本
 ```
 
-### 插图 OCR (--ocr-images / --no-ocr-images)
+### 插图 OCR (--ocr / --no-ocr)
 
 对文章插图执行本地 OCR，并把识别文本追加到图片下方：
 
 ```bash
-surf "https://example.com/article" --ocr-images
-surf "https://www.xiaohongshu.com/explore/..." --no-ocr-images
-surf "https://example.com/article" --ocr-images --ocr-lang eng
-surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
+surf "https://example.com/article" --ocr
+surf "https://www.xiaohongshu.com/explore/..." --no-ocr
+surf "https://example.com/article" --ocr --ocr-lang eng
+surf "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
 ```
 
 #### 直接图片 OCR
 
-当 `--ocr-images` 后跟本地图片文件路径时，Surf 会直接对图片执行 OCR 并输出识别文本：
+当 `--ocr` 后跟本地图片文件路径时，Surf 会直接对图片执行 OCR 并输出识别文本：
 
 ```bash
 # OCR 本地图片（支持 jpg、png、bmp、tiff、gif、webp 等格式）
-surf --ocr-images /path/to/image.png
-surf --ocr-images C:\Users\me\scan.jpg
-surf --ocr-images file:///tmp/screenshot.png
+surf --ocr /path/to/image.png
+surf --ocr C:\Users\me\scan.jpg
+surf --ocr file:///tmp/screenshot.png
 
 # 指定引擎和语言
-surf --ocr-images photo.png --ocr-engine tesseract --ocr-lang eng
+surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 ```
 
 说明：
