@@ -353,6 +353,20 @@ uv run surf.py "https://example.com/article" --ocr-images --ocr-lang eng
 uv run surf.py "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
 ```
 
+#### Direct Image OCR
+
+When `--ocr-images` is followed by a local image file path, Surf runs OCR directly on the image and prints the recognized text:
+
+```bash
+# OCR a local image (any supported format: jpg, png, bmp, tiff, gif, webp)
+surf --ocr-images /path/to/image.png
+surf --ocr-images C:\Users\me\scan.jpg
+surf --ocr-images file:///tmp/screenshot.png
+
+# With specific engine and language
+surf --ocr-images photo.png --ocr-engine tesseract --ocr-lang eng
+```
+
 Notes:
 
 - OCR prefers `rapidocr-onnxruntime` by default.

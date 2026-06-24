@@ -989,6 +989,7 @@ def resolve_user_path(path):
 
 
 _LOCAL_FILE_EXTENSIONS = {".html", ".htm", ".md", ".txt", ".rst", ".adoc"}
+_LOCAL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
 
 
 def _is_local_file_input(url_string):
@@ -1003,6 +1004,9 @@ def _is_local_file_input(url_string):
         return False
 
     raw = url_string.strip()
+
+    if raw.lower().startswith(("http://", "https://")):
+        return False
 
     if raw.lower().startswith("file://"):
         return True
@@ -1158,6 +1162,86 @@ def _read_local_file(file_path):
         f"</head><body><article>\n{body}\n</article></body></html>"
     )
     return html_content, file_path
+
+
+def _is_local_image_input(url_string):
+    """Detect whether the input string refers to a local image file."""
+    if not url_string:
+        return False
+    raw = url_string.strip()
+    if raw.lower().startswith(("http://", "https://")):
+        return False
+    if raw.lower().startswith("file://"):
+        return True
+    if raw.startswith("-"):
+        return False
+    ext = os.path.splitext(raw)[1].lower()
+    if ext in _LOCAL_IMAGE_EXTENSIONS:
+        return True
+    resolved = resolve_user_path(raw)
+    if resolved and os.path.isfile(resolved):
+        ext = os.path.splitext(resolved)[1].lower()
+        if ext in _LOCAL_IMAGE_EXTENSIONS:
+            return True
+    return False
+
+
+def _resolve_image_path(url_string):
+    """Resolve a local image path from user input (OS path or file:// URI)."""
+    if not url_string:
+        return None
+    raw = url_string.strip()
+    if raw.lower().startswith("file://"):
+        parsed = urlparse(raw)
+        file_path = unquote(parsed.path)
+        if os.name == "nt" and file_path.startswith("/") and len(file_path) > 2 and file_path[2] == ":":
+            file_path = file_path[1:]
+        elif os.name == "nt" and file_path.startswith("/"):
+            file_path = file_path.lstrip("/")
+        file_path = resolve_user_path(file_path)
+        if file_path and os.path.isfile(file_path):
+            return file_path
+        return None
+    resolved = resolve_user_path(raw)
+    if resolved and os.path.isfile(resolved):
+        return resolved
+    return None
+
+
+def _ocr_local_image(image_path, args, config):
+    """
+    Run OCR on a local image file and return the recognized text.
+
+    Returns (text, engine_name) or raises ValueError on failure.
+    """
+    from PIL import Image as PilImage  # type: ignore
+
+    image_path = os.path.abspath(image_path)
+    try:
+        image = PilImage.open(image_path)
+        image.load()
+    except Exception as e:
+        raise ValueError(f"Cannot open image file {image_path}: {e}")
+
+    width, height = image.size
+    logger.info(f"Image: {image_path} ({width}x{height})")
+
+    runtime = OcrHandler._create_ocr_runtime(args, config)
+    if not runtime["available"]:
+        raise ValueError(
+            "No usable OCR engine available. Install rapidocr-onnxruntime or configure local tesseract."
+        )
+
+    prepared_image = OcrHandler._prepare_image_for_ocr(image)
+    ocr_text, engine_used = OcrHandler._run_ocr_with_engines(runtime, prepared_image, image_path)
+
+    if not ocr_text:
+        raise ValueError(
+            "OCR produced no text from the image. "
+            "Check image quality, try --ocr-engine tesseract --ocr-lang eng, or try a different image."
+        )
+
+    return ocr_text, engine_used
 
 
 def _get_default_config_path():
@@ -11161,6 +11245,7 @@ Authentication:
 
 OCR:
   surf --ocr-images URL                      # Run local OCR on article images
+  surf --ocr-images /path/to/image.png       # OCR a local image directly
   surf --no-ocr-images URL                   # Disable OCR, including Xiaohongshu default
   surf --ocr-engine rapidocr URL             # Prefer RapidOCR, fallback to Tesseract
   surf --ocr-engine tesseract URL            # Force Tesseract only
@@ -11176,7 +11261,7 @@ Twitter/X Backend:
     parser.add_argument(
         "url",
         nargs="?",
-        help="URL or local file path to process (supports http(s)://, file://, OS paths like /tmp/doc.md or C:\\doc.html). Not required for auth-management commands.",
+        help="URL, local file path, or image path to process (supports http(s)://, file://, OS paths; --ocr-images with image paths enables direct OCR). Not required for auth-management commands.",
     )
 
     # Output format
@@ -11263,7 +11348,7 @@ Twitter/X Backend:
     ocr_group.add_argument(
         "--ocr-images",
         action="store_true",
-        help="Run local OCR on article images (experimental)",
+        help="Run local OCR on article images; also enables direct OCR when followed by a local image path",
     )
     ocr_group.add_argument(
         "--no-ocr-images",
@@ -11418,6 +11503,22 @@ Twitter/X Backend:
     # Check if url is required but not provided
     if not args.url:
         parser.error("URL is required (unless using --login or --clear-auth)")
+
+    # Direct image OCR mode: --ocr-images with a local image path
+    if _is_local_image_input(args.url):
+        image_path = _resolve_image_path(args.url)
+        if not image_path:
+            parser.error(f"Image file not found: {args.url}")
+        try:
+            ocr_text, engine_used = _ocr_local_image(image_path, args, config)
+        except ValueError as e:
+            logger.error(str(e))
+            sys.exit(1)
+        _configure_stdout_utf8()
+        sys.stdout.write(ocr_text)
+        if not ocr_text.endswith("\n"):
+            sys.stdout.write("\n")
+        return
 
     local_file_path = None
     if _is_local_file_input(args.url):

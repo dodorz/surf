@@ -304,6 +304,20 @@ surf "https://example.com/article" --ocr-images --ocr-lang eng
 surf "https://example.com/article" --ocr-images --ocr-engine tesseract --ocr-lang eng
 ```
 
+#### 直接图片 OCR
+
+当 `--ocr-images` 后跟本地图片文件路径时，Surf 会直接对图片执行 OCR 并输出识别文本：
+
+```bash
+# OCR 本地图片（支持 jpg、png、bmp、tiff、gif、webp 等格式）
+surf --ocr-images /path/to/image.png
+surf --ocr-images C:\Users\me\scan.jpg
+surf --ocr-images file:///tmp/screenshot.png
+
+# 指定引擎和语言
+surf --ocr-images photo.png --ocr-engine tesseract --ocr-lang eng
+```
+
 说明：
 
 - OCR 默认优先使用 `rapidocr-onnxruntime`。
