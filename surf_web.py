@@ -84,6 +84,21 @@ from surf import (
 _ROOT_PATH = ""
 
 app = Flask(__name__)
+
+class _PrefixStripper:
+    """WSGI middleware that strips a URL prefix so Flask routes work behind a reverse proxy."""
+
+    def __init__(self, wsgi_app, prefix):
+        self.app = wsgi_app
+        self.prefix = prefix.rstrip("/")
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        if self.prefix and path.startswith(self.prefix):
+            environ["SCRIPT_NAME"] = self.prefix
+            environ["PATH_INFO"] = path[len(self.prefix):]
+        return self.app(environ, start_response)
+
 _TRANSLATION_JOBS = {}
 _TRANSLATION_JOBS_LOCK = threading.Lock()
 _SAVE_JOBS = {}
@@ -2638,6 +2653,7 @@ def run_server(host="127.0.0.1", port=18473, debug=False, root=""):
 
     if _ROOT_PATH:
         app.config["APPLICATION_ROOT"] = _ROOT_PATH
+        app.wsgi_app = _PrefixStripper(app.wsgi_app, _ROOT_PATH)
 
     # Open browser
     base = f"http://{host}:{port}"
