@@ -785,6 +785,28 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
+                <div class="form-group">
+                    <label>内容提取</label>
+                    <div class="radio-group">
+                        <div class="radio-option">
+                            <input type="radio" id="extractor-auto" name="extractor" value="auto" checked>
+                            <label for="extractor-auto">自动</label>
+                        </div>
+                        <div class="radio-option">
+                            <input type="radio" id="extractor-readability" name="extractor" value="readability">
+                            <label for="extractor-readability">Readability</label>
+                        </div>
+                        <div class="radio-option">
+                            <input type="radio" id="extractor-trafilatura" name="extractor" value="trafilatura">
+                            <label for="extractor-trafilatura">Trafilatura</label>
+                        </div>
+                        <div class="radio-option">
+                            <input type="radio" id="extractor-raw" name="extractor" value="raw">
+                            <label for="extractor-raw">原始 HTML</label>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="section-title">输出设置</div>
                 <div class="options-grid">
                     <div class="form-group wide">
@@ -2385,6 +2407,7 @@ def _process_web_request(data, translate_sync=False):
             proxy_mode_override=proxy_override,
             custom_proxy_override=custom_proxy,
             llm_provider=(data.get("llm") or "").strip() or None,
+            extractor=(data.get("extractor") or "auto").strip().lower(),
         )
         source_url = processed["source_url"]
         content_base_url = processed["content_base_url"]

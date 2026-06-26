@@ -344,6 +344,26 @@ Force using Playwright (useful for tricky sites).
 uv run surf.py "https://example.com" --browser
 ```
 
+### Content Extractor (-e / --extractor)
+
+Choose the content extraction library used to remove ads, sidebars, and other clutter:
+
+- `auto` (default): Use Readability first, fall back to Trafilatura if extraction fails
+- `readability`: Use Mozilla Readability algorithm only
+- `trafilatura`: Use Trafilatura only
+- `raw`: Skip extraction entirely, return original HTML
+
+```bash
+# Use Trafilatura when Readability gives poor results
+uv run surf.py "https://example.com" -e trafilatura
+
+# Force Readability only (no fallback)
+uv run surf.py "https://example.com" -e readability
+
+# Skip extraction, keep original HTML
+uv run surf.py "https://example.com" -e raw
+```
+
 ### Thread Expansion (-t / --thread / --thread-author / --no-thread)
 
 Fetch the current post together with posts from the same thread. `--thread` chooses the range, and `--thread-author` chooses whether to keep only the current post author or all authors:

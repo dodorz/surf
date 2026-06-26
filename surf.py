@@ -493,6 +493,7 @@ def _process_fetched_content(
     proxy_mode_override=None,
     custom_proxy_override=None,
     llm_provider=None,
+    extractor="auto",
 ):
     """
     Convert fetched HTML into normalized title/HTML/Markdown output.
@@ -514,7 +515,7 @@ def _process_fetched_content(
         cleaned_html = _render_markdown_to_html(md_content)
         logger.info(f"Using direct markdown payload. Title: {title}")
     else:
-        title, cleaned_html = ContentProcessor.extract_content(html_content)
+        title, cleaned_html = ContentProcessor.extract_content(html_content, extractor=extractor)
         if not title:
             title = "Untitled"
         logger.info(f"Title: {title}")
@@ -8765,13 +8766,24 @@ class ContentProcessor:
         return str(best_candidate)
 
     @staticmethod
-    def extract_content(html):
+    def extract_content(html, extractor="auto"):
         """
         Extracts the main content using Readability and a custom rescue logic to preserve images.
+
+        Args:
+            html: Raw HTML content.
+            extractor: Extraction method - "auto" (readability+trafilatura fallback),
+                       "readability" (Readability only), "trafilatura" (Trafilatura only),
+                       "raw" (skip extraction, return original HTML).
         """
-        logger.info("Extracting main content...")
+        logger.info(f"Extracting main content... (extractor={extractor})")
 
         preprocessed_soup = ContentProcessor._preprocess_html(html)
+
+        # raw mode: skip extraction entirely
+        if extractor == "raw":
+            logger.info("Raw mode: skipping content extraction")
+            return Document(html).title(), html
 
         # Site-specific HTML that is already normalized should bypass Readability.
         # Xiaohongshu note pages are especially fragile here: short text + image galleries
@@ -8787,7 +8799,20 @@ class ContentProcessor:
             )
             return Document(str(preprocessed_soup)).title(), preserved_html
 
-        # 1. Get Readability Summary
+        # trafilatura-only mode
+        if extractor == "trafilatura":
+            try:
+                content_html = trafilatura.extract(str(preprocessed_soup), output_format="html", include_images=True)
+                if content_html:
+                    img_count = content_html.count("<img")
+                    logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
+                    return Document(html).title(), content_html
+            except Exception as e:
+                logger.warning(f"Trafilatura extraction failed: {e}")
+            logger.warning("Trafilatura extraction failed, returning original HTML")
+            return Document(html).title(), html
+
+        # 1. Get Readability Summary (default and readability-only modes)
         try:
             doc = Document(str(preprocessed_soup))
             title = doc.title()
@@ -8807,6 +8832,9 @@ class ContentProcessor:
 
             return title, rescued_html
         except Exception as e:
+            if extractor == "readability":
+                logger.warning(f"Readability extraction failed: {e}. Returning original HTML.")
+                return Document(html).title(), html
             logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
 
         # Final Fallback: Trafilatura
@@ -11206,6 +11234,14 @@ Examples:
   surf --thread before https://x.com/user/status/123
   surf --thread both --thread-author same https://x.com/user/status/123
 
+Extractor:
+  surf -e trafilatura https://example.com        # Use Trafilatura extraction
+  surf -T https://example.com                    # Shorthand for trafilatura
+  surf -e readability https://example.com        # Use Readability only
+  surf -R https://example.com                    # Shorthand for readability
+  surf -e raw https://example.com                # Skip extraction, return original HTML
+  surf -U https://example.com                    # Shorthand for raw
+
 Local Files:
   surf /tmp/article.html                        # Read local HTML file
   surf ~/docs/readme.md                         # Read local Markdown file
@@ -11364,6 +11400,16 @@ Twitter/X Backend:
         choices=["rapidocr", "tesseract", "auto"],
         help="OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)",
     )
+    parser.add_argument(
+        "-e",
+        "--extractor",
+        choices=["auto", "readability", "trafilatura", "raw"],
+        default="auto",
+        help="Content extractor: auto=readability then trafilatura fallback (default), readability=Readability only, trafilatura=Trafilatura only, raw=skip extraction",
+    )
+    parser.add_argument("-R", action="store_true", help="Shorthand for --extractor readability")
+    parser.add_argument("-T", action="store_true", help="Shorthand for --extractor trafilatura")
+    parser.add_argument("-U", action="store_true", help="Shorthand for --extractor raw")
 
     # Network
     proxy_choices = ["env", "custom", "no"]
@@ -11436,6 +11482,14 @@ Twitter/X Backend:
     if args.verbose:
         setup_verbose_logging()
     _raise_if_interrupted()
+
+    # Resolve extractor shorthand flags
+    if args.R:
+        args.extractor = "readability"
+    elif args.T:
+        args.extractor = "trafilatura"
+    elif args.U:
+        args.extractor = "raw"
 
     # Determine config path
     config = Config(args.config) if args.config else Config()
@@ -11690,6 +11744,7 @@ Twitter/X Backend:
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
             llm_provider=args.llm if hasattr(args, "llm") else None,
+            extractor=args.extractor,
         )
     except Exception as e:
         logger.error(f"Failed to process fetched content: {e}")

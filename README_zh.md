@@ -315,6 +315,26 @@ surf "https://example.com" --verbose   # 详细日志输出
 surf --version                         # 查看版本
 ```
 
+### 内容提取器 (-e / --extractor)
+
+选择用于移除广告、侧边栏等杂乱信息的内容提取库：
+
+- `auto`（默认）：优先使用 Readability，失败后回退到 Trafilatura
+- `readability`：仅使用 Mozilla Readability 算法
+- `trafilatura`：仅使用 Trafilatura
+- `raw`：跳过提取，返回原始 HTML
+
+```bash
+# 当 Readability 效果不好时，使用 Trafilatura
+surf "https://example.com" -e trafilatura
+
+# 仅使用 Readability，不回退
+surf "https://example.com" -e readability
+
+# 跳过提取，保留原始 HTML
+surf "https://example.com" -e raw
+```
+
 ### 插图 OCR (--ocr / --no-ocr)
 
 对文章插图执行本地 OCR，并把识别文本追加到图片下方：
