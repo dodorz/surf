@@ -99,6 +99,28 @@ uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 
 如果要暴露到公网，建议再前置反向代理并启用 HTTPS，同时只开放必要端口。
 
+### 在反向代理（Nginx 等）后面运行
+
+如果把 Surf 放在 Nginx 反向代理后面并使用 URL 前缀（如 `http://IP:8000/surf`），需要用 `--root` 参数告诉 Surf 应用的路径前缀：
+
+```bash
+uv run python surf_web.py --host 127.0.0.1 --port 18473 --root /surf
+```
+
+对应的 Nginx 配置示例：
+
+```nginx
+location /surf/ {
+    proxy_pass http://127.0.0.1:18473/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+> **注意**：`proxy_pass` 末尾的 `/` 会自动剥离 `/surf` 前缀，使请求路径直接转发到 Surf（如 `/surf/api/process` → `/api/process`）。此时 Surf 侧不需要 `--root`。如果 `proxy_pass` 末尾没有 `/`（路径原样转发），则必须使用 `--root /surf`。
+
 ## 配置
 
 Surf 会先读取启动的可执行文件/脚本同目录下的 `config.ini`。如果那里没有，再回退到 `$XDG_CONFIG_HOME/surf/config.ini`；若未设置 `XDG_CONFIG_HOME`，则回退到 `~/.config/surf/config.ini`。

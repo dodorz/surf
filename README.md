@@ -123,6 +123,28 @@ uv run gunicorn -w 2 -b 0.0.0.0:18473 surf_web:app
 
 If you expose it to the internet, put it behind a reverse proxy with HTTPS and open only the required port in your firewall or security group.
 
+### Running behind a reverse proxy (Nginx, etc.)
+
+When running Surf behind a reverse proxy with a URL prefix (e.g., `http://IP:8000/surf`), use the `--root` flag to tell Surf about the path prefix:
+
+```bash
+uv run python surf_web.py --host 127.0.0.1 --port 18473 --root /surf
+```
+
+Example Nginx configuration:
+
+```nginx
+location /surf/ {
+    proxy_pass http://127.0.0.1:18473/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+> **Note**: The trailing `/` in `proxy_pass` automatically strips the `/surf` prefix before forwarding (e.g., `/surf/api/process` → `/api/process`). In this case, `--root` is not needed. If `proxy_pass` does NOT have a trailing `/` (path forwarded as-is), you must use `--root /surf`.
+
 ## Configuration
 
 Surf looks for `config.ini` next to the launched executable/script first. If it is not there, it falls back to `$XDG_CONFIG_HOME/surf/config.ini`, or `~/.config/surf/config.ini` when `XDG_CONFIG_HOME` is unset.

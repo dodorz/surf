@@ -3,10 +3,11 @@
 Surf Web Interface - A web interface for the Surf URL to Markdown/PDF converter.
 
 Usage:
-    python surf_web.py [--host HOST] [--port PORT]
+    python surf_web.py [--host HOST] [--port PORT] [--root ROOT]
 
 Example:
     python surf_web.py --host 0.0.0.0 --port 8080
+    python surf_web.py --host 127.0.0.1 --port 18473 --root /surf
 """
 
 import argparse
@@ -79,6 +80,8 @@ from surf import (
     _process_fetched_content,
     resolve_user_path,
 )
+
+_ROOT_PATH = ""
 
 app = Flask(__name__)
 _TRANSLATION_JOBS = {}
@@ -819,6 +822,7 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        const API_BASE = '{{ root_path }}';
         let proxyModeTouched = false;
         let proxyModeProgrammaticUpdate = false;
         let langModeTouched = false;
@@ -871,7 +875,7 @@ HTML_TEMPLATE = """
             try {
                 const url = (urlInput?.value || '').trim();
                 const query = url ? ('?url=' + encodeURIComponent(url)) : '';
-                const response = await fetch('/api/proxy-default' + query);
+                const response = await fetch(API_BASE + '/api/proxy-default' + query);
                 const result = await parseJsonResponse(response);
                 if (result.success && result.proxy_mode) {
                     proxyModeProgrammaticUpdate = true;
@@ -895,7 +899,7 @@ HTML_TEMPLATE = """
             try {
                 const url = (urlInput?.value || '').trim();
                 const query = url ? ('?url=' + encodeURIComponent(url)) : '';
-                const response = await fetch('/api/site-defaults' + query);
+                const response = await fetch(API_BASE + '/api/site-defaults' + query);
                 const result = await parseJsonResponse(response);
                 if (requestId !== siteDefaultsRequestId || !result.success) {
                     return;
@@ -1354,7 +1358,7 @@ HTML_TEMPLATE = """
                     const input = inputs[i];
                     showStatus('processing', `正在处理 ${i + 1}/${inputs.length}: ${input}`);
                     const itemData = { ...data, url: input };
-                    const response = await fetch('/api/process', {
+                    const response = await fetch(API_BASE + '/api/process', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
@@ -1381,7 +1385,7 @@ HTML_TEMPLATE = """
                                 speak: false
                             };
                             try {
-                                const saveResp = await fetch('/api/save-async', {
+                                const saveResp = await fetch(API_BASE + '/api/save-async', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify(saveBody)
@@ -1498,7 +1502,7 @@ HTML_TEMPLATE = """
             while (true) {
                 await delay(2000);
                 try {
-                    const response = await fetch(`/api/translation-jobs/${encodeURIComponent(jobId)}`);
+                    const response = await fetch(API_BASE + `/api/translation-jobs/${encodeURIComponent(jobId)}`);
                     const job = await parseJsonResponse(response);
                     if (!job.success) {
                         showStatus('error', '翻译任务失败: ' + (job.error || 'unknown error'));
@@ -1540,7 +1544,7 @@ HTML_TEMPLATE = """
             while (true) {
                 await delay(2000);
                 try {
-                    const response = await fetch(`/api/save-jobs/${encodeURIComponent(jobId)}`);
+                    const response = await fetch(API_BASE + `/api/save-jobs/${encodeURIComponent(jobId)}`);
                     const job = await parseJsonResponse(response);
                     if (!job.success) {
                         showToast('error', '保存失败: ' + (job.error || 'unknown error'));
@@ -1604,7 +1608,7 @@ HTML_TEMPLATE = """
 
             try {
                 showStatus('processing', '正在提交后台保存...');
-                const response = await fetch('/api/save-async', {
+                const response = await fetch(API_BASE + '/api/save-async', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body)
@@ -1628,7 +1632,7 @@ HTML_TEMPLATE = """
             }
             try {
                 showStatus('processing', '正在生成语音...');
-                const response = await fetch('/api/play-audio', {
+                const response = await fetch(API_BASE + '/api/play-audio', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ data: resultData })
@@ -2206,6 +2210,7 @@ def index():
         is_windows=Fetcher._is_windows(),
         default_proxy_mode=resolve_web_proxy_mode_default(config),
         default_ocr_enabled=resolve_web_site_defaults(config)["ocr_enabled"],
+        root_path=_ROOT_PATH,
         **ui_context,
     )
 
@@ -2626,15 +2631,24 @@ def save_file():
         return jsonify({"success": False, "error": str(e)})
 
 
-def run_server(host="127.0.0.1", port=18473, debug=False):
+def run_server(host="127.0.0.1", port=18473, debug=False, root=""):
     """Run the web server."""
+    global _ROOT_PATH
+    _ROOT_PATH = root.rstrip("/") if root else ""
+
+    if _ROOT_PATH:
+        app.config["APPLICATION_ROOT"] = _ROOT_PATH
+
     # Open browser
-    url = f"http://{host}:{port}"
+    base = f"http://{host}:{port}"
+    url = f"{base}{_ROOT_PATH}" if _ROOT_PATH else base
     threading.Timer(1, lambda: webbrowser.open(url)).start()
 
     print(f"\nSurf Web Interface v{get_runtime_version()}")
     print("=====================================")
     print(f"Server running at: {url}")
+    if _ROOT_PATH:
+        print(f"Root path prefix: {_ROOT_PATH}")
     print("Press Ctrl+C to stop\n")
 
     app.run(host=host, port=port, debug=debug)
@@ -2655,11 +2669,14 @@ def main():
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--bind", help="Bind address (deprecated, use --host)")
+    parser.add_argument(
+        "--root", default="", help="URL path prefix for reverse proxy (e.g. /surf)"
+    )
 
     args = parser.parse_args()
 
     host = args.bind if args.bind else args.host
-    run_server(host=host, port=args.port, debug=args.debug)
+    run_server(host=host, port=args.port, debug=args.debug, root=args.root)
 
 
 if __name__ == "__main__":
