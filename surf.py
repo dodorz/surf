@@ -1900,9 +1900,52 @@ class Fetcher:
             if should_use_browser:
                 logger.info("Using browser fallback for dynamic content.")
 
-            return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+            browser_result = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
         else:
-            return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+            browser_result = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+
+        # Post-browser check: if the browser also returned a bot challenge (e.g.
+        # WordPress.com blocks headless Chromium), wait briefly and retry with a
+        # plain requests call — requests often has a different TLS fingerprint
+        # that evades the challenge.
+        if browser_result and Fetcher._is_cloudflare_challenge(browser_result):
+            logger.warning("Browser returned bot challenge page. Retrying with plain requests after delay...")
+            import time as _time
+            _time.sleep(2)
+            try:
+                retry_headers = {
+                    "User-Agent": (
+                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    )
+                }
+                retry_resp = requests.get(url, headers=retry_headers, timeout=15)
+                retry_resp.raise_for_status()
+                retry_text = Fetcher._decode_response_text(retry_resp)
+                if retry_text and not Fetcher._is_cloudflare_challenge(retry_text):
+                    logger.info("Plain requests retry succeeded after browser challenge")
+                    return retry_text
+            except Exception as _retry_err:
+                logger.warning("Plain requests retry also failed: %s", _retry_err)
+
+            # Second retry: even simpler User-Agent (some sites block on UA)
+            try:
+                _time.sleep(3)
+                retry2_resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                retry2_resp.raise_for_status()
+                retry2_text = Fetcher._decode_response_text(retry2_resp)
+                if retry2_text and not Fetcher._is_cloudflare_challenge(retry2_text):
+                    logger.info("Simple-UA requests retry succeeded after browser challenge")
+                    return retry2_text
+            except Exception as _retry2_err:
+                logger.warning("Simple-UA requests retry also failed: %s", _retry2_err)
+
+            logger.warning(
+                "All fetch strategies returned bot challenge pages. "
+                "The site may be blocking automated access. Returning browser result."
+            )
+
+        return browser_result
 
     @staticmethod
     def _is_twitter_article_only_link(html_content):
