@@ -81,7 +81,7 @@ from surf import (
     resolve_user_path,
 )
 
-_ROOT_PATH = ""
+_ROOT_PATH = os.environ.get("SURF_ROOT_PATH", "").rstrip("/")
 
 app = Flask(__name__)
 
@@ -103,6 +103,18 @@ _TRANSLATION_JOBS = {}
 _TRANSLATION_JOBS_LOCK = threading.Lock()
 _SAVE_JOBS = {}
 _SAVE_JOBS_LOCK = threading.Lock()
+
+
+def _apply_root_path():
+    """Apply the _ROOT_PATH prefix to the Flask app (middleware + config)."""
+    if _ROOT_PATH:
+        app.config["APPLICATION_ROOT"] = _ROOT_PATH
+        if not isinstance(app.wsgi_app, _PrefixStripper):
+            app.wsgi_app = _PrefixStripper(app.wsgi_app, _ROOT_PATH)
+
+
+_apply_root_path()
+
 
 @app.errorhandler(Exception)
 def handle_api_error(error):
@@ -2672,11 +2684,9 @@ def save_file():
 def run_server(host="127.0.0.1", port=18473, debug=False, root=""):
     """Run the web server."""
     global _ROOT_PATH
-    _ROOT_PATH = root.rstrip("/") if root else ""
-
-    if _ROOT_PATH:
-        app.config["APPLICATION_ROOT"] = _ROOT_PATH
-        app.wsgi_app = _PrefixStripper(app.wsgi_app, _ROOT_PATH)
+    if root:
+        _ROOT_PATH = root.rstrip("/")
+        _apply_root_path()
 
     # Open browser
     base = f"http://{host}:{port}"
