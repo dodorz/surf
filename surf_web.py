@@ -1873,7 +1873,7 @@ def _get_translation_job(job_id):
         return copy.deepcopy(job) if job else None
 
 
-def _build_translated_web_result(base_result, translated_markdown, translated_title, translation_performed, lang_mode):
+def _build_translated_web_result(base_result, translated_markdown, translated_title, translation_performed, lang_mode, translated_description=None):
     result = copy.deepcopy(base_result)
     original_title = result.get("title") or "Untitled"
     original_markdown = result.get("markdown") or ""
@@ -1903,6 +1903,7 @@ def _build_translated_web_result(base_result, translated_markdown, translated_ti
     result.setdefault("metadata", {})
     result["metadata"]["title"] = result["title"]
     result["metadata"]["translated_title"] = translated_title if translation_performed else None
+    result["metadata"]["translated_description"] = translated_description if translation_performed else None
     return result
 
 
@@ -1933,12 +1934,23 @@ def _run_web_translation_job(job_id):
             translated_markdown != raw_markdown
             or (translated_title or "") != original_title
         )
+        translated_description = None
+        original_description = source.get("original_description")
+        if original_description and translation_performed:
+            translated_description, _ = ContentProcessor.translate_if_needed(
+                original_description,
+                title=None,
+                target_lang=config.get("Output", "target_language", fallback="zh-cn"),
+                config=config,
+                llm_provider=job.get("llm_provider"),
+            )
         result = _build_translated_web_result(
             source,
             translated_markdown,
             translated_title,
             translation_performed,
             job.get("lang_mode", "trans"),
+            translated_description=translated_description,
         )
         result["metadata"]["translator"] = translator_model if translation_performed else None
         _store_translation_job(
@@ -2062,6 +2074,7 @@ def _run_web_save_job(job_id):
                 html_content=html_content,
                 add_front_matter=metadata.get("add_front_matter", True),
                 translated_title=metadata.get("translated_title"),
+                translated_description=metadata.get("translated_description"),
                 source_url=metadata.get("source_url"),
                 translator=metadata.get("translator"),
                 archive_url=metadata.get("archive_url"),
@@ -2429,6 +2442,7 @@ def _process_web_request(data, translate_sync=False):
         original_md = processed["raw_markdown"]
         original_title = processed["original_title"]
         translated_title = processed["translated_title"]
+        translated_description = processed["translated_description"]
         translation_performed = processed["translation_performed"]
         translation_pending = (not translate_sync) and lang_mode in {"trans", "both"}
         if translation_pending:
@@ -2469,12 +2483,15 @@ def _process_web_request(data, translate_sync=False):
         "defaultSaveTitle": defaultSaveTitle,
         "translation_performed": translation_performed,
         "translated_title": translated_title if translation_performed else None,
+        "translated_description": translated_description if translation_performed else None,
         "translation_pending": translation_pending,
         "metadata": {
             "title": title,
             "html_content": html_content,
+            "original_description": processed.get("original_description"),
             "add_front_matter": not data.get("no_front_matter", False),
             "translated_title": translated_title if translation_performed else None,
+            "translated_description": translated_description if translation_performed else None,
             "source_url": source_url,
             "archive_url": archive_url,
             "translator": None,
@@ -2632,6 +2649,7 @@ def save_file():
                 html_content=html_content,
                 add_front_matter=metadata.get("add_front_matter", True),
                 translated_title=metadata.get("translated_title"),
+                translated_description=metadata.get("translated_description"),
                 source_url=metadata.get("source_url"),
                 translator=metadata.get("translator"),
                 archive_url=metadata.get("archive_url"),

@@ -10231,6 +10231,7 @@ class OutputHandler:
         html_content=None,
         add_front_matter=True,
         translated_title=None,
+        translated_description=None,
         source_url=None,
         translator=None,
         archive_url=None,
@@ -10247,6 +10248,7 @@ class OutputHandler:
             html_content: Original HTML content for metadata extraction
             add_front_matter: Whether to add YAML front matter (default: True)
             translated_title: Translated title to use in YAML front matter (if translation was performed)
+            translated_description: Translated description to use in YAML front matter (if translation was performed)
             source_url: Source URL to include in YAML front matter (default: None)
             translator: Translation model name to include in YAML front matter (default: None)
             archive_url: Wayback Machine snapshot URL to include in YAML front matter (default: None)
@@ -10289,6 +10291,7 @@ class OutputHandler:
                 source_url=source_url,
                 translator=translator,
                 archive_url=archive_url,
+                description_override=translated_description,
             )
             # Use translated_title if provided (translation was performed)
             if translated_title:
@@ -11801,6 +11804,7 @@ Twitter/X Backend:
     original_md = processed["raw_markdown"]
     original_title = processed["original_title"]
     translated_title = processed["translated_title"]
+    translated_description = processed["translated_description"]
     translation_performed = processed["translation_performed"]
 
     # 5. Output
@@ -11893,6 +11897,7 @@ Twitter/X Backend:
                     html_content=html_content,
                     add_front_matter=not args.no_front_matter,
                     translated_title=translated_title if translation_performed else None,
+                    translated_description=translated_description if translation_performed else None,
                     source_url=source_url,
                     translator=translator,
                     archive_url=archive_url,
@@ -11908,6 +11913,7 @@ Twitter/X Backend:
                 html_content=html_content,
                 add_front_matter=not args.no_front_matter,
                 translated_title=translated_title if translation_performed else None,
+                translated_description=translated_description if translation_performed else None,
                 source_url=source_url,
                 translator=translator,
                 archive_url=archive_url,
