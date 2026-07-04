@@ -9308,7 +9308,9 @@ class OcrHandler:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
         if source_url:
             parsed = urlparse(source_url)
@@ -9394,17 +9396,20 @@ class OcrHandler:
             seen_urls.add(img_url)
 
             try:
+                logger.info("OCR downloading image %d/%d: %s", processed + 1, max_images, img_url[:120])
                 image_bytes = OcrHandler._download_image(img_url, source_url, req_proxies)
                 image = Image.open(io.BytesIO(image_bytes))
                 image.load()
                 width, height = image.size
                 if width < min_width or height < min_height:
+                    logger.info("OCR skipping image (too small %dx%d): %s", width, height, img_url[:120])
                     continue
                 prepared_image = OcrHandler._prepare_image_for_ocr(image)
                 ocr_text, engine_used = OcrHandler._run_ocr_with_engines(runtime, prepared_image, img_url)
                 if len(ocr_text) < min_text_length:
                     logger.info(
-                        "OCR produced too little text for image: %s",
+                        "OCR produced too little text (%d chars) for image: %s",
+                        len(ocr_text),
                         img_url[:120],
                     )
                     continue
@@ -9416,13 +9421,16 @@ class OcrHandler:
                 img.insert_after(OcrHandler._build_ocr_block(soup, ocr_text))
                 processed += 1
             except Exception as e:
-                logger.debug(f"OCR skipped for image {img_url}: {e}")
+                logger.warning("OCR failed for image %s: %s", img_url[:120], e)
+
 
         if processed:
             logger.info(f"OCR annotated {processed} images")
         else:
             logger.warning(
-                "OCR ran but produced no usable text. Check image quality, try RapidOCR, PaddleOCR, or use --ocr-engine tesseract --ocr-lang eng if Tesseract works better for the page."
+                "OCR ran but produced no usable text — all images may be failing to download. "
+                "Check network/proxy access to image CDN, try --ocr-engine tesseract --ocr-lang eng, "
+                "or use --verbose for per-image error details."
             )
         return str(soup)
 
