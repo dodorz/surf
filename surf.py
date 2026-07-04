@@ -9253,7 +9253,7 @@ class OcrHandler:
                     runtime["available"]["rapidocr"] = OcrHandler._init_rapidocr()
                     logger.info("OCR engine ready: rapidocr")
                 except Exception as e:
-                    logger.warning("OCR engine unavailable: rapidocr (%s)", e)
+                    logger.info("OCR engine unavailable: rapidocr (%s)", e)
             elif engine_name == "tesseract":
                 try:
                     pytesseract = OcrHandler._init_tesseract(config)
@@ -9263,13 +9263,13 @@ class OcrHandler:
                     }
                     logger.info("OCR engine ready: tesseract")
                 except Exception as e:
-                    logger.warning("OCR engine unavailable: tesseract (%s)", e)
+                    logger.info("OCR engine unavailable: tesseract (%s)", e)
             elif engine_name == "paddleocr":
                 try:
                     runtime["available"]["paddleocr"] = OcrHandler._init_paddleocr()
                     logger.info("OCR engine ready: paddleocr")
                 except Exception as e:
-                    logger.warning("OCR engine unavailable: paddleocr (%s)", e)
+                    logger.info("OCR engine unavailable: paddleocr (%s)", e)
 
         return runtime
 
