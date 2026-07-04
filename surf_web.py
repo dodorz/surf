@@ -2346,6 +2346,8 @@ def _process_web_request(data, translate_sync=False):
     archive_is_url = None
     translation_performed = False
     translation_pending = False
+    translated_description = None
+    processed = {}
 
     # Fetch content
     proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
