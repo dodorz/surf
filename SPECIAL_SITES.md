@@ -53,7 +53,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 
 ### WeChat / Xiaohongshu
 - Default: no proxy, no translation (unless overridden).
-- Xiaohongshu enables image OCR by default.
+- Xiaohongshu enables image OCR by default (RapidOCR then Tesseract fallback; PaddleOCR available via --ocr-engine).
 
 ### Zhihu
 - Default: no proxy, no translation.

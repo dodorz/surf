@@ -1230,7 +1230,7 @@ def _ocr_local_image(image_path, args, config):
     runtime = OcrHandler._create_ocr_runtime(args, config)
     if not runtime["available"]:
         raise ValueError(
-            "No usable OCR engine available. Install rapidocr-onnxruntime or configure local tesseract."
+            "No usable OCR engine available. Install rapidocr-onnxruntime, paddleocr, or configure local tesseract."
         )
 
     prepared_image = OcrHandler._prepare_image_for_ocr(image)
@@ -1239,7 +1239,7 @@ def _ocr_local_image(image_path, args, config):
     if not ocr_text:
         raise ValueError(
             "OCR produced no text from the image. "
-            "Check image quality, try --ocr-engine tesseract --ocr-lang eng, or try a different image."
+            "Check image quality, try --ocr-engine tesseract --ocr-lang eng, --ocr-engine paddleocr, or try a different image."
         )
 
     return ocr_text, engine_used
@@ -9062,10 +9062,14 @@ class OcrHandler:
     @staticmethod
     def _get_engine_chain(args, config):
         engine = OcrHandler._get_engine_setting(args, config)
+        if engine == "paddleocr":
+            return ["paddleocr"]
         if engine == "tesseract":
             return ["tesseract"]
-        if engine in {"rapidocr", "auto"}:
+        if engine == "rapidocr":
             return ["rapidocr", "tesseract"]
+        if engine == "auto":
+            return ["paddleocr", "rapidocr", "tesseract"]
         logger.warning("Unknown OCR engine '%s'; falling back to rapidocr", engine)
         return ["rapidocr", "tesseract"]
 
@@ -9118,6 +9122,34 @@ class OcrHandler:
         except Exception as e:
             raise RuntimeError(f"RapidOCR init failed: {e}") from e
 
+
+    @staticmethod
+    def _init_paddleocr():
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR is unavailable: {e}") from e
+        try:
+            return PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR init failed: {e}") from e
+
+    @staticmethod
+    def _extract_text_with_paddleocr(paddleocr_engine, image):
+        ocr_input = OcrHandler._image_to_png_bytes(image)
+        result = paddleocr_engine.ocr(ocr_input)
+        if not result or not result[0]:
+            return ""
+
+        fragments = []
+        for item in result[0]:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            text = (item[1][0] if isinstance(item[1], (list, tuple)) and len(item[1]) > 0 else str(item[1]))
+            text = OcrHandler._normalize_ocr_text(text)
+            if text:
+                fragments.append(text)
+        return "\n".join(fragments).strip()
     @staticmethod
     def _extract_text_with_rapidocr(rapidocr_engine, image):
         ocr_input = OcrHandler._image_to_png_bytes(image)
@@ -9232,6 +9264,12 @@ class OcrHandler:
                     logger.info("OCR engine ready: tesseract")
                 except Exception as e:
                     logger.warning("OCR engine unavailable: tesseract (%s)", e)
+            elif engine_name == "paddleocr":
+                try:
+                    runtime["available"]["paddleocr"] = OcrHandler._init_paddleocr()
+                    logger.info("OCR engine ready: paddleocr")
+                except Exception as e:
+                    logger.warning("OCR engine unavailable: paddleocr (%s)", e)
 
         return runtime
 
@@ -9247,6 +9285,8 @@ class OcrHandler:
                     text = OcrHandler._extract_text_with_rapidocr(engine, prepared_image)
                 elif engine_name == "tesseract":
                     text = OcrHandler._run_ocr(engine["module"], prepared_image, engine["langs"])
+                elif engine_name == "paddleocr":
+                    text = OcrHandler._extract_text_with_paddleocr(engine, prepared_image)
                 else:
                     continue
 
@@ -9322,7 +9362,7 @@ class OcrHandler:
         runtime = OcrHandler._create_ocr_runtime(args, config)
         if not runtime["available"]:
             logger.warning(
-                "OCR disabled: no usable OCR engine is available. Install rapidocr-onnxruntime or configure local tesseract."
+                "OCR disabled: no usable OCR engine is available. Install rapidocr-onnxruntime, paddleocr, or configure local tesseract."
             )
             return html_content
 
@@ -9382,7 +9422,7 @@ class OcrHandler:
             logger.info(f"OCR annotated {processed} images")
         else:
             logger.warning(
-                "OCR ran but produced no usable text. Check image quality, try RapidOCR, or use --ocr-engine tesseract --ocr-lang eng if Tesseract works better for the page."
+                "OCR ran but produced no usable text. Check image quality, try RapidOCR, PaddleOCR, or use --ocr-engine tesseract --ocr-lang eng if Tesseract works better for the page."
             )
         return str(soup)
 
@@ -11331,6 +11371,7 @@ OCR:
   surf --no-ocr URL                          # Disable OCR, including Xiaohongshu default
   surf --ocr-engine rapidocr URL             # Prefer RapidOCR, fallback to Tesseract
   surf --ocr-engine tesseract URL            # Force Tesseract only
+  surf --ocr-engine paddleocr URL            # Force PaddleOCR only
   Xiaohongshu:                              OCR on images is enabled by default
 
 Twitter/X Backend:
@@ -11443,8 +11484,8 @@ Twitter/X Backend:
     )
     parser.add_argument(
         "--ocr-engine",
-        choices=["rapidocr", "tesseract", "auto"],
-        help="OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)",
+        choices=["rapidocr", "tesseract", "paddleocr", "auto"],
+        help="OCR engine: rapidocr (default), tesseract, paddleocr, or auto (paddleocr > rapidocr > tesseract)",
     )
     parser.add_argument(
         "-e",

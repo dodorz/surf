@@ -187,7 +187,7 @@ profile =
 [OCR]
 ; 默认是否对文章插图执行 OCR（默认 false；小红书站点会覆盖为 true）
 enabled = false
-; OCR 引擎：rapidocr（默认）、tesseract，或 auto（先 rapidocr 再 tesseract）
+; OCR 引擎：rapidocr（默认）、tesseract、paddleocr，或 auto（paddleocr > rapidocr > tesseract）
 engine = rapidocr
 ; Tesseract 语言，例如：chi_sim+eng、eng、jpn+eng
 ; RapidOCR 不使用这个参数，仅在选择/回退到 Tesseract 时生效
@@ -343,7 +343,7 @@ surf "https://example.com" -e raw
 surf "https://example.com/article" --ocr
 surf "https://www.xiaohongshu.com/explore/..." --no-ocr
 surf "https://example.com/article" --ocr --ocr-lang eng
-surf "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
+surf "https://example.com/article" --ocr --ocr-engine paddleocr
 ```
 
 #### 直接图片 OCR
@@ -362,8 +362,8 @@ surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 
 说明：
 
-- OCR 默认优先使用 `rapidocr-onnxruntime`。
-- 如果 RapidOCR 不可用或没有产出可用文本，Surf 会自动回退到本地 Tesseract；如需强制使用，可传 `--ocr-engine tesseract`。
+- OCR 默认优先使用 `rapidocr-onnxruntime`；可通过 `--ocr-engine` 选择 `paddleocr`（精度更高）、`tesseract`，或 `auto`（PaddleOCR > RapidOCR > Tesseract）。
+- 如果 RapidOCR 不可用或没有产出可用文本，Surf 会自动回退到本地 Tesseract；如需强制使用，可传 `--ocr-engine tesseract` 或 `--ocr-engine paddleocr`。
 - `--ocr-lang` 仅对 Tesseract 生效。
 - 小红书默认开启插图 OCR。
 - OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。

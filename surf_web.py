@@ -776,6 +776,11 @@ HTML_TEMPLATE = """
                             <div class="radio-option">
                                 <input type="radio" id="ocr-engine-tesseract" name="ocr_engine" value="tesseract" {% if default_ocr_engine == 'tesseract' %}checked{% endif %}>
                                 <label for="ocr-engine-tesseract">Tesseract</label>
+
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-paddleocr" name="ocr_engine" value="paddleocr" {% if default_ocr_engine == 'paddleocr' %}checked{% endif %}>
+                                <label for="ocr-engine-paddleocr">PaddleOCR</label>
+                            </div>
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="ocr-engine-auto" name="ocr_engine" value="auto" {% if default_ocr_engine == 'auto' %}checked{% endif %}>
@@ -1813,7 +1818,7 @@ def get_web_ui_context(config):
     default_ocr_engine = (
         config.get("OCR", "engine", fallback="rapidocr").strip().lower() or "rapidocr"
     )
-    if default_ocr_engine not in {"rapidocr", "tesseract", "auto"}:
+    if default_ocr_engine not in {"rapidocr", "tesseract", "paddleocr", "auto"}:
         default_ocr_engine = "rapidocr"
 
     default_ocr_lang = (config.get("OCR", "lang", fallback="chi_sim+eng") or "").strip()
