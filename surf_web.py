@@ -714,6 +714,28 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="field-hint">对应 CLI 的 `--thread-author same|all`。</div>
                     </div>
+
+                    <div class="form-group wide">
+                        <label>内容提取</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="extractor-auto" name="extractor" value="auto" checked>
+                                <label for="extractor-auto">自动</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="extractor-readability" name="extractor" value="readability">
+                                <label for="extractor-readability">Readability</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="extractor-trafilatura" name="extractor" value="trafilatura">
+                                <label for="extractor-trafilatura">Trafilatura</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="extractor-raw" name="extractor" value="raw">
+                                <label for="extractor-raw">原始 HTML</label>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="section-title">内容处理</div>
@@ -793,28 +815,6 @@ HTML_TEMPLATE = """
                                 <label for="ocr-lang-{{ loop.index }}">{{ option.label }}</label>
                             </div>
                             {% endfor %}
-                        </div>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label>内容提取</label>
-                    <div class="radio-group">
-                        <div class="radio-option">
-                            <input type="radio" id="extractor-auto" name="extractor" value="auto" checked>
-                            <label for="extractor-auto">自动</label>
-                        </div>
-                        <div class="radio-option">
-                            <input type="radio" id="extractor-readability" name="extractor" value="readability">
-                            <label for="extractor-readability">Readability</label>
-                        </div>
-                        <div class="radio-option">
-                            <input type="radio" id="extractor-trafilatura" name="extractor" value="trafilatura">
-                            <label for="extractor-trafilatura">Trafilatura</label>
-                        </div>
-                        <div class="radio-option">
-                            <input type="radio" id="extractor-raw" name="extractor" value="raw">
-                            <label for="extractor-raw">原始 HTML</label>
                         </div>
                     </div>
                 </div>
