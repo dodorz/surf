@@ -60,6 +60,10 @@ dev = [
     "mypy>=0.990",
 ]
 
+ocr = [
+    "paddleocr>=2.7",
+]
+
 [project.urls]
 Homepage = "https://github.com/dodorz/surf"
 Repository = "https://github.com/dodorz/surf.git"
