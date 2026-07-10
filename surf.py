@@ -1464,7 +1464,7 @@ class Fetcher:
 
         if not rest:
             readme_names = [f"README_{lang_code}.md", "README.md"]
-            branch_candidates = ["master", "main"]
+            branch_candidates = ["master", "main", "dev"]
             candidates = []
             for name in readme_names:
                 for branch in branch_candidates:
@@ -1498,7 +1498,7 @@ class Fetcher:
             return None
 
         normalized_path = "/".join(file_parts)
-        branch_candidates = [branch] if branch else ["main", "master"]
+        branch_candidates = [branch] if branch else ["main", "master", "dev"]
         title = file_parts[-1]
         source_path_url = f"{repo_source_url}/{normalized_path}"
         targets = []
