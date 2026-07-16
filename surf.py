@@ -6896,8 +6896,6 @@ class Fetcher:
                     pass
             return direct_markdown
 
-        import re
-        from urllib.parse import urlparse
         from playwright.sync_api import sync_playwright
 
         logger.info(f"Fetching GitHub README: {url}")
