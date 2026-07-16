@@ -42,6 +42,7 @@ def _build_direct_markdown_payload(
     source_url,
     site_name="markdown",
     base_url=None,
+    description=None,
 ):
     """Wrap raw markdown so downstream code can detect and bypass HTML extraction."""
     safe_title = escape(title or "Untitled")
@@ -49,11 +50,13 @@ def _build_direct_markdown_payload(
     safe_site_name = escape(site_name or "markdown")
     safe_base_url = escape(base_url or source_url or "")
     safe_markdown = escape(markdown_text or "")
+    safe_description = escape(description or "")
+    description_meta = f'\n<meta name="description" content="{safe_description}">' if description else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{safe_title}</title>
+<title>{safe_title}</title>{description_meta}
 <meta name="source-url" content="{safe_source_url}">
 <meta name="content-base-url" content="{safe_base_url}">
 <meta name="surf-source-site" content="{safe_site_name}">
@@ -603,6 +606,14 @@ def _process_fetched_content(
         else:
             md_content = translated_md
             title = translated_title
+
+    # For GitHub pages with description, compose composite titles
+    #   front matter title: "project_name: description" (English colon)
+    #   filename title:    "project_name：description" (Chinese colon)
+    if skip_title_translation and original_description:
+        description_text = translated_description or original_description
+        title = f"{original_title}：{description_text}"
+        translated_title = f"{original_title}: {description_text}"
 
     base_url_for_links = content_base_url or source_url or request_url
     if base_url_for_links:
@@ -6863,6 +6874,26 @@ class Fetcher:
         """
         direct_markdown = Fetcher._fetch_github_markdown(url, config, proxy_mode_override, custom_proxy_override)
         if direct_markdown:
+            # Try to fetch description from GitHub page for repo roots
+            parsed_url = urlparse(url)
+            path_parts = [p for p in parsed_url.path.split("/") if p]
+            if len(path_parts) == 2:  # repo root: /owner/repo or /owner/repo/
+                try:
+                    gh_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }
+                    gh_resp = _requests_get_interruptibly(url, headers=gh_headers, timeout=10)
+                    if gh_resp.status_code == 200:
+                        gh_soup = BeautifulSoup(gh_resp.text, "html.parser")
+                        gh_desc_tag = gh_soup.find("meta", attrs={"name": "description"})
+                        if gh_desc_tag and (gh_desc_tag.get("content") or "").strip():
+                            github_description = escape(gh_desc_tag.get("content").strip())
+                            # Inject description meta tag after </title>
+                            direct_markdown = direct_markdown.replace(
+                                "</title>", f'</title>\n<meta name="description" content="{github_description}">'
+                            )
+                except Exception:
+                    pass
             return direct_markdown
 
         import re
@@ -6997,9 +7028,15 @@ class Fetcher:
                     '<html lang="en"><head>',
                     '<meta charset="utf-8">',
                     f"<title>{title}</title>",
+                ]
+
+                if description:
+                    html_parts.append(f'<meta name="description" content="{description}">')
+
+                html_parts.extend([
                     "</head><body>",
                     f"<h1>{title}</h1>",
-                ]
+                ])
 
                 if description:
                     html_parts.append(f"<p><strong>Description:</strong> {description}</p>")
@@ -9785,15 +9822,12 @@ class OutputHandler:
     def _get_filename_title(title, source_url=None, html_content=None):
         """
         Select filename title based on source site rules.
-        For GitHub URLs, prefer page <title>.
+        For GitHub URLs, use the passed title (which may already be a
+        composite with description) rather than extracting from HTML.
         """
         twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
         if twitter_title:
             return twitter_title
-        if source_url and re.match(r"^https?://(www\.)?github\.com/", source_url, re.IGNORECASE):
-            html_title = OutputHandler._extract_html_title(html_content)
-            if html_title:
-                return html_title
         return title
 
     @staticmethod
