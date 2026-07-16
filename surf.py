@@ -8019,6 +8019,7 @@ class Fetcher:
         "corriere.it", "ilsole24ore.com", "elpais.com", "elmundo.es",
         "expansion.com", "nikkei.com", "asahi.com", "mainichi.jp",
         "caixinglobal.com", "thepaper.cn", "jiemian.com",
+        "wired.com",
     }
     _PAYWALL_CSS_PATTERNS = re.compile(
         r"(paywall|paywall-content|paywall-overlay|paywall-banner|paywall-modal|"
@@ -8090,6 +8091,7 @@ class Fetcher:
             return {"detected": False, "reason": None, "confidence": 0.0}
         signals = []
         confidence = 0.0
+        known_paywall_domain = False
 
         # ── Known domain ──
         if url:
@@ -8100,6 +8102,7 @@ class Fetcher:
                     if host.endswith(domain):
                         signals.append(f"known paywall domain: {domain}")
                         confidence += 0.3
+                        known_paywall_domain = True
                         break
             except Exception:
                 pass
@@ -8200,6 +8203,10 @@ class Fetcher:
                     break
 
         # ── Content truncation ──
+        # Truncation is a strong paywall signal on a known paywall domain: a
+        # metered/locked article typically serves only a short teaser. On known
+        # domains we weight it heavily enough to trigger the archive.is fallback
+        # even when no other paywall marker is present.
         if confidence >= 0.3:
             article_text = ""
             for sel in ("article", "[role='main']", "main",
@@ -8213,7 +8220,7 @@ class Fetcher:
                 article_text = text_content
             if len(article_text) < 800:
                 signals.append(f"truncated content: {len(article_text)} chars")
-                confidence += 0.15
+                confidence += 0.30 if known_paywall_domain else 0.15
 
         # ── Explicit free-content signals ──
         # Some sites (e.g. Wired) mark articles as free via meta tags.
