@@ -4934,6 +4934,15 @@ class Fetcher:
                         else:
                             raise
 
+                # Resolve JS anti-bot challenges (Anubis/hashcash, Cloudflare
+                # "Checking your browser") that auto-submit a proof-of-work and reload,
+                # or require ticking an "I am human" checkbox. The page content read
+                # above may still be the challenge interstitial, so wait for it to
+                # resolve and re-read the reloaded page.
+                if not is_twitter_url and Fetcher._is_antibot_challenge_page(content):
+                    logger.info("Anti-bot challenge detected; waiting for it to resolve...")
+                    content = Fetcher._wait_for_antibot_challenge(page, content, timeout_seconds=20)
+
                 if is_twitter_url:
                     if Fetcher._is_twitter_placeholder_content(content):
                         logger.info("Browser returned placeholder/login content, trying syndication fallback")
@@ -8066,7 +8075,11 @@ class Fetcher:
         re.compile(r"please\s+enable\s+(js|javascript)\s+and\s+disable", re.IGNORECASE),
         re.compile(r"(verify|confirm)\s+(you|that\s+you)\s+(are|'?re)\s+(a\s+)?human", re.IGNORECASE),
         re.compile(r"checking\s+(if\s+the\s+site\s+connection\s+is\s+secure|your\s+browser)", re.IGNORECASE),
-        re.compile(r"(dd\s*=\s*\{|data-cfasync\s*=\s*[\"']false[\"'])", re.IGNORECASE),
+        # DataDome anti-bot inline config. NOTE: the literal string
+        # `data-cfasync="false"` is a harmless, ubiquitous WordPress/Cloudflare
+        # attribute and must NOT be treated as a challenge signal (it produces
+        # false positives on ordinary pages).
+        re.compile(r"dd\s*=\s*\{", re.IGNORECASE),
     ]
 
     @staticmethod
@@ -8080,6 +8093,94 @@ class Fetcher:
             if pattern.search(lower):
                 return True
         return False
+
+    @staticmethod
+    def _is_antibot_challenge_page(html_content):
+        """Detect a JavaScript anti-bot challenge page.
+
+        Covers Cloudflare's "Checking your browser" interstitial as well as
+        WordPress.com/Anubis-style hashcash proof-of-work challenges that either
+        auto-submit and reload or ask the visitor to tick an "I am human"
+        checkbox. Detection is deliberately precise (title- and marker-based) so
+        it does not trip on ordinary article body text.
+        """
+        if not html_content:
+            return False
+        lower = html_content.lower()
+        # Cloudflare challenge endpoint
+        if "challenges.cloudflare.com" in lower:
+            return True
+        # Anubis / hashcash proof-of-work challenge markers
+        if "__challenge" in lower and ("hashcash" in lower or "_hcc" in lower):
+            return True
+        if "x-hashcash-solution" in lower:
+            return True
+        # "Checking your browser" challenge (title-based to avoid body-text matches)
+        try:
+            title = BeautifulSoup(html_content, "html.parser").find("title")
+            title_text = title.get_text(" ", strip=True).lower() if title else ""
+        except Exception:
+            title_text = ""
+        if "checking your browser" in title_text:
+            return True
+        return False
+
+    @staticmethod
+    def _wait_for_antibot_challenge(page, initial_content, timeout_seconds=25):
+        """Wait for a JS anti-bot challenge to resolve and return the reloaded content.
+
+        The page initially served is a challenge that either auto-submits a
+        proof-of-work and reloads to the real content, or requires ticking an
+        "I am human" checkbox. We poll until the challenge disappears (or the
+        timeout elapses). Once the challenge is gone we wait for the reloaded
+        page to actually render its body (the reload can momentarily expose a
+        head-only document) and re-read the page content.
+
+        Returns the latest page content, which may still be the challenge page if
+        it did not resolve within ``timeout_seconds``.
+        """
+        import time as _time
+        content = initial_content or ""
+        deadline = _time.monotonic() + timeout_seconds
+        while _time.monotonic() < deadline:
+            if not Fetcher._is_antibot_challenge_page(content):
+                # Challenge resolved: wait for the real body content to render
+                # before capturing, otherwise we may grab a head-only document.
+                try:
+                    page.wait_for_function(
+                        "document.body && document.body.innerText.trim().length > 500",
+                        timeout=8000,
+                    )
+                except Exception:
+                    pass
+                try:
+                    content = page.content()
+                except Exception:
+                    pass
+                return content
+            # Interactive challenges (Anubis) expose an "I am human" checkbox.
+            try:
+                checkbox = page.locator(
+                    ".check-wrap input[type='checkbox'], #active input[type='checkbox']"
+                )
+                if checkbox.count() > 0 and checkbox.first.is_visible(timeout=500):
+                    checkbox.first.check(force=True, timeout=1000)
+                    logger.info("Anti-bot challenge: ticked 'I am human' checkbox")
+            except Exception:
+                pass
+            # Let the challenge submit and reload the real page.
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            _time.sleep(2)
+            try:
+                content = page.content()
+            except Exception:
+                break
+        if Fetcher._is_antibot_challenge_page(content):
+            logger.warning("Anti-bot challenge did not resolve within the timeout.")
+        return content
 
     # ─────────────────────────────────────────────────────────────────
     # Paywall detection
@@ -11968,36 +12069,21 @@ Twitter/X Backend:
                 custom_proxy_override=custom_proxy,
             )
 
-            if output_path:
-                if output_path == "-":
-                    # Output to stdout
-                    _configure_stdout_utf8()
-                    sys.stdout.write(f"# {title}\n\n")
-                    sys.stdout.write(md_content)
-                    if not md_content.endswith("\n"):
-                        sys.stdout.write("\n")
-            else:
-                OutputHandler.save_markdown(
-                    title,
-                    md_content,
-                    config,
-                    output_path,
-                    html_content=html_content,
-                    add_front_matter=not args.no_front_matter,
-                    translated_title=translated_title if translation_performed else None,
-                    translated_description=translated_description if translation_performed else None,
-                    source_url=source_url,
-                    translator=translator,
-                    archive_url=archive_url,
-                )
-        elif args.speak:
+        if args.speak:
             TTSHandler.run_tts(title, md_content, config, speak=True)
+        elif output_path == "-":
+            # Output to stdout
+            _configure_stdout_utf8()
+            sys.stdout.write(f"# {title}\n\n")
+            sys.stdout.write(md_content)
+            if not md_content.endswith("\n"):
+                sys.stdout.write("\n")
         else:
-            # Default: Save to default md_dir
             OutputHandler.save_markdown(
                 title,
                 md_content,
                 config,
+                output_path,
                 html_content=html_content,
                 add_front_matter=not args.no_front_matter,
                 translated_title=translated_title if translation_performed else None,
