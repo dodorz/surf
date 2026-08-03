@@ -8148,12 +8148,24 @@ class Fetcher:
             return ""
         try:
             soup = BeautifulSoup(html_content, "html.parser")
-            audio_meta = soup.find("meta", attrs={"name": "surf-audio-url"})
+            audio_meta = (
+                soup.find("meta", attrs={"name": "surf-audio-url"})
+                or soup.find("meta", attrs={"property": "og:audio"})
+            )
             if audio_meta and audio_meta.get("content"):
                 return audio_meta["content"].strip()
             audio_node = soup.find("audio", src=True) or soup.find("source", src=True)
             if audio_node:
                 return audio_node.get("src", "").strip()
+            payload = _extract_direct_markdown_payload(html_content)
+            markdown_text = payload["markdown"] if payload else ""
+            match = re.search(
+                r"\*\*Audio:\*\*\s*\[[^\]]*\]\((https?://[^)]+)\)",
+                markdown_text,
+                re.IGNORECASE,
+            )
+            if match:
+                return unescape(match.group(1).strip())
         except Exception:
             pass
         return ""

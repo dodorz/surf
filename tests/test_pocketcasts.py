@@ -99,6 +99,17 @@ def test_pocketcasts_rss_matches_episode_uuid(monkeypatch):
 
 
 
+def test_pocketcasts_audio_url_falls_back_to_markdown_link():
+    html = surf._build_direct_markdown_payload(
+        "**Audio:** [Play episode](https://audio.example/episode.m4a)",
+        "Episode - Show",
+        CANONICAL_URL,
+        "pocketcasts",
+    )
+
+    assert Fetcher._extract_podcast_audio_url(html) == "https://audio.example/episode.m4a"
+
+
 def test_transcribe_cpp_appends_timestamped_transcript(monkeypatch, tmp_path):
     class Segment:
         t0_ms = 1250
