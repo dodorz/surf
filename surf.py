@@ -33,6 +33,7 @@ import trafilatura
 import re
 import unicodedata
 import signal
+from array import array
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
 
@@ -8141,6 +8142,183 @@ class Fetcher:
         return re.sub(r"\n{3,}", "\n\n", result).strip()
 
     @staticmethod
+    def _extract_podcast_audio_url(html_content):
+        """Extract the audio enclosure stored by a podcast special handler."""
+        if not html_content:
+            return ""
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            audio_meta = soup.find("meta", attrs={"name": "surf-audio-url"})
+            if audio_meta and audio_meta.get("content"):
+                return audio_meta["content"].strip()
+            audio_node = soup.find("audio", src=True) or soup.find("source", src=True)
+            if audio_node:
+                return audio_node.get("src", "").strip()
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _format_transcript_timestamp(milliseconds):
+        total_seconds = max(0, int(milliseconds or 0) // 1000)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    @staticmethod
+    def _transcribe_podcast_content(html_content, config, proxy_mode_override=None, custom_proxy_override=None):
+        """Append a local transcribe.cpp transcript to a podcast direct payload."""
+        audio_url = Fetcher._extract_podcast_audio_url(html_content)
+        if not audio_url:
+            raise ValueError("Podcast transcription requires a public audio URL in the episode RSS feed")
+
+        try:
+            import transcribe_cpp  # type: ignore
+        except ImportError as exc:
+            raise ValueError(
+                "Podcast transcription requires the optional transcribe.cpp dependency. "
+                "Install it with: uv sync --extra transcribe"
+            ) from exc
+
+        def config_value(key, fallback=""):
+            try:
+                return (config.get("Transcription", key, fallback=fallback) or "").strip()
+            except Exception:
+                return fallback
+
+        model_path = config_value("model_path") or config_value("model")
+        if not model_path:
+            raise ValueError(
+                "Podcast transcription requires [Transcription].model_path in config.ini "
+                "(a transcribe.cpp GGUF model file)"
+            )
+        model_path = resolve_user_path(model_path)
+        if not os.path.isfile(model_path):
+            raise ValueError(f"transcribe.cpp model file not found: {model_path}")
+
+        backend = config_value("backend", "auto").lower() or "auto"
+        allowed_backends = {"auto", "cpu", "vulkan", "metal", "cuda", "rocm"}
+        if backend not in allowed_backends:
+            raise ValueError(
+                f"Unsupported [Transcription].backend '{backend}'. "
+                f"Choose one of: {', '.join(sorted(allowed_backends))}"
+            )
+        language = config_value("language", "auto").lower() or "auto"
+        language = None if language == "auto" else language
+        ffmpeg = config_value("ffmpeg_path", "ffmpeg") or "ffmpeg"
+        max_audio_mb = int(config_value("max_audio_mb", "2048") or "2048")
+
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        with tempfile.TemporaryDirectory(prefix="surf-podcast-") as temp_dir:
+            suffix = os.path.splitext(urlparse(audio_url).path)[1] or ".audio"
+            input_path = os.path.join(temp_dir, f"input{suffix}")
+            pcm_path = os.path.join(temp_dir, "audio.f32le")
+            logger.info("Downloading podcast audio: %s", audio_url)
+            response = _requests_get_interruptibly(
+                audio_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
+                proxies=req_proxies,
+                timeout=30,
+                stream=True,
+            )
+            try:
+                response.raise_for_status()
+                content_length = int(response.headers.get("Content-Length") or 0)
+                if content_length and content_length > max_audio_mb * 1024 * 1024:
+                    raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
+                downloaded = 0
+                with open(input_path, "wb") as output_file:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        _raise_if_interrupted()
+                        if not chunk:
+                            continue
+                        downloaded += len(chunk)
+                        if downloaded > max_audio_mb * 1024 * 1024:
+                            raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
+                        output_file.write(chunk)
+            finally:
+                response.close()
+
+            logger.info("Converting podcast audio to 16 kHz mono float32 PCM")
+            try:
+                ffmpeg_result = _run_subprocess_interruptibly(
+                    [
+                        ffmpeg,
+                        "-nostdin",
+                        "-y",
+                        "-i",
+                        input_path,
+                        "-f",
+                        "f32le",
+                        "-acodec",
+                        "pcm_f32le",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        pcm_path,
+                    ],
+                    timeout=1800,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    check=True,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"ffmpeg was not found ({ffmpeg}). Install ffmpeg or set "
+                    "[Transcription].ffmpeg_path in config.ini"
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "").strip()[-1000:]
+                raise ValueError(f"ffmpeg could not decode podcast audio: {detail}") from exc
+
+            with open(pcm_path, "rb") as pcm_file:
+                pcm_bytes = pcm_file.read()
+            if len(pcm_bytes) < 4:
+                raise ValueError("ffmpeg produced no usable podcast audio samples")
+            pcm = array("f")
+            pcm.frombytes(pcm_bytes[: len(pcm_bytes) - (len(pcm_bytes) % 4)])
+            if sys.byteorder != "little":
+                pcm.byteswap()
+
+            logger.info("Transcribing podcast with transcribe.cpp (%s)", backend)
+            try:
+                result = transcribe_cpp.transcribe(
+                    model_path,
+                    pcm,
+                    backend=backend,
+                    language=language,
+                    timestamps="segment",
+                )
+            except Exception as exc:
+                raise ValueError(f"transcribe.cpp transcription failed: {exc}") from exc
+
+        payload = _extract_direct_markdown_payload(html_content)
+        if not payload:
+            raise ValueError("Podcast transcription requires the Pocket Casts direct Markdown payload")
+        transcript_lines = ["", "## Transcript", ""]
+        for segment in getattr(result, "segments", ()):
+            text = str(getattr(segment, "text", "") or "").strip()
+            if not text:
+                continue
+            start = getattr(segment, "t0_ms", 0)
+            transcript_lines.append(f"[{Fetcher._format_transcript_timestamp(start)}] {text}")
+        if len(transcript_lines) == 3 and getattr(result, "text", ""):
+            transcript_lines.append(str(result.text).strip())
+        if len(transcript_lines) == 3:
+            raise ValueError("transcribe.cpp returned no transcript text")
+
+        soup = payload["soup"]
+        payload_node = soup.find(id="surf-direct-markdown")
+        if payload_node is None:
+            raise ValueError("Pocket Casts direct Markdown payload is missing its content node")
+        new_markdown = payload["markdown"].rstrip() + "\n" + "\n".join(transcript_lines) + "\n"
+        payload_node.clear()
+        payload_node.append(new_markdown)
+        return str(soup)
+
+    @staticmethod
     def _fetch_pocketcasts_episode(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """Fetch a Pocket Casts episode, falling back to redirect metadata and RSS."""
         try:
@@ -8251,6 +8429,7 @@ class Fetcher:
                 "surf-podcast-id": page_info.get("podcast_id"),
                 "property:article:published_time": page_info.get("published"),
                 "keywords": podcast_title,
+                "surf-audio-url": page_info.get("audio_url"),
             }
             return _build_direct_markdown_payload(
                 markdown_text="\n\n".join(lines).strip() + "\n",
@@ -12156,9 +12335,9 @@ Special Sites:
                         with `--thread-author all`.
   Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
                         use `First sentence - Author on Site`.
-  V2EX:                Forces configured proxy by default, keeps the original
-                        language, and downloads only the main topic unless
-                        `-t/--thread` is used to include replies.
+  Pocket Casts:        `--podcast-transcribe` downloads the RSS audio enclosure and
+                        transcribes it locally with transcribe.cpp. Configure
+                        `[Transcription].model_path` with a GGUF model file.
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -12330,6 +12509,13 @@ Twitter/X Backend:
 
     # LLM
     parser.add_argument("--llm", help="Override the default LLM provider (case-insensitive)")
+
+    # Podcast transcription
+    parser.add_argument(
+        "--podcast-transcribe",
+        action="store_true",
+        help="Transcribe a Pocket Casts episode locally with transcribe.cpp (requires [Transcription].model_path)",
+    )
 
     # Other options
     parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
@@ -12602,6 +12788,20 @@ Twitter/X Backend:
             else:
                 logger.error(f"Failed to fetch usable content from {args.url}.")
             sys.exit(1)
+
+        if args.podcast_transcribe:
+            if site_name != "pocketcasts":
+                parser.error("--podcast-transcribe currently supports Pocket Casts episode URLs only")
+            try:
+                html_content = Fetcher._transcribe_podcast_content(
+                    html_content,
+                    config,
+                    proxy_mode_override=proxy_mode,
+                    custom_proxy_override=custom_proxy,
+                )
+            except Exception as exc:
+                logger.error(f"Podcast transcription failed: {exc}")
+                sys.exit(1)
 
         # ── Paywall detection and archive.is fallback ──
         paywall_result = Fetcher._detect_paywall(html_content, url=args.url)

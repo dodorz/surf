@@ -25,6 +25,9 @@ notes/
 *.pdf
 *.mp3
 
+# Local transcription models
+models/*.gguf
+
 # Distribution / packaging
 .Python
 build/

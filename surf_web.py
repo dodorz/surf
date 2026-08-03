@@ -673,6 +673,11 @@ HTML_TEMPLATE = """
                         <label for="browser">使用浏览器渲染 (JavaScript)</label>
                     </div>
 
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="podcastTranscribe" name="podcast_transcribe">
+                        <label for="podcastTranscribe">转写音频</label>
+                    </div>
+
                     <div class="form-group wide">
                         <label>线程抓取</label>
                         <div class="radio-group">
@@ -1386,6 +1391,7 @@ HTML_TEMPLATE = """
              
             // Convert checkboxes to booleans
             data.browser = data.browser === 'on';
+            data.podcast_transcribe = data.podcast_transcribe === 'on';
             data.lang_touched = langModeTouched;
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
@@ -1633,6 +1639,7 @@ HTML_TEMPLATE = """
             data.url = inputUrl || (data.url || '').trim();
             data.lang_touched = langModeTouched;
             data.browser = data.browser === 'on';
+            data.podcast_transcribe = data.podcast_transcribe === 'on';
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
@@ -2402,6 +2409,16 @@ def _process_web_request(data, translate_sync=False):
         )
         if not html_content:
             raise ValueError(f"Failed to fetch usable content from {url}")
+
+        if str(data.get("podcast_transcribe", False)).strip().lower() in {"1", "true", "yes", "on"}:
+            if site_name != "pocketcasts":
+                raise ValueError("podcast_transcribe currently supports Pocket Casts episode URLs only")
+            html_content = Fetcher._transcribe_podcast_content(
+                html_content,
+                config,
+                proxy_mode_override=proxy_override,
+                custom_proxy_override=custom_proxy,
+            )
 
         # Paywall detection and archive.is fallback
         archive_is_url = None

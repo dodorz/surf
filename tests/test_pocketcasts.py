@@ -1,3 +1,8 @@
+from array import array
+import sys
+from types import SimpleNamespace
+
+import surf
 from surf import Fetcher, OutputHandler, _extract_direct_markdown_payload
 
 
@@ -90,6 +95,74 @@ def test_pocketcasts_rss_matches_episode_uuid(monkeypatch):
     assert "Show notes" in info["description"]
     assert info["duration"] == "00:42:00"
     assert info["audio_url"] == "https://audio.example/episode.mp3"
+
+
+
+
+def test_transcribe_cpp_appends_timestamped_transcript(monkeypatch, tmp_path):
+    class Segment:
+        t0_ms = 1250
+        text = "Hello from the podcast"
+
+    class FakeResult:
+        segments = (Segment(),)
+        text = "Hello from the podcast"
+
+    class FakeTranscribeCpp:
+        @staticmethod
+        def transcribe(*args, **kwargs):
+            return FakeResult()
+
+    class AudioResponse:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=0):
+            yield b"audio"
+
+        def close(self):
+            return None
+
+    def fake_ffmpeg(command, **kwargs):
+        with open(command[-1], "wb") as pcm_file:
+            pcm_file.write(array("f", [0.0] * 16000).tobytes())
+        return SimpleNamespace(stdout="", stderr="")
+
+    class Config:
+        def get(self, section, key, fallback=""):
+            return {
+                "model_path": str(tmp_path / "model.gguf"),
+                "backend": "cpu",
+                "language": "auto",
+                "ffmpeg_path": "ffmpeg",
+                "max_audio_mb": "1",
+            }.get(key, fallback)
+
+    model_path = tmp_path / "model.gguf"
+    model_path.write_bytes(b"fake model")
+    html = surf._build_direct_markdown_payload(
+        "**Audio:** [Play episode](https://audio.example/episode.mp3)",
+        "Episode - Show",
+        CANONICAL_URL,
+        "pocketcasts",
+        extra_meta={"surf-audio-url": "https://audio.example/episode.mp3"},
+    )
+
+    monkeypatch.setitem(sys.modules, "transcribe_cpp", FakeTranscribeCpp)
+    monkeypatch.setattr("surf._requests_get_interruptibly", lambda *args, **kwargs: AudioResponse())
+    monkeypatch.setattr("surf._run_subprocess_interruptibly", fake_ffmpeg)
+    monkeypatch.setattr(
+        "surf.Fetcher._get_proxies",
+        lambda config, proxy_mode_override=None, custom_proxy_override=None: (None, None),
+    )
+
+    result = Fetcher._transcribe_podcast_content(html, Config())
+    markdown = _extract_direct_markdown_payload(result)["markdown"]
+
+    assert "## Transcript" in markdown
+    assert "[00:00:01] Hello from the podcast" in markdown
 
 
 def test_pocketcasts_handler_keeps_show_notes_and_audio_link(monkeypatch):
