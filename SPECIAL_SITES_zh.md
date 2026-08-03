@@ -7,7 +7,8 @@
 
 ## 概述
 
-surf 使用 `SPECIAL_SITE_HANDLERS` 字典来管理特殊网站的处理逻辑。每个网站配置包含：
+本文档中的常见短网址（包括 `pca.st`）会在特殊网站匹配前解析为最终长网址，匹配规则、抓取和 front matter 的 `source` 默认使用 canonical URL。
+
 - `patterns`: URL 匹配的正则表达式列表
 - `handler`: 处理函数，接收 `(url, config, proxy_mode_override, custom_proxy_override)` 参数
 - `default_no_proxy` (可选): 默认不使用代理，可被命令行参数覆盖
@@ -18,6 +19,39 @@ surf 使用 `SPECIAL_SITE_HANDLERS` 字典来管理特殊网站的处理逻辑�
 ---
 
 ## 特殊网站列表
+
+### Pocket Casts（播客剧集）
+
+**域名**:
+- `pca.st`
+- `pocketcasts.com`
+
+**匹配规则**:
+```regex
+^https?://(www\.)?pca\.st/episode/[0-9a-f-]+/?$
+^https?://(www\.)?pocketcasts\.com/podcast/.../<podcast-id>/.../<episode-id>
+```
+
+**处理函数**: `Fetcher._fetch_pocketcasts_episode`
+
+**处理流程**:
+1. 将 `pca.st/episode/<id>` 分享链接解析为 Pocket Casts 的 canonical 剧集 URL。
+2. 从 canonical URL 中提取播客名称、剧集标题、播客 UUID 和剧集 UUID，作为页面被拦截时的基本信息兜底。
+3. 优先请求剧集页面，并解析 JSON-LD、Open Graph、页面内的 Show Notes、发布时间、时长、作者和音频地址。
+4. 如果普通请求没有得到有效内容，尝试使用 Playwright 加载动态页面。
+5. 如果页面没有直接提供 feed URL，则使用播客名称查询公开的 Apple Podcasts directory，只有精确匹配播客名称时才采用其 `feedUrl`。
+6. 如果页面声明了公开 RSS feed，则下载 RSS，并优先使用剧集 GUID/UUID 或标题匹配对应的 `<item>`，补充 Show Notes、发布日期、时长和音频地址。
+7. 生成 Surf 的 direct Markdown payload，继续沿用通用翻译、Markdown、HTML、PDF 和 front matter 流程。
+
+**降级行为**:
+- Pocket Casts 页面受到 CloudFront/WAF 拦截时，不会立即失败；只要成功解析分享链接重定向，就至少输出播客名称、剧集标题和来源链接。
+- `source` 使用最终 Pocket Casts 长链接，原始 `pca.st` 分享链接在必要时保留为正文中的打开链接。
+- 生成的剧集标题采用 `剧集标题 - 播客名称`；默认文件名会在前面增加 `[播客]`，例如 `[播客] 剧集标题 - 播客名称`。
+- Show Notes 放在 `## Show Notes` 小节下，不会完整复制到 front matter 的 `description`；`Podcast`、`Podcast ID` 和 `Episode ID` 标签不会被翻译。
+- 如果能取得剧集发布日期，则写入 front matter 的 `created`；只有输出实际发生翻译变化时才保留 `translator`。
+- 当前不会自动下载或转写音频；音频地址仅作为可选播放链接保留。
+
+---
 
 ### 1. Twitter/X (推特)
 

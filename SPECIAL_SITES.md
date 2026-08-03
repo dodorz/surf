@@ -9,7 +9,7 @@ Chinese version: `SPECIAL_SITES_zh.md`
 ## Overview
 
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
-Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, and `xhslink.com` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target.
+Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target.
 Each site entry may define:
 - `patterns`: URL regex list
 - `handler`: handler function
@@ -22,20 +22,53 @@ Each site entry may define:
 
 ## Supported Special Sites
 
-1. Twitter/X
-2. WeChat Official Accounts
-3. Zhihu
-4. Xiaohongshu
-5. GitHub
-6. Wikipedia
-7. arXiv
-8. Bluesky
-9. Weibo
-10. Threads
-11. V2EX
-12. Reddit
-13. NCPSSD
-14. Douban
+- Pocket Casts Episodes
+- Twitter/X
+- WeChat Official Accounts
+- Zhihu
+- Xiaohongshu
+- GitHub
+- Wikipedia
+- arXiv
+- Bluesky
+- Weibo
+- Threads
+- V2EX
+- Reddit
+- NCPSSD
+- Douban
+
+### Pocket Casts Episodes
+
+**Domains**:
+- `pca.st`
+- `pocketcasts.com`
+
+**Matching patterns**:
+```regex
+^https?://(www\.)?pca\.st/episode/[0-9a-f-]+/?$
+^https?://(www\.)?pocketcasts\.com/podcast/.../<podcast-id>/.../<episode-id>
+```
+
+**Handler**: `Fetcher._fetch_pocketcasts_episode`
+
+**Processing flow**:
+1. Resolve `pca.st/episode/<id>` share links to the Pocket Casts canonical episode URL.
+2. Extract the podcast name, episode title, podcast UUID, and episode UUID from the canonical URL as a minimum fallback.
+3. Fetch the episode page and prefer JSON-LD, Open Graph, embedded Show Notes, publication date, duration, author, and audio URL.
+4. If the regular request does not provide usable content, try loading the dynamic page with Playwright.
+5. If the page does not expose a feed URL, query the public Apple Podcasts directory by podcast name and only accept an exact podcast-name match.
+6. If a public RSS feed is available, fetch it and match the episode by GUID/UUID or title to recover Show Notes, publication date, duration, and audio URL.
+7. Return a direct Markdown payload so the normal translation, Markdown, HTML, PDF, and front matter pipeline remains unchanged.
+
+**Fallback behavior**:
+- A CloudFront/WAF block does not immediately fail the task. If the share-link redirect can be resolved, Surf still emits the podcast name, episode title, UUIDs, and source link.
+- Front matter `source` uses the final Pocket Casts long URL; the original `pca.st` link may be retained as an opening link in the body when needed.
+- The generated episode title is `Episode Title - Podcast Name`; the default filename prefixes it with `[播客]`, for example `[播客] Episode Title - Podcast Name`.
+- Show Notes are emitted under a `## Show Notes` section; they are not copied wholesale into front matter `description`, and the `Podcast`, `Podcast ID`, and `Episode ID` labels are protected from translation.
+- The episode publication date is written to front matter `created` when available, and `translator` remains empty unless translation changes the output.
+
+---
 
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 

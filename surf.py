@@ -43,6 +43,7 @@ def _build_direct_markdown_payload(
     site_name="markdown",
     base_url=None,
     description=None,
+    extra_meta=None,
 ):
     """Wrap raw markdown so downstream code can detect and bypass HTML extraction."""
     safe_title = escape(title or "Untitled")
@@ -52,6 +53,19 @@ def _build_direct_markdown_payload(
     safe_markdown = escape(markdown_text or "")
     safe_description = escape(description or "")
     description_meta = f'\n<meta name="description" content="{safe_description}">' if description else ""
+    extra_meta_html = ""
+    for name, value in (extra_meta or {}).items():
+        if value is None or value == "":
+            continue
+        if name.startswith("property:"):
+            attribute = "property"
+            meta_name = name.split(":", 1)[1]
+        else:
+            attribute = "name"
+            meta_name = name
+        extra_meta_html += (
+            f'\n<meta {attribute}="{escape(str(meta_name))}" content="{escape(str(value))}">'
+        )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -59,7 +73,7 @@ def _build_direct_markdown_payload(
 <title>{safe_title}</title>{description_meta}
 <meta name="source-url" content="{safe_source_url}">
 <meta name="content-base-url" content="{safe_base_url}">
-<meta name="surf-source-site" content="{safe_site_name}">
+<meta name="surf-source-site" content="{safe_site_name}">{extra_meta_html}
 <meta name="surf-direct-markdown" content="true">
 </head>
 <body>
@@ -575,6 +589,11 @@ def _process_fetched_content(
             target_lang=config.get("Output", "target_language", fallback="zh-cn"),
             config=config,
             llm_provider=llm_provider,
+            protected_markdown_line_pattern=(
+                r"^(?:##\s+Show Notes|\*\*(?:Podcast|Podcast ID|Episode ID|Published|Duration|Audio):\*\*)"
+                if source_site == "pocketcasts"
+                else None
+            ),
         )
         translation_performed = _translation_was_performed(
             original_md,
@@ -594,6 +613,11 @@ def _process_fetched_content(
 
         if skip_title_translation:
             translated_title = original_title
+
+        if source_site == "pocketcasts" and " - " in original_title and translated_title:
+            # Keep the podcast title suffix even if an LLM returns only the episode title.
+            if " - " not in translated_title:
+                translated_title = f"{translated_title} - {original_title.rsplit(' - ', 1)[1]}"
 
         if lang_mode == "both":
             logger.info("Language mode set to 'both'. Combining original and translation.")
@@ -1368,6 +1392,7 @@ class Fetcher:
         "youtu.be",
         "b23.tv",
         "xhslink.com",
+        "pca.st",
     }
 
     _HTML_META_CHARSET_RE = re.compile(rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE)
@@ -4640,6 +4665,23 @@ class Fetcher:
         return bool(re.match(r"^https?://(www\.)?(twitter|x)\.com/", url, re.IGNORECASE))
 
     @staticmethod
+    def _is_cloudflare_turnstile(html_content):
+        """Detect if a page is a Cloudflare Turnstile challenge.
+
+        Turnstile challenges show "Just a moment..." (English) or "请稍候..."
+        (Chinese) as the page title and require a real browser to pass.
+        Headless browsers cannot solve Turnstile challenges automatically.
+        """
+        if not html_content:
+            return False
+        try:
+            title = BeautifulSoup(html_content, "html.parser").find("title")
+            title_text = title.get_text(" ", strip=True).lower() if title else ""
+        except Exception:
+            return False
+        return "just a moment" in title_text or "请稍候" in title_text
+
+    @staticmethod
     def _create_stealth_context(browser, url=None, auth_site_name=None):
         """
         Create a browser context with anti-detection measures.
@@ -4766,6 +4808,8 @@ class Fetcher:
             twitter_profile_dir = AuthHandler.get_twitter_profile_dir() if is_twitter_url else None
 
             # Prefer persistent Twitter profile if it exists (more reliable than storage_state alone).
+            use_headless = True  # Default; overridden for Zhihu/Turnstile retry
+            launch_args = None
             if (
                 is_twitter_url
                 and twitter_profile_dir
@@ -4935,13 +4979,69 @@ class Fetcher:
                             raise
 
                 # Resolve JS anti-bot challenges (Anubis/hashcash, Cloudflare
-                # "Checking your browser") that auto-submit a proof-of-work and reload,
-                # or require ticking an "I am human" checkbox. The page content read
-                # above may still be the challenge interstitial, so wait for it to
-                # resolve and re-read the reloaded page.
+                # "Checking your browser", Cloudflare Turnstile "Just a moment...")
+                # that auto-submit a proof-of-work and reload, or require ticking
+                # an "I am human" checkbox. The page content read above may still be
+                # the challenge interstitial, so wait for it to resolve and re-read
+                # the reloaded page.
                 if not is_twitter_url and Fetcher._is_antibot_challenge_page(content):
-                    logger.info("Anti-bot challenge detected; waiting for it to resolve...")
-                    content = Fetcher._wait_for_antibot_challenge(page, content, timeout_seconds=20)
+                    # Cloudflare Turnstile challenges take longer (~35-40s) to resolve
+                    challenge_timeout = 45 if not is_zhihu_url else 25
+                    logger.info("Anti-bot challenge detected; waiting up to %ds for it to resolve...", challenge_timeout)
+                    content = Fetcher._wait_for_antibot_challenge(page, content, timeout_seconds=challenge_timeout)
+
+                    # If Turnstile challenge still present and we're in headless mode,
+                    # retry with headed browser (headless Chromium cannot solve Turnstile)
+                    if (
+                        Fetcher._is_cloudflare_turnstile(content)
+                        and use_headless
+                        and launch_args is not None
+                        and not is_zhihu_url
+                        and not is_twitter_url
+                    ):
+                        logger.warning(
+                            "Cloudflare Turnstile detected in headless mode; "
+                            "retrying with visible browser window..."
+                        )
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+                        if browser:
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
+
+                        # Relaunch with headed mode
+                        launch_args_headed = dict(launch_args)
+                        launch_args_headed["headless"] = False
+                        browser = p.chromium.launch(**launch_args_headed)
+                        context = Fetcher._create_stealth_context(browser, url)
+                        page = context.new_page()
+
+                        try:
+                            page.goto(url, wait_until="networkidle", timeout=60000)
+                        except PlaywrightTimeoutError:
+                            try:
+                                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            except PlaywrightTimeoutError:
+                                pass
+                        page.wait_for_timeout(3000)
+
+                        for _content_attempt in range(3):
+                            try:
+                                content = page.content()
+                                break
+                            except Exception as content_err:
+                                if "navigating" in str(content_err).lower() and _content_attempt < 2:
+                                    page.wait_for_timeout(3000)
+                                else:
+                                    raise
+
+                        if Fetcher._is_antibot_challenge_page(content):
+                            logger.info("Waiting for Turnstile challenge in headed mode...")
+                            content = Fetcher._wait_for_antibot_challenge(page, content, timeout_seconds=45)
 
                 if is_twitter_url:
                     if Fetcher._is_twitter_placeholder_content(content):
@@ -7668,6 +7768,504 @@ class Fetcher:
         }
 
     @staticmethod
+    def _extract_pocketcasts_episode_identifiers(url):
+        """Extract podcast/episode identifiers and URL-embedded fallback titles."""
+        if not url:
+            return {}
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return {}
+
+        path_parts = [unquote(part).strip() for part in parsed.path.split("/") if part]
+        uuids = re.findall(
+            r"(?i)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            parsed.path,
+        )
+        if not uuids:
+            return {}
+
+        info = {"episode_id": uuids[-1].lower()}
+        if len(uuids) >= 2:
+            info["podcast_id"] = uuids[0].lower()
+
+        try:
+            podcast_index = next(i for i, part in enumerate(path_parts) if part.lower() == "podcast")
+        except StopIteration:
+            podcast_index = -1
+
+        if podcast_index >= 0:
+            slug_parts = path_parts[podcast_index + 1 :]
+            first_uuid_index = next(
+                (i for i, part in enumerate(slug_parts) if re.fullmatch(
+                    r"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                    part,
+                )),
+                None,
+            )
+            if first_uuid_index is not None:
+                if first_uuid_index > 0:
+                    info["podcast_title"] = slug_parts[0]
+                episode_slug_parts = slug_parts[first_uuid_index + 1 : -1]
+                if episode_slug_parts:
+                    info["episode_title"] = "/".join(episode_slug_parts)
+
+        return info
+
+    @staticmethod
+    def _pocketcasts_jsonld_episode(html_content):
+        """Return the most episode-like JSON-LD object from a Pocket Casts page."""
+        if not html_content:
+            return {}
+        soup = BeautifulSoup(html_content, "html.parser")
+        candidates = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                value_type = value.get("@type") or value.get("type") or ""
+                type_text = " ".join(value_type) if isinstance(value_type, list) else str(value_type)
+                normalized_keys = {re.sub(r"[^a-z0-9]", "", str(key).lower()) for key in value}
+                episode_signal = bool(
+                    re.search(r"episode|audioobject|podcast", type_text, re.IGNORECASE)
+                    or normalized_keys.intersection(
+                        {"episodeid", "episodeuuid", "episodetitle", "shownotes", "audiourl", "audiofileurl", "mediaurl", "feedurl", "rssurl"}
+                    )
+                )
+                if episode_signal and (
+                    value.get("name")
+                    or value.get("title")
+                    or value.get("description")
+                    or value.get("showNotes")
+                    or value.get("show_notes")
+                ):
+                    candidates.append(value)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        for script in soup.find_all("script", attrs={"type": re.compile(r"(?:ld\+json|application/json)", re.IGNORECASE)}):
+            raw = script.string or script.get_text()
+            if not raw:
+                continue
+            try:
+                walk(json.loads(raw))
+            except (ValueError, TypeError):
+                continue
+
+        if not candidates:
+            return {}
+        # PodcastEpisode/AudioObject is preferable to the enclosing Podcast object.
+        candidates.sort(
+            key=lambda item: 0 if re.search(
+                r"episode|audioobject", str(item.get("@type") or item.get("type") or ""), re.IGNORECASE
+            ) else 1
+        )
+        return candidates[0]
+
+    @staticmethod
+    def _pocketcasts_page_info(html_content, url):
+        """Extract structured metadata, show notes and feed discovery links."""
+        info = Fetcher._extract_pocketcasts_episode_identifiers(url)
+        if not html_content:
+            return info
+
+        soup = BeautifulSoup(html_content, "html.parser")
+        jsonld = Fetcher._pocketcasts_jsonld_episode(html_content)
+
+        def value_from_meta(*selectors):
+            for attrs in selectors:
+                tag = soup.find("meta", attrs=attrs)
+                if tag:
+                    value = tag.get("content") or tag.get("value")
+                    if value and value.strip():
+                        return unescape(value.strip())
+            return ""
+
+        def nested_name(value):
+            if isinstance(value, dict):
+                return str(value.get("name") or value.get("title") or value.get("alternateName") or "").strip()
+            return str(value or "").strip()
+
+        def json_value(*keys):
+            available = {str(key).lower(): value for key, value in jsonld.items()}
+            for key in keys:
+                value = available.get(str(key).lower())
+                if value is not None and value != "":
+                    return value
+            return ""
+
+        episode_title = str(json_value("name", "title", "episodeTitle", "episode_title") or "").strip()
+        description_value = json_value(
+            "description", "showNotes", "show_notes", "episodeDescription", "summary", "content", "notes"
+        )
+        description = description_value if isinstance(description_value, str) else ""
+        description = description.strip()
+        if not episode_title:
+            episode_title = value_from_meta({"property": "og:title"})
+        if not description:
+            description = value_from_meta(
+                {"property": "og:description"},
+                {"name": "description"},
+            )
+
+        author = nested_name(json_value("author", "creator", "host"))
+        podcast = nested_name(
+            json_value("partOfSeries", "isPartOf", "podcast", "show", "series", "showName", "podcastName")
+        )
+        if not podcast and isinstance(jsonld.get("partOfSeries"), str):
+            podcast = jsonld["partOfSeries"].strip()
+        if not podcast:
+            podcast = value_from_meta({"property": "og:site_name"})
+
+        published_value = json_value(
+            "datePublished", "uploadDate", "published", "publishedAt", "publishedDate", "publishDate", "pubDate"
+        )
+        published = str(published_value or "").strip()
+        duration = str(json_value("duration", "length") or "").strip()
+        audio_url = ""
+        associated_media = json_value(
+            "associatedMedia", "audio", "contentUrl", "audioUrl", "audio_url", "audioFileUrl", "mediaUrl", "media_url", "downloadUrl"
+        )
+        if isinstance(associated_media, list):
+            for media in associated_media:
+                if isinstance(media, dict):
+                    audio_url = str(media.get("contentUrl") or media.get("url") or "").strip()
+                elif isinstance(media, str):
+                    audio_url = media.strip()
+                if audio_url:
+                    break
+        elif isinstance(associated_media, dict):
+            audio_url = str(associated_media.get("contentUrl") or associated_media.get("url") or "").strip()
+        elif isinstance(associated_media, str):
+            audio_url = associated_media.strip()
+        if not audio_url:
+            audio_url = value_from_meta(
+                {"property": "og:audio"},
+                {"property": "og:audio:secure_url"},
+                {"name": "twitter:player:stream"},
+            )
+        if not audio_url:
+            audio_node = soup.find("audio", src=True) or soup.find("source", src=True)
+            if audio_node:
+                audio_url = urljoin(url, audio_node.get("src"))
+
+        if not podcast:
+            podcast = info.get("podcast_title") or ""
+        if not episode_title:
+            episode_title = info.get("episode_title") or ""
+
+        # Some versions expose Show Notes in an article/main container but no JSON-LD description.
+        if not description:
+            for selector in ("article", "main", "[class*='show-notes']", "[class*='description']"):
+                node = soup.select_one(selector)
+                if not node:
+                    continue
+                text = node.get_text(" ", strip=True)
+                if len(text) >= 40:
+                    description = str(node)
+                    break
+
+        feed_url = ""
+        for link in soup.find_all("link", href=True):
+            rel = " ".join(link.get("rel") or []).lower()
+            link_type = (link.get("type") or "").lower()
+            if "alternate" in rel and ("rss" in link_type or "atom" in link_type or "xml" in link_type):
+                feed_url = urljoin(url, link["href"])
+                break
+        if not feed_url:
+            for attr in ("data-feed-url", "data-rss-url", "data-feed"):
+                node = soup.find(attrs={attr: True})
+                if node and node.get(attr):
+                    feed_url = urljoin(url, node.get(attr))
+                    break
+        if not feed_url:
+            feed_value = json_value("feedUrl", "feed_url", "rssUrl", "rss_url")
+            if isinstance(feed_value, str) and feed_value.strip():
+                feed_url = urljoin(url, feed_value.strip())
+        if not feed_url:
+            # SPA state commonly keeps the feed under one of these JSON field names.
+            feed_match = re.search(
+                r"[\"'](?:feedUrl|rssUrl|feed_url|rss_url)[\"']\s*:\s*[\"']([^\"']+)[\"']",
+                unescape(html_content),
+                re.IGNORECASE,
+            )
+            if feed_match:
+                feed_url = urljoin(url, feed_match.group(1).replace("\\/", "/"))
+
+        info.update(
+            {
+                "episode_title": episode_title,
+                "description": description,
+                "author": author,
+                "podcast_title": podcast,
+                "published": published,
+                "duration": duration,
+                "audio_url": audio_url,
+                "feed_url": feed_url,
+            }
+        )
+        return info
+
+    @staticmethod
+    def _discover_pocketcasts_rss_from_directory(podcast_title, config, proxy_mode_override, custom_proxy_override):
+        """Find a public RSS feed by exact podcast-name match in Apple's public directory."""
+        if not podcast_title:
+            return ""
+
+        def normalize(value):
+            return re.sub(r"[^\w\u3400-\u9fff]+", "", unescape(str(value or "")).casefold())
+
+        target = normalize(podcast_title)
+        if not target:
+            return ""
+        try:
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+            directory_url = "https://itunes.apple.com/search?" + urlencode(
+                {"term": podcast_title, "entity": "podcast", "limit": 10}
+            )
+            response = _requests_get_interruptibly(
+                directory_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+                proxies=req_proxies,
+                timeout=15,
+            )
+            response.raise_for_status()
+            try:
+                payload = response.json()
+            except (AttributeError, ValueError, TypeError):
+                payload = json.loads(Fetcher._decode_response_text(response))
+            for result in payload.get("results", []) if isinstance(payload, dict) else []:
+                feed_url = result.get("feedUrl") or ""
+                names = (result.get("collectionName"), result.get("trackName"))
+                if feed_url.startswith(("http://", "https://")) and any(normalize(name) == target for name in names):
+                    return feed_url
+        except Exception as exc:
+            logger.info("Pocket Casts: RSS directory discovery failed: %s", exc)
+        return ""
+
+    @staticmethod
+    def _pocketcasts_xml_value(node, *names, html=False):
+        """Get an RSS value by local tag name, including namespaced tags."""
+        if not node:
+            return ""
+        wanted = {name.lower() for name in names}
+        for child in node.find_all(True):
+            local_name = child.name.rsplit("}", 1)[-1].split(":")[-1].lower()
+            if local_name not in wanted:
+                continue
+            if html:
+                return child.decode_contents().strip()
+            return child.get_text(" ", strip=True)
+        return ""
+
+    @staticmethod
+    def _fetch_pocketcasts_rss(feed_url, episode_id, episode_title, config, proxy_mode_override, custom_proxy_override):
+        """Fetch and match one episode from a public RSS feed."""
+        if not feed_url:
+            return {}
+        try:
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+            response = _requests_get_interruptibly(
+                feed_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/rss+xml, application/xml, text/xml"},
+                proxies=req_proxies,
+                timeout=20,
+            )
+            response.raise_for_status()
+            soup = BeautifulSoup(Fetcher._decode_response_text(response), "xml")
+            items = [
+                item for item in soup.find_all(True)
+                if item.name.rsplit("}", 1)[-1].split(":")[-1].lower() == "item"
+            ]
+            if not items:
+                return {}
+
+            normalized_title = re.sub(r"[^\w\u3400-\u9fff]+", "", unescape(episode_title or "")).casefold()
+            selected = None
+            fuzzy_matches = []
+            for item in items:
+                item_blob = str(item)
+                if episode_id and episode_id.casefold() in item_blob.casefold():
+                    selected = item
+                    break
+                title = Fetcher._pocketcasts_xml_value(item, "title")
+                item_title = re.sub(r"[^\w\u3400-\u9fff]+", "", title).casefold()
+                if normalized_title and item_title == normalized_title:
+                    selected = item
+                    break
+                if normalized_title and item_title and (
+                    normalized_title in item_title or item_title in normalized_title
+                ):
+                    shorter = min(len(normalized_title), len(item_title))
+                    longer = max(len(normalized_title), len(item_title))
+                    if longer and shorter / longer >= 0.65:
+                        fuzzy_matches.append(item)
+            if selected is None and len(fuzzy_matches) == 1:
+                selected = fuzzy_matches[0]
+            if selected is None:
+                return {}
+
+            title = Fetcher._pocketcasts_xml_value(selected, "title") or episode_title
+            notes = Fetcher._pocketcasts_xml_value(selected, "encoded", "description", html=True)
+            if not notes:
+                notes = Fetcher._pocketcasts_xml_value(selected, "description")
+            enclosure = selected.find("enclosure")
+            audio_url = enclosure.get("url", "").strip() if enclosure else ""
+            return {
+                "episode_title": title.strip(),
+                "description": notes.strip(),
+                "published": Fetcher._pocketcasts_xml_value(selected, "pubdate", "published", "date"),
+                "duration": Fetcher._pocketcasts_xml_value(selected, "duration"),
+                "audio_url": audio_url,
+                "author": Fetcher._pocketcasts_xml_value(selected, "author", "creator"),
+                "podcast_title": Fetcher._pocketcasts_xml_value(soup, "title"),
+                "feed_url": feed_url,
+            }
+        except Exception as exc:
+            logger.info("Pocket Casts: RSS fallback failed for %s: %s", feed_url, exc)
+            return {}
+
+    @staticmethod
+    def _pocketcasts_description_to_markdown(description):
+        if not description:
+            return ""
+        try:
+            if "<" in description and ">" in description:
+                result = markdownify.markdownify(description, heading_style="ATX")
+            else:
+                result = unescape(description)
+        except Exception:
+            result = BeautifulSoup(description, "html.parser").get_text(" ", strip=True)
+        return re.sub(r"\n{3,}", "\n\n", result).strip()
+
+    @staticmethod
+    def _fetch_pocketcasts_episode(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """Fetch a Pocket Casts episode, falling back to redirect metadata and RSS."""
+        try:
+            original_url = url
+            canonical_url = url
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower().split(":", 1)[0]
+            if host in {"pca.st", "www.pca.st"}:
+                req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+                resolved = Fetcher._resolve_url_with_redirects(url, proxies=req_proxies, timeout=20)
+                if resolved:
+                    canonical_url = resolved
+
+            info = Fetcher._extract_pocketcasts_episode_identifiers(canonical_url)
+            page_html = ""
+            try:
+                req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+                response = _requests_get_interruptibly(
+                    canonical_url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                        ),
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    },
+                    proxies=req_proxies,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                page_html = Fetcher._decode_response_text(response)
+                canonical_url = response.url or canonical_url
+            except Exception as exc:
+                logger.info("Pocket Casts: direct page request failed: %s", exc)
+
+            page_info = Fetcher._pocketcasts_page_info(page_html, canonical_url)
+
+            def merge_rss_info():
+                if not page_info.get("feed_url"):
+                    page_info["feed_url"] = Fetcher._discover_pocketcasts_rss_from_directory(
+                        page_info.get("podcast_title"),
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
+                    )
+                rss_info = Fetcher._fetch_pocketcasts_rss(
+                    page_info.get("feed_url"),
+                    page_info.get("episode_id"),
+                    page_info.get("episode_title"),
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                )
+                for key, value in rss_info.items():
+                    if value and not (key == "episode_title" and page_info.get("episode_title")):
+                        page_info[key] = value
+
+            # Try the public directory/RSS route before opening a browser. This is
+            # both faster and more reliable when Pocket Casts is WAF-blocked.
+            merge_rss_info()
+            if (not page_info.get("description") or not page_info.get("audio_url")) and canonical_url.startswith("http"):
+                try:
+                    browser_html = Fetcher.fetch_with_browser(
+                        canonical_url, config, proxy_mode_override, custom_proxy_override
+                    )
+                    browser_info = Fetcher._pocketcasts_page_info(browser_html, canonical_url)
+                    if browser_info:
+                        page_info.update({key: value for key, value in browser_info.items() if value})
+                    if browser_html and len(browser_html) > len(page_html):
+                        page_html = browser_html
+                    # The browser may reveal a feed URL that the initial HTML hid.
+                    merge_rss_info()
+                except Exception as exc:
+                    logger.info("Pocket Casts: browser page request failed: %s", exc)
+
+            title = page_info.get("episode_title") or "Pocket Casts Episode"
+            podcast_title = page_info.get("podcast_title") or ""
+            if podcast_title and title != "Pocket Casts Episode":
+                title = f"{title} - {podcast_title}"
+            description = page_info.get("description") or ""
+            description_markdown = Fetcher._pocketcasts_description_to_markdown(description)
+            lines = []
+            if podcast_title:
+                lines.append(f"**Podcast:** {podcast_title}")
+            if page_info.get("podcast_id"):
+                lines.append(f"**Podcast ID:** {page_info['podcast_id']}")
+            if page_info.get("episode_id"):
+                lines.append(f"**Episode ID:** {page_info['episode_id']}")
+            if page_info.get("published"):
+                lines.append(f"**Published:** {page_info['published']}")
+            if page_info.get("duration"):
+                lines.append(f"**Duration:** {page_info['duration']}")
+            if page_info.get("audio_url"):
+                lines.append(f"**Audio:** [Play episode]({page_info['audio_url']})")
+            if description_markdown:
+                lines.append("")
+                lines.append("## Show Notes")
+                lines.append("")
+                lines.append(description_markdown)
+            if not lines:
+                lines.append(f"[Open this episode in Pocket Casts]({original_url})")
+
+            source_url = canonical_url if canonical_url.startswith("http") else original_url
+            extra_meta = {
+                "surf-author": page_info.get("author") or podcast_title,
+                "surf-podcast-title": podcast_title,
+                "surf-episode-id": page_info.get("episode_id"),
+                "surf-podcast-id": page_info.get("podcast_id"),
+                "property:article:published_time": page_info.get("published"),
+                "keywords": podcast_title,
+            }
+            return _build_direct_markdown_payload(
+                markdown_text="\n\n".join(lines).strip() + "\n",
+                title=title,
+                source_url=source_url,
+                site_name="pocketcasts",
+                base_url=source_url,
+                description=None,
+                extra_meta=extra_meta,
+            )
+        except Exception as exc:
+            logger.warning("Pocket Casts handler failed: %s", exc)
+            return None
+
+    @staticmethod
     def _fetch_v2ex_topic(
         url,
         config,
@@ -8092,17 +8690,26 @@ class Fetcher:
         for pattern in Fetcher._ANTI_BOT_TEXT_PATTERNS:
             if pattern.search(lower):
                 return True
+        # Cloudflare Turnstile "Just a moment..." / "请稍候..." challenge
+        try:
+            title = BeautifulSoup(html_content, "html.parser").find("title")
+            title_text = title.get_text(" ", strip=True).lower() if title else ""
+        except Exception:
+            title_text = ""
+        if "just a moment" in title_text or "请稍候" in title_text:
+            return True
         return False
 
     @staticmethod
     def _is_antibot_challenge_page(html_content):
         """Detect a JavaScript anti-bot challenge page.
 
-        Covers Cloudflare's "Checking your browser" interstitial as well as
-        WordPress.com/Anubis-style hashcash proof-of-work challenges that either
-        auto-submit and reload or ask the visitor to tick an "I am human"
-        checkbox. Detection is deliberately precise (title- and marker-based) so
-        it does not trip on ordinary article body text.
+        Covers Cloudflare's "Checking your browser" and Turnstile
+        "Just a moment..." interstitial as well as WordPress.com/Anubis-style
+        hashcash proof-of-work challenges that either auto-submit and reload or
+        ask the visitor to tick an "I am human" checkbox. Detection is
+        deliberately precise (title- and marker-based) so it does not trip on
+        ordinary article body text.
         """
         if not html_content:
             return False
@@ -8115,13 +8722,17 @@ class Fetcher:
             return True
         if "x-hashcash-solution" in lower:
             return True
-        # "Checking your browser" challenge (title-based to avoid body-text matches)
+        # Title-based detection to avoid body-text matches
         try:
             title = BeautifulSoup(html_content, "html.parser").find("title")
             title_text = title.get_text(" ", strip=True).lower() if title else ""
         except Exception:
             title_text = ""
+        # Cloudflare "Checking your browser" challenge
         if "checking your browser" in title_text:
+            return True
+        # Cloudflare Turnstile "Just a moment..." / "请稍候..." challenge
+        if "just a moment" in title_text or "请稍候" in title_text:
             return True
         return False
 
@@ -8770,6 +9381,14 @@ SPECIAL_SITE_HANDLERS = {
         ],
         "handler": Fetcher._fetch_reddit_content,
     },
+    "pocketcasts": {
+        "patterns": [
+            r"^https?://(www\.)?pocketcasts\.com/podcast/.*/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.+/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/?(?:[?#].*)?$",
+            r"^https?://(www\.)?pca\.st/episode/[0-9a-f-]+/?$",
+        ],
+        "handler": Fetcher._fetch_pocketcasts_episode,
+        "no_generic_fallback": True,
+    },
     "v2ex": {
         "patterns": [
             r"^https?://(www\.)?v2ex\.com/t/\d+",
@@ -9078,7 +9697,15 @@ class ContentProcessor:
         return chunks
 
     @classmethod
-    def translate_if_needed(cls, text, title=None, target_lang="zh-cn", config=None, llm_provider=None):
+    def translate_if_needed(
+        cls,
+        text,
+        title=None,
+        target_lang="zh-cn",
+        config=None,
+        llm_provider=None,
+        protected_markdown_line_pattern=None,
+    ):
         """
         Detects language and translates (content + title) if necessary using chunking.
 
@@ -9088,12 +9715,24 @@ class ContentProcessor:
             target_lang (str): Target language code (default: 'zh-cn')
             config: Config object
             llm_provider (str, optional): Override the default LLM provider
+            protected_markdown_line_pattern (str, optional): Regex for Markdown metadata lines to keep verbatim
 
         Returns:
             tuple: (translated_text, translated_title)
         """
         try:
-            lang = detect(text[:1000])  # Detect based on first 1000 chars
+            protected_lines = []
+            translation_text = text
+            if protected_markdown_line_pattern and text:
+                translatable_lines = []
+                for line in text.splitlines():
+                    if re.match(protected_markdown_line_pattern, line):
+                        protected_lines.append(line)
+                    else:
+                        translatable_lines.append(line)
+                translation_text = re.sub(r"\n{3,}", "\n\n", "\n".join(translatable_lines)).strip()
+
+            lang = detect(translation_text[:1000])  # Detect based on first 1000 chars
             logger.info(f"Detected language: {lang}")
         except Exception as e:
             logger.warning(f"Language detection failed: {e}. Assuming translation needed.")
@@ -9102,7 +9741,7 @@ class ContentProcessor:
         if (
             target_lang.lower() in lang.lower()
             or lang == "zh-cn"
-            or cls._text_appears_to_match_target_language(text, target_lang)
+            or cls._text_appears_to_match_target_language(translation_text, target_lang)
         ):
             logger.info("Language matches target or is already Chinese. Skipping translation.")
             return text, title
@@ -9147,7 +9786,7 @@ class ContentProcessor:
                     logger.error(f"Title translation failed: {e}")
 
             # 2. Translate Content (Chunked)
-            chunks = cls._chunk_text(text)
+            chunks = cls._chunk_text(translation_text)
             translated_chunks = []
 
             total_chunks = len(chunks)
@@ -9170,7 +9809,14 @@ class ContentProcessor:
                 )
                 translated_chunks.append(completion.choices[0].message.content)
 
-            return "\n\n".join(translated_chunks), translated_title
+            if protected_lines:
+                translated_text = "\n\n".join(protected_lines)
+                if translated_text and translated_chunks:
+                    translated_text += "\n\n"
+                translated_text += "\n\n".join(translated_chunks)
+            else:
+                translated_text = "\n\n".join(translated_chunks)
+            return translated_text, translated_title
 
         except Exception as e:
             logger.error(f"Translation failed: {e}")
@@ -9934,6 +10580,15 @@ class OutputHandler:
         twitter_title = OutputHandler._extract_social_first_sentence_title(html_content, source_url=source_url)
         if twitter_title:
             return twitter_title
+        if html_content:
+            try:
+                soup = BeautifulSoup(html_content, "html.parser")
+                source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
+                source_site = (source_site_tag.get("content") or "").strip().lower() if source_site_tag else ""
+                if source_site == "pocketcasts":
+                    return f"[播客] {title or 'Untitled'}"
+            except Exception:
+                pass
         return title
 
     @staticmethod
@@ -10222,6 +10877,12 @@ class OutputHandler:
             zhihu_author_tag = soup.find("meta", attrs={"name": "surf-author"})
             if zhihu_author_tag:
                 author_value = (zhihu_author_tag.get("content") or "").strip()
+                if author_value:
+                    metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
+        elif source_site == "pocketcasts":
+            pocketcasts_author_tag = soup.find("meta", attrs={"name": "surf-author"})
+            if pocketcasts_author_tag:
+                author_value = (pocketcasts_author_tag.get("content") or "").strip()
                 if author_value:
                     metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
 
