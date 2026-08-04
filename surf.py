@@ -8219,6 +8219,8 @@ class Fetcher:
         language = None if language == "auto" else language
         ffmpeg = config_value("ffmpeg_path", "ffmpeg") or "ffmpeg"
         max_audio_mb = int(config_value("max_audio_mb", "2048") or "2048")
+        audio_timeout = max(30, int(config_value("audio_timeout", "120") or "120"))
+        audio_request_timeout = (15, audio_timeout)
 
         req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         with tempfile.TemporaryDirectory(prefix="surf-podcast-") as temp_dir:
@@ -8231,7 +8233,7 @@ class Fetcher:
                     audio_url,
                     headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
                     proxies=req_proxies,
-                    timeout=30,
+                    timeout=audio_request_timeout,
                     stream=True,
                 )
             except requests.exceptions.RequestException as exc:
@@ -8245,7 +8247,7 @@ class Fetcher:
                     audio_url,
                     headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
                     proxies={"http": "", "https": ""},
-                    timeout=30,
+                    timeout=audio_request_timeout,
                     stream=True,
                 )
             try:

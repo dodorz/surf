@@ -48,6 +48,8 @@ language = auto
 ffmpeg_path = ffmpeg
 ; Maximum downloaded audio size in MB
 max_audio_mb = 2048
+; Audio connection read timeout in seconds
+audio_timeout = 120
 
 [Network]
 ; Proxy mode: env (environment vars), win (Windows Internet Settings), custom (use custom_proxy), no (no proxy)
