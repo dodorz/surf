@@ -8226,13 +8226,28 @@ class Fetcher:
             input_path = os.path.join(temp_dir, f"input{suffix}")
             pcm_path = os.path.join(temp_dir, "audio.f32le")
             logger.info("Downloading podcast audio: %s", audio_url)
-            response = _requests_get_interruptibly(
-                audio_url,
-                headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
-                proxies=req_proxies,
-                timeout=30,
-                stream=True,
-            )
+            try:
+                response = _requests_get_interruptibly(
+                    audio_url,
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
+                    proxies=req_proxies,
+                    timeout=30,
+                    stream=True,
+                )
+            except requests.exceptions.RequestException as exc:
+                if not req_proxies:
+                    raise
+                logger.warning(
+                    "Podcast audio request through the configured proxy failed; retrying directly: %s",
+                    exc,
+                )
+                response = _requests_get_interruptibly(
+                    audio_url,
+                    headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
+                    proxies={"http": "", "https": ""},
+                    timeout=30,
+                    stream=True,
+                )
             try:
                 response.raise_for_status()
                 content_length = int(response.headers.get("Content-Length") or 0)
