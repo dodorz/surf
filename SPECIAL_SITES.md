@@ -67,9 +67,9 @@ Each site entry may define:
 - The generated episode title is `Episode Title - Podcast Name`; the default filename prefixes it with `[播客]`, for example `[播客] Episode Title - Podcast Name`.
 - Show Notes are emitted under a `## Show Notes` section; they are not copied wholesale into front matter `description`, and the `Podcast`, `Podcast ID`, and `Episode ID` labels are protected from translation.
 - The episode publication date is written to front matter `created` when available, and `translator` remains empty unless translation changes the output.
-- With `--podcast-transcribe`, the RSS audio enclosure is downloaded and converted to 16 kHz mono float32 PCM, then transcribed locally through `transcribe-cpp`.
+- With `-w/--transcribe`, the RSS audio enclosure is downloaded and converted to 16 kHz mono float32 PCM, then transcribed locally through `transcribe-cpp`.
 - The optional backend is installed with `uv sync --extra transcribe`; `[Transcription].model_path` must point to a GGUF model and `ffmpeg` must be available.
-- The transcript is appended under `## Transcript` with segment timestamps. The current first version does not automatically download models or enable diarization.
+- The transcript is appended under `## Transcript` with segment timestamps. Transcript text follows the same language mode as the rest of the document (`trans` / `raw` / `both` from CLI, config defaults, and site policy). Show Notes and Transcript are language-detected and translated independently so Chinese notes cannot suppress English transcript translation. The current first version does not automatically download models or enable diarization.
 
 ---
 

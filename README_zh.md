@@ -9,7 +9,7 @@
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
 - **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts 等网站优化处理，支持复用已保存的登录态。
-- **Podcast 音频转写**：使用 `--podcast-transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写 Pocket Casts 剧集；配置 `[Transcription].model_path` 指向 GGUF 模型，Web 界面也提供相同选项。
+- **Podcast 音频转写**：使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写 Pocket Casts 剧集；配置 `[Transcription].model_path` 指向 GGUF 模型，Web 界面也提供相同选项。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
 - **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`pca.st/episode/...` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。
@@ -43,10 +43,10 @@ Markdown front matter 的 title 使用 `剧集标题 - 播客名称`；默认文
 
 ```bash
 uv sync --extra transcribe
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" --podcast-transcribe
+surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -w
 ```
 
-Web 界面提供相同的 `transcribe.cpp` 选项；请配置 `[Transcription].model_path` 并确保系统安装了 `ffmpeg`。
+Web 界面提供相同的 `transcribe.cpp` 选项；请配置 `[Transcription].model_path` 并确保系统安装了 `ffmpeg`。转写文本遵循当前语言模式（`trans` / `raw` / `both`）；Show Notes 与 Transcript 会分别翻译。
 
 ### 特殊网站策略
 

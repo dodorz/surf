@@ -243,3 +243,100 @@ def test_pocketcasts_handler_returns_redirect_metadata_when_page_is_blocked(monk
     assert OutputHandler._get_filename_title(
         metadata["title"], html_content=result
     ) == "[播客] my-episode - my-show"
+
+
+def test_split_markdown_at_transcript_heading():
+    markdown = (
+        "**Podcast:** Show\n\n"
+        "## Show Notes\n\n"
+        "中文说明\n\n"
+        "## Transcript\n\n"
+        "[00:00:01] Hello from the podcast\n"
+    )
+
+    before, section = surf._split_markdown_at_h2(markdown, "Transcript")
+
+    assert "## Transcript" not in before
+    assert section.startswith("## Transcript")
+    assert "[00:00:01] Hello from the podcast" in section
+
+
+def test_pocketcasts_transcript_translates_independently_of_chinese_notes(monkeypatch):
+    calls = []
+
+    def fake_translate(
+        text,
+        title=None,
+        target_lang="zh-cn",
+        config=None,
+        llm_provider=None,
+        protected_markdown_line_pattern=None,
+        extra_system_instruction=None,
+    ):
+        calls.append(
+            {
+                "text": text,
+                "title": title,
+                "protected": protected_markdown_line_pattern,
+                "extra": extra_system_instruction,
+            }
+        )
+        if text.startswith("## Transcript"):
+            return "## Transcript\n\n[00:00:01] 来自播客的问候\n", title
+        return text, (f"译名: {title}" if title else title)
+
+    monkeypatch.setattr(surf.ContentProcessor, "translate_if_needed", fake_translate)
+
+    notes = "这是一期关于气候的播客说明。" * 20
+    markdown = (
+        f"**Podcast:** Climate Show\n"
+        f"**Episode ID:** abc\n\n"
+        f"## Show Notes\n\n"
+        f"{notes}\n\n"
+        f"## Transcript\n\n"
+        f"[00:00:01] Hello from the podcast\n"
+    )
+
+    translated, translated_title = surf._translate_markdown_document(
+        markdown,
+        title="Episode - Climate Show",
+        target_lang="zh-cn",
+        config=object(),
+        source_site="pocketcasts",
+    )
+
+    assert len(calls) == 2
+    assert "## Transcript" not in calls[0]["text"]
+    assert calls[1]["text"].startswith("## Transcript")
+    assert calls[1]["extra"]
+    assert "## Transcript" in translated
+    assert "[00:00:01] 来自播客的问候" in translated
+    assert "Hello from the podcast" not in translated
+    assert translated_title == "译名: Episode - Climate Show"
+
+
+def test_raw_lang_mode_keeps_transcript_untranslated(monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("raw mode must not translate")
+
+    monkeypatch.setattr(surf.ContentProcessor, "translate_if_needed", fail_if_called)
+
+    html = surf._build_direct_markdown_payload(
+        "**Podcast:** Show\n\n## Transcript\n\n[00:00:01] Hello\n",
+        "Episode - Show",
+        CANONICAL_URL,
+        "pocketcasts",
+    )
+
+    processed = surf._process_fetched_content(
+        html,
+        CANONICAL_URL,
+        config=object(),
+        site_name="pocketcasts",
+        site_config={},
+        lang_mode="raw",
+    )
+
+    assert "[00:00:01] Hello" in processed["markdown"]
+    assert processed["translation_performed"] is False
+

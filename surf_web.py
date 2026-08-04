@@ -74,10 +74,12 @@ from surf import (
     OutputHandler,
     TTSHandler,
     _convert_embedded_html_in_markdown,
+    _extract_direct_markdown_payload,
     _get_handler_for_url,
     _get_version,
     logger,
     _process_fetched_content,
+    _translate_markdown_document,
     resolve_user_path,
 )
 
@@ -1935,12 +1937,18 @@ def _run_web_translation_job(job_id):
             translator_model = config.get_llm_config(job.get("llm_provider"))["model"]
         except Exception:
             translator_model = None
-        translated_markdown, translated_title = ContentProcessor.translate_if_needed(
+        source_site = (source.get("source_site") or "").strip().lower()
+        if not source_site:
+            payload = _extract_direct_markdown_payload((source.get("metadata") or {}).get("html_content"))
+            if payload:
+                source_site = (payload.get("site_name") or "").strip().lower()
+        translated_markdown, translated_title = _translate_markdown_document(
             raw_markdown,
             title=original_title,
             target_lang=config.get("Output", "target_language", fallback="zh-cn"),
             config=config,
             llm_provider=job.get("llm_provider"),
+            source_site=source_site,
         )
         translation_performed = (
             translated_markdown != raw_markdown
@@ -2503,6 +2511,7 @@ def _process_web_request(data, translate_sync=False):
         "raw": original_md,
         "raw_markdown": original_md,
         "original_title": original_title,
+        "source_site": site_name,
         "defaultDirs": defaultDirs,
         "defaultSaveTitle": defaultSaveTitle,
         "translation_performed": translation_performed,

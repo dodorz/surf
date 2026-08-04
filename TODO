@@ -25,7 +25,7 @@
     - [x] 认证状态的保存位置
     - [x] Twitter
     - [x] pocketcasts(https://pca.st/episode/)
-    - [x] podcast-transcribe（将播客音频转写为文本）
+    - [x] -w/--transcribe（将播客音频转写为文本）
     - [x] 小红书
         - [x] http://xhslink.com/o/XXX
         - [x] 加入source时删除URL中不必要参数

@@ -112,6 +112,103 @@ def _extract_direct_markdown_payload(html_content):
         return None
 
 
+_POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN = (
+    r"^(?:##\s+(?:Show Notes|Transcript)"
+    r"|\*\*(?:Podcast|Podcast ID|Episode ID|Published|Duration|Audio):\*\*)"
+)
+
+
+def _split_markdown_at_h2(markdown_text, heading_name):
+    """Split markdown into content before an H2 and the H2 section itself.
+
+    Returns ``(before, section)`` where ``section`` starts with the matched
+    ``## Heading`` line. If the heading is absent, returns ``(markdown, "")``.
+    """
+    text = markdown_text or ""
+    lines = text.splitlines()
+    heading_re = re.compile(rf"^##\s+{re.escape(heading_name)}\s*$", re.IGNORECASE)
+    for index, line in enumerate(lines):
+        if heading_re.match(line):
+            before = "\n".join(lines[:index]).rstrip()
+            section = "\n".join(lines[index:]).strip("\n")
+            return before, section
+    return text, ""
+
+
+def _join_markdown_sections(*sections):
+    """Join non-empty markdown sections with a blank line between them."""
+    parts = []
+    for section in sections:
+        cleaned = (section or "").strip("\n")
+        if cleaned:
+            parts.append(cleaned)
+    if not parts:
+        return ""
+    return "\n\n".join(parts) + "\n"
+
+
+def _translate_markdown_document(
+    markdown_text,
+    *,
+    title=None,
+    target_lang="zh-cn",
+    config=None,
+    llm_provider=None,
+    source_site=None,
+):
+    """Translate markdown while honoring site-specific section rules.
+
+    Pocket Casts transcripts are translated independently from Show Notes so a
+    Chinese notes body cannot suppress translation of an English ``## Transcript``.
+    """
+    site = (source_site or "").strip().lower()
+    protected_pattern = _POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN if site == "pocketcasts" else None
+
+    if site == "pocketcasts":
+        body_markdown, transcript_markdown = _split_markdown_at_h2(markdown_text, "Transcript")
+        translated_body, translated_title = ContentProcessor.translate_if_needed(
+            body_markdown,
+            title=title,
+            target_lang=target_lang,
+            config=config,
+            llm_provider=llm_provider,
+            protected_markdown_line_pattern=protected_pattern,
+        )
+        if transcript_markdown:
+            translated_transcript, _ = ContentProcessor.translate_if_needed(
+                transcript_markdown,
+                title=None,
+                target_lang=target_lang,
+                config=config,
+                llm_provider=llm_provider,
+                protected_markdown_line_pattern=r"^##\s+Transcript\s*$",
+                extra_system_instruction=(
+                    "Keep [HH:MM:SS] timestamps and the ## Transcript heading unchanged. "
+                    "Translate only the spoken transcript text after each timestamp."
+                ),
+            )
+            translated_markdown = _join_markdown_sections(translated_body, translated_transcript)
+        else:
+            translated_markdown = translated_body
+    else:
+        translated_markdown, translated_title = ContentProcessor.translate_if_needed(
+            markdown_text,
+            title=title,
+            target_lang=target_lang,
+            config=config,
+            llm_provider=llm_provider,
+            protected_markdown_line_pattern=protected_pattern,
+        )
+
+    if site == "pocketcasts" and title and " - " in title and translated_title:
+        # Keep the podcast title suffix even if an LLM returns only the episode title.
+        if " - " not in translated_title:
+            translated_title = f"{translated_title} - {title.rsplit(' - ', 1)[1]}"
+
+    return translated_markdown, translated_title
+
+
+
 def _render_markdown_to_html(markdown_text):
     """Render markdown for HTML/PDF output when the fetch step already returned markdown."""
     try:
@@ -584,17 +681,13 @@ def _process_fetched_content(
     if lang_mode == "raw":
         logger.info("Language mode set to 'raw'. Skipping translation.")
     else:
-        translated_md, translated_title = ContentProcessor.translate_if_needed(
+        translated_md, translated_title = _translate_markdown_document(
             md_content,
             title=None if skip_title_translation else title,
             target_lang=config.get("Output", "target_language", fallback="zh-cn"),
             config=config,
             llm_provider=llm_provider,
-            protected_markdown_line_pattern=(
-                r"^(?:##\s+Show Notes|\*\*(?:Podcast|Podcast ID|Episode ID|Published|Duration|Audio):\*\*)"
-                if source_site == "pocketcasts"
-                else None
-            ),
+            source_site=source_site,
         )
         translation_performed = _translation_was_performed(
             original_md,
@@ -614,11 +707,6 @@ def _process_fetched_content(
 
         if skip_title_translation:
             translated_title = original_title
-
-        if source_site == "pocketcasts" and " - " in original_title and translated_title:
-            # Keep the podcast title suffix even if an LLM returns only the episode title.
-            if " - " not in translated_title:
-                translated_title = f"{translated_title} - {original_title.rsplit(' - ', 1)[1]}"
 
         if lang_mode == "both":
             logger.info("Language mode set to 'both'. Combining original and translation.")
@@ -9913,6 +10001,7 @@ class ContentProcessor:
         config=None,
         llm_provider=None,
         protected_markdown_line_pattern=None,
+        extra_system_instruction=None,
     ):
         """
         Detects language and translates (content + title) if necessary using chunking.
@@ -9924,6 +10013,7 @@ class ContentProcessor:
             config: Config object
             llm_provider (str, optional): Override the default LLM provider
             protected_markdown_line_pattern (str, optional): Regex for Markdown metadata lines to keep verbatim
+            extra_system_instruction (str, optional): Extra guidance appended to the content system prompt
 
         Returns:
             tuple: (translated_text, translated_title)
@@ -10000,6 +10090,13 @@ class ContentProcessor:
             total_chunks = len(chunks)
             logger.info(f"Content split into {total_chunks} chunks for translation.")
 
+            content_system_prompt = (
+                f"You are a helpful translator. Translate the following Markdown content to {target_lang}. "
+                "Preserve the Markdown formatting strictly. Output ONLY the translated markdown."
+            )
+            if extra_system_instruction:
+                content_system_prompt = f"{content_system_prompt} {extra_system_instruction}".strip()
+
             for i, chunk in enumerate(chunks):
                 logger.info(f"Translating chunk {i + 1}/{total_chunks} ({len(chunk)} chars)...")
                 completion = client.chat.completions.create(
@@ -10007,10 +10104,7 @@ class ContentProcessor:
                     messages=[
                         {
                             "role": "system",
-                            "content": (
-                                f"You are a helpful translator. Translate the following Markdown content to {target_lang}. "
-                                "Preserve the Markdown formatting strictly. Output ONLY the translated markdown."
-                            ),
+                            "content": content_system_prompt,
                         },
                         {"role": "user", "content": chunk},
                     ],
@@ -12364,7 +12458,7 @@ Special Sites:
                         with `--thread-author all`.
   Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
                         use `First sentence - Author on Site`.
-  Pocket Casts:        `--podcast-transcribe` downloads the RSS audio enclosure and
+  Pocket Casts:        `-w/--transcribe` downloads the RSS audio enclosure and
                         transcribes it locally with transcribe.cpp. Configure
                         `[Transcription].model_path` with a GGUF model file.
 
@@ -12541,7 +12635,8 @@ Twitter/X Backend:
 
     # Podcast transcription
     parser.add_argument(
-        "--podcast-transcribe",
+        "-w",
+        "--transcribe",
         action="store_true",
         help="Transcribe a Pocket Casts episode locally with transcribe.cpp (requires [Transcription].model_path)",
     )
@@ -12818,9 +12913,9 @@ Twitter/X Backend:
                 logger.error(f"Failed to fetch usable content from {args.url}.")
             sys.exit(1)
 
-        if args.podcast_transcribe:
+        if args.transcribe:
             if site_name != "pocketcasts":
-                parser.error("--podcast-transcribe currently supports Pocket Casts episode URLs only")
+                parser.error("-w/--transcribe currently supports Pocket Casts episode URLs only")
             try:
                 html_content = Fetcher._transcribe_podcast_content(
                     html_content,

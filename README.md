@@ -9,7 +9,7 @@
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
 - **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), NCPSSD, and Pocket Casts with reusable saved authentication support.
-- **Podcast Audio Transcription**: With `--podcast-transcribe`, Pocket Casts episodes can be downloaded and transcribed locally through the optional `transcribe-cpp` backend. Configure a GGUF model under `[Transcription].model_path`; the Web UI exposes the same option.
+- **Podcast Audio Transcription**: With `-w/--transcribe`, Pocket Casts episodes can be downloaded and transcribed locally through the optional `transcribe-cpp` backend. Configure a GGUF model under `[Transcription].model_path`; the Web UI exposes the same option.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, `xhslink.com`, and `pca.st/episode/...` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL.
@@ -36,10 +36,10 @@ To transcribe the episode locally, install the optional backend and configure a 
 
 ```bash
 uv sync --extra transcribe
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" --podcast-transcribe
+surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -w
 ```
 
-The Web UI exposes the same `transcribe.cpp` option. Configure `[Transcription].model_path` and ensure `ffmpeg` is installed.
+The Web UI exposes the same `transcribe.cpp` option. Configure `[Transcription].model_path` and ensure `ffmpeg` is installed. Transcript text follows the active language mode (`trans` / `raw` / `both`); Show Notes and Transcript are translated independently.
 
 ### Translation Mode
 
