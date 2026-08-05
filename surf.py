@@ -4867,6 +4867,58 @@ class Fetcher:
         is_twitter_article=False,
         trusted_host_map=None,
     ):
+        """Run the synchronous Playwright fetch outside any active asyncio loop."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return Fetcher._fetch_with_browser_sync(
+                url,
+                config,
+                proxy_mode_override,
+                custom_proxy_override,
+                is_twitter_article,
+                trusted_host_map,
+            )
+
+        result_queue = queue.Queue(maxsize=1)
+
+        def run_browser_fetch():
+            try:
+                result_queue.put(
+                    ("result", Fetcher._fetch_with_browser_sync(
+                        url,
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
+                        is_twitter_article,
+                        trusted_host_map,
+                    ))
+                )
+            except BaseException as exc:
+                result_queue.put(("error", exc))
+
+        worker = threading.Thread(target=run_browser_fetch, daemon=True)
+        worker.start()
+        while True:
+            _raise_if_interrupted()
+            try:
+                kind, payload = result_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if kind == "error":
+                raise payload
+            return payload
+
+    @staticmethod
+    def _fetch_with_browser_sync(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        is_twitter_article=False,
+        trusted_host_map=None,
+    ):
+        """Fetch a page with Playwright's synchronous API."""
         logger.info("Launching browser...")
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
