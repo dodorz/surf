@@ -9405,13 +9405,16 @@ class Fetcher:
                 )
 
             # ── navigate to archive.is/<url> ──
-            listing_url = f"https://archive.is/{quote(url, safe='')}"
+            listing_url = f"https://archive.is/?run=1&url={quote(url, safe='')}"
             logger.info(f"archive.is: opening listing page: {listing_url}")
             try:
                 page.goto(listing_url, wait_until="domcontentloaded", timeout=20000)
             except PlaywrightTimeoutError:
-                logger.warning("archive.is: timeout loading listing page")
-                return None, None
+                logger.warning("archive.is: timeout loading listing page; inspecting the partially loaded page")
+                try:
+                    page.wait_for_timeout(3000)
+                except Exception:
+                    pass
             # Let the page settle — listing pages may have deferred scripts.
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
