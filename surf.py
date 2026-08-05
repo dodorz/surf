@@ -9471,8 +9471,46 @@ class Fetcher:
                     logger.info(f"archive.is: selected latest snapshot: {snapshot_url}")
 
             if not snapshot_url:
-                logger.warning(f"archive.is: no snapshot found for {url}")
-                return None, None
+                if not headless:
+                    import time as _time
+                    logger.warning(
+                        "archive.is: no snapshot found yet; keeping the visible browser open for manual inspection"
+                    )
+                    print(
+                        "\narchive.is 页面暂未返回快照列表，浏览器窗口将保留 120 秒，"
+                        "请完成 CAPTCHA 或等待页面加载。\n"
+                    )
+                    deadline = _time.monotonic() + 120
+                    while _time.monotonic() < deadline and not snapshot_url:
+                        try:
+                            current_url = page.url
+                            if re.search(
+                                r"archive\\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$",
+                                current_url,
+                                re.IGNORECASE,
+                            ) and "run=1" not in current_url and "search=" not in current_url.lower():
+                                snapshot_url = current_url
+                                break
+                            all_links = page.locator("a[href]")
+                            for i in range(min(all_links.count(), 200)):
+                                href = all_links.nth(i).get_attribute("href") or ""
+                                abs_href = urljoin("https://archive.is/", href)
+                                if re.search(
+                                    r"archive\\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,20}$",
+                                    abs_href,
+                                    re.IGNORECASE,
+                                ) and "run=1" not in abs_href and "search=" not in abs_href.lower():
+                                    snapshot_url = abs_href
+                                    break
+                        except Exception:
+                            pass
+                        if not snapshot_url:
+                            page.wait_for_timeout(2000)
+                    if snapshot_url:
+                        logger.info(f"archive.is: selected snapshot after waiting: {snapshot_url}")
+                if not snapshot_url:
+                    logger.warning(f"archive.is: no snapshot found for {url}")
+                    return None, None
 
             # ── open snapshot page ──
             # archive.is injects tracking pixels into archived pages that
