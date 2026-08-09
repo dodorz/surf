@@ -9388,9 +9388,9 @@ class Fetcher:
             "--disable-popup-blocking", "--disable-extensions",
         ]
 
-        def _launch_browser(p, headless):
+        def _launch_browser(p, headless, use_proxy=True):
             kwargs = {"headless": headless, "args": list(browser_args)}
-            if pw_proxy:
+            if use_proxy and pw_proxy:
                 kwargs["proxy"] = pw_proxy
             return p.chromium.launch(**kwargs)
 
@@ -9628,6 +9628,20 @@ class Fetcher:
                 if html_result is not None:
                     return html_result, snap_url
 
+                if pw_proxy:
+                    logger.info("archive.is: proxy attempt failed; retrying headless without proxy")
+                    browser_direct = _launch_browser(p, headless=True, use_proxy=False)
+                    context_direct = Fetcher._create_stealth_context(browser_direct, "https://archive.is/")
+                    page_direct = context_direct.new_page()
+                    page_direct.set_default_timeout(30000)
+                    direct_result, direct_snap_url = _run_workflow(page_direct, headless=True)
+                    try:
+                        browser_direct.close()
+                    except Exception:
+                        pass
+                    if direct_result is not None:
+                        return direct_result, direct_snap_url
+
                 logger.info(
                     "archive.is: headless attempt failed; "
                     "retrying with visible browser for manual CAPTCHA completion..."
@@ -9639,7 +9653,7 @@ class Fetcher:
                     + "  请在新窗口中完成验证，完成后程序将自动继续\n"
                     + "=" * 60 + "\n"
                 )
-                browser2 = _launch_browser(p, headless=False)
+                browser2 = _launch_browser(p, headless=False, use_proxy=False if pw_proxy else True)
                 context2 = Fetcher._create_stealth_context(browser2, "https://archive.is/")
                 page2 = context2.new_page()
                 page2.set_default_timeout(30000)
