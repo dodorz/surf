@@ -6,7 +6,7 @@
 - 动态读取：`surf.py` 中的 `__version__` 通过 `_get_version()` 函数动态读取 `pyproject.toml [project]` 小节的版本号
 - 统一导入：`surf_web.py` 等其他模块直接从 `surf` 导入 `__version__`，不重复定义
 - 遵循语义化版本规范 (Semantic Versioning): `MAJOR.MINOR.PATCH.BUILD`
-- 每次功能修复提交递增 BUILD 版本号
+- 每次功能修复提交递增 BUILD 版本号；**非主分支提交一律不递增版本号**，版本号递增仅在合并或提交到主分支时进行
 - 其余版本号按提示词要求递增
 - Git 提交信息使用英文
 - 每次Git提交时将版本号作为tag（不带v前缀，如 `1.1.4.181`）

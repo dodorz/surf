@@ -92,6 +92,8 @@ We recommend using `uv` for a clean environment.
     ```
     `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `rapidocr-onnxruntime` for image OCR.
 
+    Playwright remains Surf's default and most compatible browser backend. Surf also has an experimental Obscura backend. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases), then set `[Browser] backend = obscura` in `config.ini`. Surf starts `obscura serve` on demand and connects through CDP. The experimental backend is intended for ordinary dynamic pages; Twitter/X, Zhihu, headed login, CAPTCHA, and complex browser features continue to use Playwright.
+
 3.  **Optional: Install OCR engine(s) for image OCR**:
     `surf` prefers `RapidOCR` via the Python package dependency. If you need to install it separately, run:
     ```bash
@@ -318,7 +320,7 @@ uv run surf.py "https://example.com" -n
 
 ### Generate PDF (-p)
 
-Generate a PDF file using Playwright (the default and only engine):
+Generate a PDF file using Playwright (the default PDF engine):
 
 - **playwright**: Highly reliable, uses the installed browser.
 

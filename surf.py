@@ -4910,6 +4910,44 @@ class Fetcher:
             return payload
 
     @staticmethod
+    def _fetch_with_obscura_sync(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        is_twitter_article=False,
+        trusted_host_map=None,
+    ):
+        """Fetch a regular dynamic page through the experimental Obscura backend."""
+        is_zhihu_url = bool(
+            re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
+        )
+        if is_twitter_article or Fetcher._is_twitter_url(url) or is_zhihu_url:
+            raise RuntimeError("Obscura backend is not enabled for Twitter/X or Zhihu")
+        if trusted_host_map:
+            raise RuntimeError("Obscura backend does not support trusted host resolver rules yet")
+
+        from obscura_backend import ObscuraBackend
+
+        _, proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        has_section = getattr(config, "has_section", lambda _name: False)
+        browser_config = config["Browser"] if has_section("Browser") else {}
+        executable = browser_config.get("obscura_executable", "obscura").strip() or "obscura"
+        endpoint = browser_config.get("obscura_endpoint", "http://127.0.0.1:9222").strip()
+        stealth = browser_config.getboolean("obscura_stealth", fallback=False)
+        try:
+            startup_timeout = float(browser_config.get("obscura_startup_timeout", "15"))
+        except (TypeError, ValueError):
+            startup_timeout = 15.0
+        logger.warning("Using experimental Obscura backend at %s", endpoint)
+        return ObscuraBackend(
+            executable=executable,
+            endpoint=endpoint,
+            startup_timeout=startup_timeout,
+            stealth=stealth,
+        ).fetch(url, proxy=proxy)
+
+    @staticmethod
     def _fetch_with_browser_sync(
         url,
         config,
@@ -4919,6 +4957,24 @@ class Fetcher:
         trusted_host_map=None,
     ):
         """Fetch a page with Playwright's synchronous API."""
+        has_section = getattr(config, "has_section", lambda _name: False)
+        backend = (
+            config.get("Browser", "backend", fallback="playwright").strip().lower()
+            if has_section("Browser")
+            else "playwright"
+        )
+        if backend == "obscura":
+            return Fetcher._fetch_with_obscura_sync(
+                url,
+                config,
+                proxy_mode_override,
+                custom_proxy_override,
+                is_twitter_article,
+                trusted_host_map,
+            )
+        if backend not in {"playwright", "chromium"}:
+            raise ValueError(f"Unsupported browser backend: {backend}")
+
         logger.info("Launching browser...")
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 

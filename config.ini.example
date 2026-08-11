@@ -51,6 +51,18 @@ max_audio_mb = 2048
 ; Audio connection read timeout in seconds
 audio_timeout = 120
 
+[Browser]
+; Browser backend for dynamic pages: playwright (default) or obscura (experimental)
+backend = playwright
+; Obscura executable name or absolute path
+obscura_executable = obscura
+; Obscura CDP endpoint; Surf starts a short-lived server when it is unavailable
+obscura_endpoint = http://127.0.0.1:9222
+; Build Obscura with anti-detection and tracker blocking enabled
+obscura_stealth = false
+; Seconds to wait for the Obscura CDP endpoint during startup
+obscura_startup_timeout = 15
+
 [Network]
 ; Proxy mode: env (environment vars), win (Windows Internet Settings), custom (use custom_proxy), no (no proxy)
 proxy_mode = env
