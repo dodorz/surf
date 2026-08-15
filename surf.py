@@ -36,7 +36,6 @@ import signal
 from array import array
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
 
-
 def _build_direct_markdown_payload(
     markdown_text,
     title,
@@ -82,7 +81,6 @@ def _build_direct_markdown_payload(
 </body>
 </html>"""
 
-
 def _extract_direct_markdown_payload(html_content):
     """Return embedded markdown payload when the fetch stage already resolved raw markdown."""
     if not html_content:
@@ -111,12 +109,10 @@ def _extract_direct_markdown_payload(html_content):
     except Exception:
         return None
 
-
 _POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN = (
     r"^(?:##\s+(?:Show Notes|Transcript)"
     r"|\*\*(?:Podcast|Podcast ID|Episode ID|Published|Duration|Audio):\*\*)"
 )
-
 
 def _split_markdown_at_h2(markdown_text, heading_name):
     """Split markdown into content before an H2 and the H2 section itself.
@@ -134,7 +130,6 @@ def _split_markdown_at_h2(markdown_text, heading_name):
             return before, section
     return text, ""
 
-
 def _join_markdown_sections(*sections):
     """Join non-empty markdown sections with a blank line between them."""
     parts = []
@@ -145,7 +140,6 @@ def _join_markdown_sections(*sections):
     if not parts:
         return ""
     return "\n\n".join(parts) + "\n"
-
 
 def _translate_markdown_document(
     markdown_text,
@@ -207,8 +201,6 @@ def _translate_markdown_document(
 
     return translated_markdown, translated_title
 
-
-
 def _render_markdown_to_html(markdown_text):
     """Render markdown for HTML/PDF output when the fetch step already returned markdown."""
     try:
@@ -218,7 +210,6 @@ def _render_markdown_to_html(markdown_text):
     except Exception:
         body = f"<pre>{escape(markdown_text or '')}</pre>"
     return f"<article>{body}</article>"
-
 
 def _strip_v2ex_leading_metadata(markdown_text):
     if not markdown_text:
@@ -247,7 +238,6 @@ def _strip_v2ex_leading_metadata(markdown_text):
         return ""
 
     return "\n".join(lines[index:]).lstrip("\r\n")
-
 
 _EMBEDDED_HTML_TAGS = (
     "a",
@@ -319,7 +309,6 @@ _EMBEDDED_HTML_VOID_RE = re.compile(
 )
 _MARKDOWN_FENCE_RE = re.compile(r"^\s*(```+|~~~+)")
 
-
 _SVG_ATTR_CASE_MAP = {
     "viewbox": "viewBox",
     "preserveaspectratio": "preserveAspectRatio",
@@ -359,7 +348,6 @@ text{font-family:Arial,"Noto Sans",sans-serif}
 .c-amber .th,.c-amber .t{fill:#714707}.c-amber .ts{fill:#9b650d}
 """.strip()
 
-
 def _tag_classes(tag):
     attrs = getattr(tag, "attrs", None) if tag is not None else None
     if not isinstance(attrs, dict):
@@ -371,13 +359,11 @@ def _tag_classes(tag):
         return set(classes.split())
     return {str(cls) for cls in classes}
 
-
 def _tag_get(tag, key, default=None):
     attrs = getattr(tag, "attrs", None) if tag is not None else None
     if not isinstance(attrs, dict):
         return default
     return attrs.get(key, default)
-
 
 def _svg_numeric_size(svg):
     def parse_dimension(value):
@@ -395,7 +381,6 @@ def _svg_numeric_size(svg):
             width = width if width is not None else float(numbers[2])
             height = height if height is not None else float(numbers[3])
     return width, height
-
 
 def _svg_alt_text(svg):
     for attr in ("aria-label", "title", "alt"):
@@ -420,7 +405,6 @@ def _svg_alt_text(svg):
         text = text[:117].rstrip() + "..."
     return text or "inline SVG illustration"
 
-
 def _svg_is_decorative(svg):
     classes = _tag_classes(svg)
     text = svg.get_text(" ", strip=True)
@@ -434,7 +418,6 @@ def _svg_is_decorative(svg):
     if not text and not svg.find(["path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "image"]):
         return True
     return False
-
 
 def _svg_is_content_illustration(svg):
     if _svg_is_decorative(svg):
@@ -456,7 +439,6 @@ def _svg_is_content_illustration(svg):
     area = (width or 0) * (height or 0)
     return bool((area >= 10000 or width == 100) and (text_count >= 2 or graphic_count >= 6))
 
-
 def _normalize_svg_attribute_case(svg):
     for tag in [svg] + list(svg.find_all(True)):
         if not isinstance(getattr(tag, "attrs", None), dict):
@@ -464,7 +446,6 @@ def _normalize_svg_attribute_case(svg):
         for lower_name, proper_name in _SVG_ATTR_CASE_MAP.items():
             if lower_name in tag.attrs and proper_name not in tag.attrs:
                 tag.attrs[proper_name] = tag.attrs.pop(lower_name)
-
 
 def _sanitize_svg_for_markdown(svg):
     for unsafe in svg.find_all(["script", "foreignObject", "iframe", "object", "embed"]):
@@ -481,13 +462,11 @@ def _sanitize_svg_for_markdown(svg):
         style_tag.string = _SVG_BOARD_STYLE
         svg.insert(0, style_tag)
 
-
 def _svg_to_data_uri(svg):
     _sanitize_svg_for_markdown(svg)
     svg_markup = str(svg)
     encoded = base64.b64encode(svg_markup.encode("utf-8")).decode("ascii")
     return f"data:image/svg+xml;base64,{encoded}"
-
 
 def _prepare_inline_svgs_for_markdown(html):
     if not html or "<svg" not in html.lower():
@@ -513,13 +492,11 @@ def _prepare_inline_svgs_for_markdown(html):
 
     return str(soup) if changed else html
 
-
 def _markdownify_embedded_html_fragment(html_fragment):
     html_fragment = _prepare_inline_svgs_for_markdown(html_fragment)
     converted = markdownify.markdownify(html_fragment or "", heading_style="ATX")
     converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
     return converted
-
 
 def _convert_embedded_html_in_markdown_chunk(markdown_text):
     def replace_pair(match):
@@ -531,7 +508,6 @@ def _convert_embedded_html_in_markdown_chunk(markdown_text):
     converted = _EMBEDDED_HTML_PAIR_RE.sub(replace_pair, markdown_text)
     converted = _EMBEDDED_HTML_VOID_RE.sub(replace_void, converted)
     return converted
-
 
 def _convert_embedded_html_in_markdown(markdown_text):
     """Convert embedded HTML fragments in fetched markdown while preserving code fences."""
@@ -567,7 +543,6 @@ def _convert_embedded_html_in_markdown(markdown_text):
     flush_current(not in_fence)
     return "".join(chunks)
 
-
 def _translation_was_performed(
     original_text,
     translated_text,
@@ -581,7 +556,6 @@ def _translation_was_performed(
         return True
     return False
 
-
 def _extract_source_url_from_html(html_blob, default_url):
     """Return the embedded source URL when fetchers resolved or normalized the original URL."""
     if not html_blob:
@@ -594,7 +568,6 @@ def _extract_source_url_from_html(html_blob, default_url):
     except Exception:
         pass
     return default_url
-
 
 def _process_fetched_content(
     html_content,
@@ -748,7 +721,6 @@ def _process_fetched_content(
         "html_content": html_content,
     }
 
-
 def _get_version():
     """从 pyproject.toml [project] 小节读取版本号"""
     try:
@@ -760,7 +732,6 @@ def _get_version():
     except Exception:
         return "0.0.0"
 
-
 __version__ = _get_version()
 
 # Suppress warnings
@@ -771,13 +742,11 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 _INTERRUPTED = False
 
-
 def _handle_sigint(signum, frame):
     """Record Ctrl+C and raise KeyboardInterrupt in the main thread promptly."""
     global _INTERRUPTED
     _INTERRUPTED = True
     raise KeyboardInterrupt
-
 
 def _install_interrupt_handler():
     """Install a consistent Ctrl+C handler when the runtime supports it."""
@@ -787,12 +756,10 @@ def _install_interrupt_handler():
         # Keep the default behavior on runtimes that reject custom handlers.
         pass
 
-
 def _raise_if_interrupted():
     """Abort the current workflow after a previously received Ctrl+C."""
     if _INTERRUPTED:
         raise KeyboardInterrupt
-
 
 def _run_subprocess_interruptibly(command, **kwargs):
     """
@@ -850,7 +817,6 @@ def _run_subprocess_interruptibly(command, **kwargs):
 
     return _CompletedProcess(command, process.returncode, stdout, stderr)
 
-
 def _decode_subprocess_output(value):
     """Decode subprocess output robustly across Windows console locales."""
     if isinstance(value, bytes):
@@ -863,7 +829,6 @@ def _decode_subprocess_output(value):
                 continue
         return value.decode("utf-8", errors="replace")
     return value or ""
-
 
 def _call_interruptibly(func, *args, poll_interval=0.2, **kwargs):
     """
@@ -893,21 +858,17 @@ def _call_interruptibly(func, *args, poll_interval=0.2, **kwargs):
             raise payload
         return payload
 
-
 def _requests_get_interruptibly(*args, **kwargs):
     """Wrapper around requests.get that remains responsive to Ctrl+C."""
     return _call_interruptibly(requests.get, *args, **kwargs)
-
 
 def _requests_post_interruptibly(*args, **kwargs):
     """Wrapper around requests.post that remains responsive to Ctrl+C."""
     return _call_interruptibly(requests.post, *args, **kwargs)
 
-
 def _session_get_interruptibly(session, *args, **kwargs):
     """Wrapper around requests.Session.get that remains responsive to Ctrl+C."""
     return _call_interruptibly(session.get, *args, **kwargs)
-
 
 class _SystemTrustHTTPAdapter(requests.adapters.HTTPAdapter):
     """Requests adapter that uses the OS/OpenSSL default trust store."""
@@ -920,7 +881,6 @@ class _SystemTrustHTTPAdapter(requests.adapters.HTTPAdapter):
         kwargs["ssl_context"] = ssl.create_default_context()
         return super().proxy_manager_for(*args, **kwargs)
 
-
 def _configure_stdout_utf8():
     """Best-effort stdout UTF-8 reconfiguration for Windows console output."""
     try:
@@ -928,15 +888,12 @@ def _configure_stdout_utf8():
     except Exception:
         pass
 
-
 _SYSTEM_TRUST_REQUESTS_SESSION = requests.Session()
 _SYSTEM_TRUST_REQUESTS_SESSION.mount("https://", _SystemTrustHTTPAdapter())
-
 
 def _requests_get_with_system_trust_interruptibly(*args, **kwargs):
     """Requests.get via a session that uses the system default trust chain."""
     return _session_get_interruptibly(_SYSTEM_TRUST_REQUESTS_SESSION, *args, **kwargs)
-
 
 def _get_local_dns_addresses(hostname):
     addresses = []
@@ -954,7 +911,6 @@ def _get_local_dns_addresses(hostname):
                 seen.add(address)
                 addresses.append(address)
     return addresses
-
 
 def _resolve_host_via_google_doh(hostname, timeout=10):
     if not hostname:
@@ -981,7 +937,6 @@ def _resolve_host_via_google_doh(hostname, timeout=10):
             seen.add(address)
             addresses.append(address)
     return addresses
-
 
 def _analyze_network_fetch_failure(url, error):
     try:
@@ -1033,11 +988,9 @@ def _analyze_network_fetch_failure(url, error):
         "message": message,
     }
 
-
 def _diagnose_network_fetch_failure(url, error):
     analysis = _analyze_network_fetch_failure(url, error)
     return analysis.get("message") if analysis else None
-
 
 def _resolve_proxy_args(args, parser, config):
     """Resolve and validate CLI proxy arguments, with config fallback for custom mode."""
@@ -1067,7 +1020,6 @@ def _resolve_proxy_args(args, parser, config):
 
     return proxy_mode, custom_proxy
 
-
 def _normalize_thread_argv(argv):
     """Allow `surf -t URL` even though argparse optional values are ambiguous."""
     normalized = []
@@ -1082,14 +1034,12 @@ def _normalize_thread_argv(argv):
         index += 1
     return normalized
 
-
 def setup_verbose_logging():
     """Enable verbose logging with timestamps."""
     logging.getLogger().setLevel(logging.INFO)
     # Update existing handlers
     for handler in logging.getLogger().handlers:
         handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-
 
 def resolve_user_path(path):
     """
@@ -1112,10 +1062,8 @@ def resolve_user_path(path):
 
     return os.path.expanduser(raw_path)
 
-
 _LOCAL_FILE_EXTENSIONS = {".html", ".htm", ".md", ".txt", ".rst", ".adoc"}
 _LOCAL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
-
 
 def _is_local_file_input(url_string):
     """
@@ -1149,7 +1097,6 @@ def _is_local_file_input(url_string):
 
     return False
 
-
 def _resolve_file_url_input(url_string):
     """
     Turn a local-file input string into an absolute filesystem path.
@@ -1179,7 +1126,6 @@ def _resolve_file_url_input(url_string):
         return resolved
 
     return None
-
 
 def _detect_file_encoding(file_path):
     """Best-effort encoding detection for a local text file."""
@@ -1215,7 +1161,6 @@ def _detect_file_encoding(file_path):
         return "utf-16"
 
     return "utf-8"
-
 
 def _read_local_file(file_path):
     """
@@ -1288,7 +1233,6 @@ def _read_local_file(file_path):
     )
     return html_content, file_path
 
-
 def _is_local_image_input(url_string):
     """Detect whether the input string refers to a local image file."""
     if not url_string:
@@ -1310,7 +1254,6 @@ def _is_local_image_input(url_string):
             return True
     return False
 
-
 def _resolve_image_path(url_string):
     """Resolve a local image path from user input (OS path or file:// URI)."""
     if not url_string:
@@ -1331,7 +1274,6 @@ def _resolve_image_path(url_string):
     if resolved and os.path.isfile(resolved):
         return resolved
     return None
-
 
 def _ocr_local_image(image_path, args, config):
     """
@@ -1368,7 +1310,6 @@ def _ocr_local_image(image_path, args, config):
 
     return ocr_text, engine_used
 
-
 def _get_default_config_path():
     """
     Resolve the default config path.
@@ -1391,7 +1332,6 @@ def _get_default_config_path():
     else:
         config_home = resolve_user_path(os.path.join("~", ".config"))
     return os.path.join(config_home, "surf", "config.ini")
-
 
 class Config:
     def __init__(self, config_path=None):
@@ -1456,7 +1396,6 @@ class Config:
     def _get_available_llm_providers(self):
         """Get a list of available LLM provider names from the config."""
         return [section.split(".")[1] for section in self.config.sections() if section.startswith("LLM.")]
-
 
 class Fetcher:
     _COMMON_SHORT_URL_HOSTS = {
@@ -1584,7 +1523,7 @@ class Fetcher:
         rest = path_parts[2:]
         target_lang = (config.get("Output", "target_language", fallback="zh-cn") or "zh-cn").lower()
         lang_code = target_lang.split("-")[0]
-        repo_title = f"{owner}/{repo}"
+        repo_title = f"{repo}"
         repo_source_url = f"https://github.com/{owner}/{repo}"
 
         if not rest:
@@ -6250,18 +6189,18 @@ class Fetcher:
                         '[class*="content"]',
                         '[class*="desc"]'
                     ];
-                    
+
                     for (const selector of selectors) {
                         const el = document.querySelector(selector);
                         if (el && el.innerText && el.innerText.trim().length > 10) {
                             return el.innerHTML;
                         }
                     }
-                    
+
                     // Fallback: get main content area
                     const main = document.querySelector('main') || document.querySelector('article');
                     if (main) return main.innerHTML;
-                    
+
                     return document.body.innerHTML;
                 }
                 """)
@@ -9720,7 +9659,6 @@ class Fetcher:
             logger.warning(f"archive.is fetch failed: {e}")
             return None, None
 
-
 # =============================================================================
 # Special Site Handlers
 # =============================================================================
@@ -9863,7 +9801,6 @@ SPECIAL_SITE_HANDLERS = {
 # Cache for compiled regex patterns (performance optimization)
 _COMPILED_PATTERNS = {}
 
-
 def _get_handler_for_url(url):
     """
     Get the appropriate handler for a URL from SPECIAL_SITE_HANDLERS.
@@ -9888,7 +9825,6 @@ def _get_handler_for_url(url):
                 return config["handler"], site_name, config
 
     return None, None, None
-
 
 class ContentProcessor:
     @staticmethod
@@ -10287,7 +10223,6 @@ class ContentProcessor:
             logger.error(f"Translation failed: {e}")
             return text, title
 
-
 class OcrHandler:
     @staticmethod
     def _is_enabled_for_site(site_name, site_config, args, config):
@@ -10375,7 +10310,6 @@ class OcrHandler:
             return RapidOCR()
         except Exception as e:
             raise RuntimeError(f"RapidOCR init failed: {e}") from e
-
 
     @staticmethod
     def _init_paddleocr():
@@ -10677,7 +10611,6 @@ class OcrHandler:
             except Exception as e:
                 logger.warning("OCR failed for image %s: %s", img_url[:120], e)
 
-
         if processed:
             logger.info(f"OCR annotated {processed} images")
         else:
@@ -10687,7 +10620,6 @@ class OcrHandler:
                 "or use --verbose for per-image error details."
             )
         return str(soup)
-
 
 class OutputHandler:
     _MOJIBAKE_CHARS = "ÃÂâäåæçèéêëïðñøùœž€™�"
@@ -11821,7 +11753,6 @@ class OutputHandler:
 
         return str(soup)
 
-
 class PublishHandler:
     """Handler for publishing content to various platforms."""
 
@@ -11903,7 +11834,6 @@ class PublishHandler:
             logger.error(f"Failed to publish to pastebin: {e}")
             return None
 
-
 def get_data_dir():
     """
     Get the base directory for storing application data.
@@ -11918,7 +11848,6 @@ def get_data_dir():
 
     # Fallback to ~/.local/cache/surf for Linux/Mac
     return os.path.join(os.path.expanduser("~"), ".local", "cache", "surf")
-
 
 def migrate_data():
     """
@@ -11946,10 +11875,8 @@ def migrate_data():
     elif os.path.exists(old_dir) and os.path.exists(new_dir):
         logger.info(f"Both {old_dir} and {new_dir} exist. Please manually merge if needed.")
 
-
 # Perform migration on import/startup
 migrate_data()
-
 
 class AuthHandler:
     """
@@ -12522,7 +12449,6 @@ print(json.dumps(cookies, ensure_ascii=False))
             logger.info(f"No saved auth state for {site_name}")
             return browser.new_context(**context_options)
 
-
 class TTSHandler:
     @staticmethod
     async def generate_speech(text, output_file, config):
@@ -12568,7 +12494,6 @@ class TTSHandler:
 
         except Exception as e:
             logger.error(f"TTS operation failed: {e}")
-
 
 def main():
     _install_interrupt_handler()
@@ -13241,7 +13166,6 @@ Twitter/X Backend:
                 archive_url=archive_url,
             )
 
-
 def run_cli():
     """Run the CLI entrypoint with consistent Ctrl+C exit behavior."""
     try:
@@ -13249,7 +13173,6 @@ def run_cli():
     except KeyboardInterrupt:
         logger.warning("Interrupted by user.")
         sys.exit(130)
-
 
 if __name__ == "__main__":
     run_cli()
