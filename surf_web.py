@@ -2428,7 +2428,7 @@ def _process_web_request(data, translate_sync=False):
                 custom_proxy_override=custom_proxy,
             )
 
-        # Paywall detection and archive.is fallback
+        # Paywall detection and archive-domain fallback
         archive_is_url = None
         paywall_result = Fetcher._detect_paywall(html_content, url=url)
         if paywall_result and paywall_result.get("detected"):
@@ -2436,7 +2436,7 @@ def _process_web_request(data, translate_sync=False):
                 f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
                 f"{paywall_result.get('reason', 'unknown')}"
             )
-            logger.info("Attempting to fetch from archive.is...")
+            logger.info("Attempting to fetch from archive domains...")
             archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
                 url,
                 config=config,
@@ -2444,7 +2444,7 @@ def _process_web_request(data, translate_sync=False):
                 custom_proxy_override=custom_proxy,
             )
             if archived_html:
-                logger.info("archive.is snapshot fetched successfully, using it as content source.")
+                logger.info("Archive snapshot fetched successfully, using it as content source.")
                 archive_is_url = snapshot_url
                 html_content = archived_html
             else:
@@ -2481,7 +2481,7 @@ def _process_web_request(data, translate_sync=False):
             title = original_title
             md_content = original_md
 
-    # archive_url: prioritize archive.is snapshot (from paywall fallback)
+    # archive_url: prioritize archive snapshot (from paywall fallback)
     archive_url = archive_is_url
     if not archive_url and data.get("archive_source") and not data.get("no_front_matter", False):
         archive_url = Fetcher.save_wayback_snapshot(

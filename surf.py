@@ -9244,8 +9244,20 @@ class Fetcher:
         }
 
     # ─────────────────────────────────────────────────────────────────
-    # archive.is snapshot fallback
+    # Archive snapshot fallback
     # ─────────────────────────────────────────────────────────────────
+    # archive.is has several interchangeable domains. They do not always
+    # have the same DNS, proxy, or browser reachability, so try them in order.
+    _ARCHIVE_DOMAINS = (
+        "archive.is",
+        "archive.ph",
+        "archive.today",
+        "archive.fo",
+        "archive.li",
+        "archive.vn",
+        "archive.md",
+    )
+
     @staticmethod
     def _has_captcha(page):
         try:
@@ -9259,22 +9271,24 @@ class Fetcher:
             return False
 
     @staticmethod
-    def _wait_for_captcha_resolution(page, step_label, timeout_seconds=120, *, headless=False):
+    def _wait_for_captcha_resolution(
+        page, step_label, timeout_seconds=120, *, headless=False, archive_domain="archive"
+    ):
         import time as _time
         if not Fetcher._has_captcha(page):
             return True
         if headless:
             logger.info(
-                f"archive.is: CAPTCHA detected ({step_label}) in headless mode; "
+                f"{archive_domain}: CAPTCHA detected ({step_label}) in headless mode; "
                 "will retry with visible browser."
             )
             return False
         logger.info(
-            f"archive.is: CAPTCHA detected ({step_label}). "
+            f"{archive_domain}: CAPTCHA detected ({step_label}). "
             f"Waiting for manual completion (timeout: {timeout_seconds}s)..."
         )
         print(f"\n{'─' * 56}")
-        print(f"  ⚠ archive.is 需要完成 CAPTCHA 验证（{step_label}）")
+        print(f"  ⚠ {archive_domain} 需要完成 CAPTCHA 验证（{step_label}）")
         print(f"  请在打开的浏览器窗口中完成验证，程序将自动继续...")
         print(f"  超时时间：{timeout_seconds} 秒")
         print(f"{'─' * 56}\n")
@@ -9286,36 +9300,41 @@ class Fetcher:
             except Exception:
                 # Playwright hiccup — assume page may have changed, check
                 # again next cycle.
-                logger.debug("archive.is: CAPTCHA check failed transiently, retrying...")
+                logger.debug(f"{archive_domain}: CAPTCHA check failed transiently, retrying...")
                 continue
             if not has:
-                logger.info("archive.is: CAPTCHA resolved by user.")
+                logger.info(f"{archive_domain}: CAPTCHA resolved by user.")
                 _time.sleep(1.5)
                 return True
             # Periodic progress message
             remaining = max(0, deadline - _time.monotonic())
             if remaining < 10 or int(remaining) % 20 == 0:
-                logger.debug(f"archive.is: still waiting for CAPTCHA... (~{int(remaining)}s left)")
-        logger.warning("archive.is: CAPTCHA was not completed within the timeout.")
+                logger.debug(f"{archive_domain}: still waiting for CAPTCHA... (~{int(remaining)}s left)")
+        logger.warning(f"{archive_domain}: CAPTCHA was not completed within the timeout.")
         return False
 
     @staticmethod
-    def _fetch_archiveis_snapshot(url, config, proxy_mode_override=None, custom_proxy_override=None):
+    def _fetch_archiveis_snapshot(
+        url, config, proxy_mode_override=None, custom_proxy_override=None, archive_domains=None
+    ):
         """
-        Try to fetch the latest archive.is snapshot for *url*.
+        Try to fetch the latest archive snapshot for *url*.
 
-        Navigates directly to ``https://archive.is/<url>``, handles
-        CAPTCHA (headless → visible fallback), picks the latest snapshot
-        from the listing page, and returns ``(html_content, snapshot_url)``
-        or ``(None, None)``.
+        The archive service is available through several domains. Each
+        candidate gets an independent browser attempt so a blocked or
+        unreachable domain does not prevent the remaining aliases from being
+        tried. The method handles CAPTCHA (headless -> visible fallback),
+        picks the latest snapshot from the listing page, and returns
+        ``(html_content, snapshot_url)`` or ``(None, None)``.
         """
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
         except ImportError:
-            logger.warning("Playwright is not installed; cannot fetch from archive.is")
+            logger.warning("Playwright is not installed; cannot fetch from archive domains")
             return None, None
 
-        logger.info(f"Trying archive.is snapshot for: {url}")
+        archive_domains = tuple(archive_domains or Fetcher._ARCHIVE_DOMAINS)
+        logger.info(f"Trying archive snapshot domains for: {url}")
 
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         browser_args = [
@@ -9333,23 +9352,25 @@ class Fetcher:
                 kwargs["proxy"] = pw_proxy
             return p.chromium.launch(**kwargs)
 
-        def _run_workflow(page, headless=False):
-            """Core archive.is flow: go to listing page → pick snapshot → extract."""
+        def _run_workflow(page, archive_domain, headless=False, manual_lookup_timeout=120):
+            """Go to one archive listing page, pick a snapshot, and extract it."""
+            archive_base_url = f"https://{archive_domain}/"
 
             def _ensure_no_captcha(label, timeout_s=60):
                 import time as _time
                 _time.sleep(1.5)
                 return Fetcher._wait_for_captcha_resolution(
                     page, label, timeout_seconds=timeout_s, headless=headless,
+                    archive_domain=archive_domain,
                 )
 
-            # ── navigate to archive.is/<url> ──
-            listing_url = f"https://archive.is/?run=1&url={quote(url, safe='')}"
-            logger.info(f"archive.is: opening listing page: {listing_url}")
+            # ── navigate to the archive listing ──
+            listing_url = f"{archive_base_url}?run=1&url={quote(url, safe='')}"
+            logger.info(f"{archive_domain}: opening listing page: {listing_url}")
             try:
                 page.goto(listing_url, wait_until="domcontentloaded", timeout=20000)
             except PlaywrightTimeoutError:
-                logger.warning("archive.is: timeout loading listing page; inspecting the partially loaded page")
+                logger.warning(f"{archive_domain}: timeout loading listing page; inspecting the partially loaded page")
                 try:
                     page.wait_for_timeout(3000)
                 except Exception:
@@ -9371,7 +9392,7 @@ class Fetcher:
             if re.search(r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$", current_url, re.IGNORECASE):
                 if "run=1" not in current_url and "search=" not in current_url.lower():
                     snapshot_url = current_url
-                    logger.info(f"archive.is: redirected to snapshot: {snapshot_url}")
+                    logger.info(f"{archive_domain}: redirected to snapshot: {snapshot_url}")
 
             if not snapshot_url:
                 # Scan links for snapshot shortcodes
@@ -9387,7 +9408,7 @@ class Fetcher:
                         continue
                     # Match snapshot shortcodes: /<alphanum>  (e.g. /WOQ7d)
                     # But NOT the listing /search/run URLs
-                    abs_href = urljoin("https://archive.is/", href)
+                    abs_href = urljoin(archive_base_url, href)
                     m = re.search(
                         r"archive\.(is|ph|today|fo|li|vn|md)/([0-9a-zA-Z]{3,20})$",
                         abs_href, re.IGNORECASE,
@@ -9403,28 +9424,28 @@ class Fetcher:
                         except Exception:
                             link_text = ""
                         candidates.append((abs_href, link_text, i))
-                        logger.info(f"archive.is: candidate snapshot [{i}]: {abs_href}  ({link_text[:60]})")
+                        logger.info(f"{archive_domain}: candidate snapshot [{i}]: {abs_href}  ({link_text[:60]})")
                 if candidates:
                     # First one is usually the latest
                     snapshot_url = candidates[0][0]
-                    logger.info(f"archive.is: selected latest snapshot: {snapshot_url}")
+                    logger.info(f"{archive_domain}: selected latest snapshot: {snapshot_url}")
 
             if not snapshot_url:
                 if not headless:
                     import time as _time
                     logger.warning(
-                        "archive.is: no snapshot found yet; keeping the visible browser open for manual inspection"
+                        f"{archive_domain}: no snapshot found yet; keeping the visible browser open for manual inspection"
                     )
                     print(
-                        "\narchive.is 页面暂未返回快照列表，浏览器窗口将保留 120 秒，"
+                        f"\nArchive 页面暂未返回快照列表，浏览器窗口将保留 {manual_lookup_timeout} 秒，"
                         "请完成 CAPTCHA 或等待页面加载。\n"
                     )
-                    deadline = _time.monotonic() + 120
+                    deadline = _time.monotonic() + manual_lookup_timeout
                     while _time.monotonic() < deadline and not snapshot_url:
                         try:
                             current_url = page.url
                             if re.search(
-                                r"archive\\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$",
+                                r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$",
                                 current_url,
                                 re.IGNORECASE,
                             ) and "run=1" not in current_url and "search=" not in current_url.lower():
@@ -9433,9 +9454,9 @@ class Fetcher:
                             all_links = page.locator("a[href]")
                             for i in range(min(all_links.count(), 200)):
                                 href = all_links.nth(i).get_attribute("href") or ""
-                                abs_href = urljoin("https://archive.is/", href)
+                                abs_href = urljoin(archive_base_url, href)
                                 if re.search(
-                                    r"archive\\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,20}$",
+                                    r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,20}$",
                                     abs_href,
                                     re.IGNORECASE,
                                 ) and "run=1" not in abs_href and "search=" not in abs_href.lower():
@@ -9446,9 +9467,9 @@ class Fetcher:
                         if not snapshot_url:
                             page.wait_for_timeout(2000)
                     if snapshot_url:
-                        logger.info(f"archive.is: selected snapshot after waiting: {snapshot_url}")
+                        logger.info(f"{archive_domain}: selected snapshot after waiting: {snapshot_url}")
                 if not snapshot_url:
-                    logger.warning(f"archive.is: no snapshot found for {url}")
+                    logger.warning(f"{archive_domain}: no snapshot found for {url}")
                     return None, None
 
             # ── open snapshot page ──
@@ -9457,13 +9478,13 @@ class Fetcher:
             # (DOM ready) instead of networkidle, then wait manually.
             _snap_loaded = False
             for _attempt in range(3):
-                logger.info(f"archive.is: navigating to snapshot: {snapshot_url}")
+                logger.info(f"{archive_domain}: navigating to snapshot: {snapshot_url}")
                 try:
                     page.goto(snapshot_url, wait_until="domcontentloaded", timeout=30000)
                     _snap_loaded = True
                 except PlaywrightTimeoutError:
                     logger.warning(
-                        f"archive.is: timeout loading snapshot page (attempt {_attempt+1}/3)"
+                        f"{archive_domain}: timeout loading snapshot page (attempt {_attempt+1}/3)"
                     )
                     continue
                 page.wait_for_timeout(3000)
@@ -9477,7 +9498,7 @@ class Fetcher:
                 break
 
             if not _snap_loaded:
-                logger.warning("archive.is: failed to load snapshot page after 3 attempts")
+                logger.warning(f"{archive_domain}: failed to load snapshot page after 3 attempts")
                 return None, None
 
             # Archive.is typically embeds the real content inside an
@@ -9488,16 +9509,16 @@ class Fetcher:
 
             content_iframe = page.locator("#DIVALREADYARCHIVEDPAGE iframe").first
             if content_iframe.count() > 0:
-                logger.info("archive.is: content is in an iframe, switching to frame content")
+                logger.info(f"{archive_domain}: content is in an iframe, switching to frame content")
                 try:
                     frame = content_iframe.content_frame()
                     if frame is not None:
                         html_content = frame.content()
                 except Exception as exc:
-                    logger.warning(f"archive.is: could not read content iframe: {exc}")
+                    logger.warning(f"{archive_domain}: could not read content iframe: {exc}")
 
             if not html_content or len(html_content) < 500:
-                logger.warning("archive.is: snapshot content too short")
+                logger.warning(f"{archive_domain}: snapshot content too short")
                 return None, None
 
             # Remove archive.is toolbar / framing elements while
@@ -9549,58 +9570,83 @@ class Fetcher:
 
             html_content = str(soup)
 
-            logger.info(f"archive.is: snapshot fetched successfully: {snapshot_url}")
+            logger.info(f"{archive_domain}: snapshot fetched successfully: {snapshot_url}")
             return html_content, snapshot_url
 
-        # ── Main: headless first, then visible fallback ──
-        try:
-            with sync_playwright() as p:
-                browser = _launch_browser(p, headless=True)
-                context = Fetcher._create_stealth_context(browser, "https://archive.is/")
+        def _try_browser(p, archive_domain, headless, use_proxy=True, manual_lookup_timeout=120):
+            browser = None
+            try:
+                browser = _launch_browser(p, headless=headless, use_proxy=use_proxy)
+                context = Fetcher._create_stealth_context(
+                    browser, f"https://{archive_domain}/"
+                )
                 page = context.new_page()
                 page.set_default_timeout(30000)
-                html_result, snap_url = _run_workflow(page, headless=True)
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-                if html_result is not None:
-                    return html_result, snap_url
-
-                if pw_proxy:
-                    logger.info("archive.is: proxy attempt failed; retrying headless without proxy")
-                    browser_direct = _launch_browser(p, headless=True, use_proxy=False)
-                    context_direct = Fetcher._create_stealth_context(browser_direct, "https://archive.is/")
-                    page_direct = context_direct.new_page()
-                    page_direct.set_default_timeout(30000)
-                    direct_result, direct_snap_url = _run_workflow(page_direct, headless=True)
+                return _run_workflow(
+                    page,
+                    archive_domain,
+                    headless=headless,
+                    manual_lookup_timeout=manual_lookup_timeout,
+                )
+            except Exception as exc:
+                logger.warning(f"{archive_domain}: browser attempt failed: {exc}")
+                return None, None
+            finally:
+                if browser is not None:
                     try:
-                        browser_direct.close()
+                        browser.close()
                     except Exception:
                         pass
-                    if direct_result is not None:
-                        return direct_result, direct_snap_url
+
+        # Try all aliases headlessly before opening a visible browser. This
+        # keeps a blocked alias from consuming the manual CAPTCHA wait.
+        try:
+            with sync_playwright() as p:
+                for archive_domain in archive_domains:
+                    logger.info(f"Trying archive domain: {archive_domain}")
+                    html_result, snap_url = _try_browser(
+                        p, archive_domain, headless=True,
+                    )
+                    if html_result is not None:
+                        return html_result, snap_url
+
+                    if pw_proxy:
+                        logger.info(
+                            f"{archive_domain}: proxy attempt failed; retrying headless without proxy"
+                        )
+                        html_result, snap_url = _try_browser(
+                            p, archive_domain, headless=True, use_proxy=False,
+                        )
+                        if html_result is not None:
+                            return html_result, snap_url
 
                 logger.info(
-                    "archive.is: headless attempt failed; "
-                    "retrying with visible browser for manual CAPTCHA completion..."
+                    "All headless archive domain attempts failed; retrying with visible browsers "
+                    "for manual CAPTCHA completion..."
                 )
-                print(
-                    "\n" + "=" * 60 + "\n"
-                    + "  archive.is 需要人工完成 CAPTCHA 验证\n"
-                    + "  正在打开可见浏览器窗口...\n"
-                    + "  请在新窗口中完成验证，完成后程序将自动继续\n"
-                    + "=" * 60 + "\n"
-                )
-                browser2 = _launch_browser(p, headless=False, use_proxy=False if pw_proxy else True)
-                context2 = Fetcher._create_stealth_context(browser2, "https://archive.is/")
-                page2 = context2.new_page()
-                page2.set_default_timeout(30000)
-                html_result, snap_url = _run_workflow(page2, headless=False)
-                browser2.close()
-                return html_result, snap_url
+                for archive_domain in archive_domains:
+                    print(
+                        "\n" + "=" * 60 + "\n"
+                        + f"  {archive_domain} 需要人工完成 CAPTCHA 验证\n"
+                        + "  正在打开可见浏览器窗口...\n"
+                        + "  请在新窗口中完成验证，完成后程序将自动继续\n"
+                        + "=" * 60 + "\n"
+                    )
+                    html_result, snap_url = _try_browser(
+                        p,
+                        archive_domain,
+                        headless=False,
+                        use_proxy=False if pw_proxy else True,
+                        manual_lookup_timeout=30,
+                    )
+                    if html_result is not None:
+                        return html_result, snap_url
+                    logger.warning(
+                        f"{archive_domain}: visible browser attempt failed; trying the next archive domain"
+                    )
+                return None, None
         except Exception as e:
-            logger.warning(f"archive.is fetch failed: {e}")
+            logger.warning(f"Archive snapshot fetch failed: {e}")
             return None, None
 
 # =============================================================================
@@ -12959,14 +13005,14 @@ Twitter/X Backend:
                 logger.error(f"Podcast transcription failed: {exc}")
                 sys.exit(1)
 
-        # ── Paywall detection and archive.is fallback ──
+        # ── Paywall detection and archive-domain fallback ──
         paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
         if paywall_result and paywall_result.get("detected"):
             logger.warning(
                 f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
                 f"{paywall_result.get('reason', 'unknown')}"
             )
-            logger.info("Attempting to fetch from archive.is...")
+            logger.info("Attempting to fetch from archive domains...")
             archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
                 args.url,
                 config=config,
@@ -12974,13 +13020,13 @@ Twitter/X Backend:
                 custom_proxy_override=custom_proxy,
             )
             if archived_html:
-                logger.info("archive.is snapshot fetched successfully, using it as content source.")
+                logger.info("Archive snapshot fetched successfully, using it as content source.")
                 archive_is_url = snapshot_url
                 html_content = archived_html
             else:
                 logger.error("内容受付费墙控制，未抓取全文")
                 logger.error(f"  原始 URL: {args.url}")
-                logger.error("  提示：可手动访问 https://archive.is/ 搜索该页面获取快照。")
+                logger.error("  提示：程序已轮换多个 archive 域名；也可手动访问 https://archive.is/ 搜索该页面。")
                 sys.exit(1)
 
     _raise_if_interrupted()
@@ -13075,7 +13121,7 @@ Twitter/X Backend:
             except Exception as e:
                 logger.warning(f"Could not get LLM config for translator: {e}")
 
-        # archive_url: prioritize archive.is snapshot (paywall fallback),
+        # archive_url: prioritize archive snapshot (paywall fallback),
         # then explicit Wayback Machine --archive flag.
         archive_url = archive_is_url
         if not archive_url and args.archive and not args.no_front_matter and output_path != "-":

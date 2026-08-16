@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+import types
 
 import surf
 import surf_web
@@ -18,6 +20,101 @@ class _FakeConfig:
 
     def get_llm_config(self, provider=None):
         return {"model": "fake-model"}
+
+
+def test_archive_domain_rotation_uses_next_domain_after_a_failed_lookup(monkeypatch):
+    attempted_domains = []
+
+    class _FakeTimeoutError(Exception):
+        pass
+
+    class _FakeLocator:
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 0
+
+    class _FakePage:
+        def __init__(self, archive_base_url):
+            self.archive_base_url = archive_base_url
+            self.url = archive_base_url
+
+        def set_default_timeout(self, timeout):
+            pass
+
+        def goto(self, url, **kwargs):
+            if "?run=1" in url:
+                self.url = (
+                    self.archive_base_url + "ABc12"
+                    if self.archive_base_url == "https://archive.ph/"
+                    else url
+                )
+            else:
+                self.url = url
+
+        def wait_for_load_state(self, *args, **kwargs):
+            pass
+
+        def wait_for_timeout(self, timeout):
+            pass
+
+        def locator(self, selector):
+            return _FakeLocator()
+
+        def content(self):
+            return "<html><body><article>" + ("snapshot content " * 50) + "</article></body></html>"
+
+    class _FakeContext:
+        def __init__(self, archive_base_url):
+            self.archive_base_url = archive_base_url
+
+        def new_page(self):
+            return _FakePage(self.archive_base_url)
+
+    class _FakeBrowser:
+        def close(self):
+            pass
+
+    class _FakeChromium:
+        def launch(self, **kwargs):
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+    class _FakePlaywrightContextManager:
+        def __enter__(self):
+            return _FakePlaywright()
+
+        def __exit__(self, *args):
+            pass
+
+    fake_playwright = types.ModuleType("playwright")
+    fake_sync_api = types.ModuleType("playwright.sync_api")
+    fake_sync_api.TimeoutError = _FakeTimeoutError
+    fake_sync_api.sync_playwright = _FakePlaywrightContextManager
+    fake_playwright.sync_api = fake_sync_api
+    monkeypatch.setitem(sys.modules, "playwright", fake_playwright)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync_api)
+    monkeypatch.setattr(Fetcher, "_get_proxies", staticmethod(lambda *args, **kwargs: ({}, None)))
+
+    def _create_context(browser, archive_base_url):
+        attempted_domains.append(archive_base_url)
+        return _FakeContext(archive_base_url)
+
+    monkeypatch.setattr(Fetcher, "_create_stealth_context", staticmethod(_create_context))
+
+    html_content, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+        "https://example.com/paywalled",
+        _FakeConfig(),
+        archive_domains=("archive.is", "archive.ph"),
+    )
+
+    assert html_content is not None
+    assert snapshot_url == "https://archive.ph/ABc12"
+    assert attempted_domains == ["https://archive.is/", "https://archive.ph/"]
 
 
 def test_wayback_snapshot_uses_content_location(monkeypatch):

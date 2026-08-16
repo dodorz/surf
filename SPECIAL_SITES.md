@@ -18,6 +18,10 @@ Each site entry may define:
 - `default_no_translate`: default raw-language policy (overridable by CLI)
 - `default_thread`: default thread direction (`after`) with author scope `all`, overridable by `--thread`, `--thread-author`, or `--no-thread`
 
+### Paywalled Articles
+
+When Surf detects a paywall, it looks up an existing archive snapshot before failing the extraction. The archive domains are attempted in this order: `archive.is`, `archive.ph`, `archive.today`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md`. Each domain is tried through the configured proxy and then directly. If no headless attempt succeeds, Surf cycles through the same domains in visible browsers for manual CAPTCHA completion. The successful snapshot URL is written to front matter `archive`.
+
 ---
 
 ## Supported Special Sites

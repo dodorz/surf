@@ -16,6 +16,10 @@
 - `default_no_translate` (可选): 默认不翻译，可被命令行参数覆盖
 - `default_thread` (可选): 默认开启 thread 抓取；当前方向为 `after`（向后），作者范围为 `all`（所有作者），可通过 `--thread`、`--thread-author` 或 `--no-thread` 覆盖
 
+### 付费墙文章
+
+Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.is`、`archive.ph`、`archive.today`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
+
 ---
 
 ## 特殊网站列表
