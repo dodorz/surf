@@ -2419,8 +2419,8 @@ def _process_web_request(data, translate_sync=False):
             raise ValueError(f"Failed to fetch usable content from {url}")
 
         if str(data.get("podcast_transcribe", False)).strip().lower() in {"1", "true", "yes", "on"}:
-            if site_name != "pocketcasts":
-                raise ValueError("podcast_transcribe currently supports Pocket Casts episode URLs only")
+            if site_name not in {"pocketcasts", "xiaoyuzhoufm"}:
+                raise ValueError("podcast_transcribe currently supports Pocket Casts and Xiaoyuzhou episode URLs only")
             html_content = Fetcher._transcribe_podcast_content(
                 html_content,
                 config,
