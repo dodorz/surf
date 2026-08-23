@@ -158,13 +158,14 @@ def _translate_markdown_document(
 ):
     """Translate markdown while honoring site-specific section rules.
 
-    Pocket Casts transcripts are translated independently from Show Notes so a
+    Podcast transcripts are translated independently from Show Notes so a
     Chinese notes body cannot suppress translation of an English ``## Transcript``.
     """
     site = (source_site or "").strip().lower()
-    protected_pattern = _POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN if site == "pocketcasts" else None
+    podcast_site = site in {"pocketcasts", "xiaoyuzhoufm"}
+    protected_pattern = _POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN if podcast_site else None
 
-    if site == "pocketcasts":
+    if podcast_site:
         body_markdown, transcript_markdown = _split_markdown_at_h2(markdown_text, "Transcript")
         translated_body, translated_title = ContentProcessor.translate_if_needed(
             body_markdown,
@@ -200,7 +201,7 @@ def _translate_markdown_document(
             protected_markdown_line_pattern=protected_pattern,
         )
 
-    if site == "pocketcasts" and title and " - " in title and translated_title:
+    if podcast_site and title and " - " in title and translated_title:
         # Keep the podcast title suffix even if an LLM returns only the episode title.
         if " - " not in translated_title:
             translated_title = f"{translated_title} - {title.rsplit(' - ', 1)[1]}"
@@ -8544,6 +8545,56 @@ class Fetcher:
         return str(soup)
 
     @staticmethod
+    def _build_podcast_episode_payload(page_info, original_url, source_url, site_name, site_label):
+        """Compose the direct-Markdown payload shared by podcast episode handlers."""
+        fallback_title = f"{site_label} Episode"
+        title = page_info.get("episode_title") or fallback_title
+        podcast_title = page_info.get("podcast_title") or ""
+        if podcast_title and title != fallback_title:
+            title = f"{title} - {podcast_title}"
+        description = page_info.get("description") or ""
+        description_markdown = Fetcher._pocketcasts_description_to_markdown(description)
+        lines = []
+        if podcast_title:
+            lines.append(f"**Podcast:** {podcast_title}")
+        if page_info.get("podcast_id"):
+            lines.append(f"**Podcast ID:** {page_info['podcast_id']}")
+        if page_info.get("episode_id"):
+            lines.append(f"**Episode ID:** {page_info['episode_id']}")
+        if page_info.get("published"):
+            lines.append(f"**Published:** {page_info['published']}")
+        if page_info.get("duration"):
+            lines.append(f"**Duration:** {page_info['duration']}")
+        if page_info.get("audio_url"):
+            lines.append(f"**Audio:** [Play episode]({page_info['audio_url']})")
+        if description_markdown:
+            lines.append("")
+            lines.append("## Show Notes")
+            lines.append("")
+            lines.append(description_markdown)
+        if not lines:
+            lines.append(f"[Open this episode on {site_label}]({original_url})")
+
+        extra_meta = {
+            "surf-author": page_info.get("author") or podcast_title,
+            "surf-podcast-title": podcast_title,
+            "surf-episode-id": page_info.get("episode_id"),
+            "surf-podcast-id": page_info.get("podcast_id"),
+            "property:article:published_time": page_info.get("published"),
+            "keywords": podcast_title,
+            "surf-audio-url": page_info.get("audio_url"),
+        }
+        return _build_direct_markdown_payload(
+            markdown_text="\n\n".join(lines).strip() + "\n",
+            title=title,
+            source_url=source_url,
+            site_name=site_name,
+            base_url=source_url,
+            description=None,
+            extra_meta=extra_meta,
+        )
+
+    @staticmethod
     def _fetch_pocketcasts_episode(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """Fetch a Pocket Casts episode, falling back to redirect metadata and RSS."""
         try:
@@ -8619,54 +8670,143 @@ class Fetcher:
                 except Exception as exc:
                     logger.info("Pocket Casts: browser page request failed: %s", exc)
 
-            title = page_info.get("episode_title") or "Pocket Casts Episode"
-            podcast_title = page_info.get("podcast_title") or ""
-            if podcast_title and title != "Pocket Casts Episode":
-                title = f"{title} - {podcast_title}"
-            description = page_info.get("description") or ""
-            description_markdown = Fetcher._pocketcasts_description_to_markdown(description)
-            lines = []
-            if podcast_title:
-                lines.append(f"**Podcast:** {podcast_title}")
-            if page_info.get("podcast_id"):
-                lines.append(f"**Podcast ID:** {page_info['podcast_id']}")
-            if page_info.get("episode_id"):
-                lines.append(f"**Episode ID:** {page_info['episode_id']}")
-            if page_info.get("published"):
-                lines.append(f"**Published:** {page_info['published']}")
-            if page_info.get("duration"):
-                lines.append(f"**Duration:** {page_info['duration']}")
-            if page_info.get("audio_url"):
-                lines.append(f"**Audio:** [Play episode]({page_info['audio_url']})")
-            if description_markdown:
-                lines.append("")
-                lines.append("## Show Notes")
-                lines.append("")
-                lines.append(description_markdown)
-            if not lines:
-                lines.append(f"[Open this episode in Pocket Casts]({original_url})")
-
             source_url = canonical_url if canonical_url.startswith("http") else original_url
-            extra_meta = {
-                "surf-author": page_info.get("author") or podcast_title,
-                "surf-podcast-title": podcast_title,
-                "surf-episode-id": page_info.get("episode_id"),
-                "surf-podcast-id": page_info.get("podcast_id"),
-                "property:article:published_time": page_info.get("published"),
-                "keywords": podcast_title,
-                "surf-audio-url": page_info.get("audio_url"),
-            }
-            return _build_direct_markdown_payload(
-                markdown_text="\n\n".join(lines).strip() + "\n",
-                title=title,
-                source_url=source_url,
-                site_name="pocketcasts",
-                base_url=source_url,
-                description=None,
-                extra_meta=extra_meta,
+            return Fetcher._build_podcast_episode_payload(
+                page_info,
+                original_url,
+                source_url,
+                "pocketcasts",
+                "Pocket Casts",
             )
         except Exception as exc:
             logger.warning("Pocket Casts handler failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _xiaoyuzhoufm_next_data_episode(html_content):
+        """Return the episode object embedded in a Xiaoyuzhou (小宇宙) __NEXT_DATA__ script."""
+        if not html_content or "__NEXT_DATA__" not in html_content:
+            return {}
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            script = soup.find("script", id="__NEXT_DATA__")
+            if not script:
+                return {}
+            data = json.loads(script.string or script.get_text())
+            episode = ((data.get("props") or {}).get("pageProps") or {}).get("episode")
+            if isinstance(episode, dict):
+                return episode
+        except (ValueError, TypeError, AttributeError):
+            pass
+        return {}
+
+    @staticmethod
+    def _xiaoyuzhoufm_format_duration(duration):
+        """Render a Xiaoyuzhou duration (seconds) as HH:MM:SS when numeric."""
+        try:
+            total_seconds = int(str(duration).strip())
+        except (TypeError, ValueError):
+            return str(duration or "").strip()
+        if total_seconds <= 0:
+            return ""
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    @staticmethod
+    def _xiaoyuzhoufm_page_info(html_content, url):
+        """Extract episode metadata from a Xiaoyuzhou page, mirroring the Pocket Casts shape."""
+        info = {
+            "episode_id": "",
+            "podcast_id": "",
+            "episode_title": "",
+            "description": "",
+            "author": "",
+            "podcast_title": "",
+            "published": "",
+            "duration": "",
+            "audio_url": "",
+        }
+
+        match = re.search(r"/episode/([0-9a-fA-F]+)", url or "")
+        if match:
+            info["episode_id"] = match.group(1).lower()
+
+        episode = Fetcher._xiaoyuzhoufm_next_data_episode(html_content)
+        if episode:
+            podcast = episode.get("podcast") if isinstance(episode.get("podcast"), dict) else {}
+            enclosure = episode.get("enclosure") if isinstance(episode.get("enclosure"), dict) else {}
+            info["episode_id"] = str(episode.get("eid") or info["episode_id"]).strip().lower()
+            info["podcast_id"] = str(podcast.get("pid") or episode.get("pid") or "").strip().lower()
+            info["episode_title"] = str(episode.get("title") or "").strip()
+            info["description"] = str(
+                episode.get("shownotes") or episode.get("description") or ""
+            ).strip()
+            info["author"] = str(podcast.get("author") or "").strip()
+            info["podcast_title"] = str(podcast.get("title") or "").strip()
+            info["published"] = str(episode.get("pubDate") or "").strip()
+            info["duration"] = Fetcher._xiaoyuzhoufm_format_duration(episode.get("duration"))
+            info["audio_url"] = str(enclosure.get("url") or "").strip()
+
+        # Fall back to Open Graph metadata when __NEXT_DATA__ is unavailable.
+        if html_content and not (info["episode_title"] and info["audio_url"] and info["podcast_title"]):
+            og_info = Fetcher._pocketcasts_page_info(html_content, url)
+            for key, value in og_info.items():
+                if key in info and value and not info[key]:
+                    info[key] = value
+        return info
+
+    @staticmethod
+    def _fetch_xiaoyuzhoufm_episode(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """Fetch a Xiaoyuzhou (小宇宙) episode page, reusing the Pocket Casts payload flow."""
+        try:
+            original_url = url
+            canonical_url = url
+            req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+            page_html = ""
+            try:
+                response = _requests_get_interruptibly(
+                    canonical_url,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                        ),
+                        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    },
+                    proxies=req_proxies,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                page_html = Fetcher._decode_response_text(response)
+                canonical_url = response.url or canonical_url
+            except Exception as exc:
+                logger.info("Xiaoyuzhou: direct page request failed: %s", exc)
+
+            page_info = Fetcher._xiaoyuzhoufm_page_info(page_html, canonical_url)
+
+            if not page_info.get("episode_title") and canonical_url.startswith("http"):
+                try:
+                    browser_html = Fetcher.fetch_with_browser(
+                        canonical_url, config, proxy_mode_override, custom_proxy_override
+                    )
+                    browser_info = Fetcher._xiaoyuzhoufm_page_info(browser_html, canonical_url)
+                    page_info.update({key: value for key, value in browser_info.items() if value})
+                    if browser_html and len(browser_html) > len(page_html):
+                        page_html = browser_html
+                except Exception as exc:
+                    logger.info("Xiaoyuzhou: browser page request failed: %s", exc)
+
+            source_url = canonical_url if canonical_url.startswith("http") else original_url
+            return Fetcher._build_podcast_episode_payload(
+                page_info,
+                original_url,
+                source_url,
+                "xiaoyuzhoufm",
+                "Xiaoyuzhou",
+            )
+        except Exception as exc:
+            logger.warning("Xiaoyuzhou handler failed: %s", exc)
             return None
 
     @staticmethod
@@ -9846,6 +9986,13 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?pca\.st/episode/[0-9a-f-]+/?$",
         ],
         "handler": Fetcher._fetch_pocketcasts_episode,
+        "no_generic_fallback": True,
+    },
+    "xiaoyuzhoufm": {
+        "patterns": [
+            r"^https?://(www\.)?xiaoyuzhoufm\.com/episode/[0-9a-fA-F]+/?(?:[?#].*)?$",
+        ],
+        "handler": Fetcher._fetch_xiaoyuzhoufm_episode,
         "no_generic_fallback": True,
     },
     "v2ex": {
@@ -11050,7 +11197,7 @@ class OutputHandler:
                 soup = BeautifulSoup(html_content, "html.parser")
                 source_site_tag = soup.find("meta", attrs={"name": "surf-source-site"})
                 source_site = (source_site_tag.get("content") or "").strip().lower() if source_site_tag else ""
-                if source_site == "pocketcasts":
+                if source_site in {"pocketcasts", "xiaoyuzhoufm"}:
                     return f"[播客] {title or 'Untitled'}"
             except Exception:
                 pass
@@ -11344,10 +11491,10 @@ class OutputHandler:
                 author_value = (zhihu_author_tag.get("content") or "").strip()
                 if author_value:
                     metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
-        elif source_site == "pocketcasts":
-            pocketcasts_author_tag = soup.find("meta", attrs={"name": "surf-author"})
-            if pocketcasts_author_tag:
-                author_value = (pocketcasts_author_tag.get("content") or "").strip()
+        elif source_site in {"pocketcasts", "xiaoyuzhoufm"}:
+            podcast_author_tag = soup.find("meta", attrs={"name": "surf-author"})
+            if podcast_author_tag:
+                author_value = (podcast_author_tag.get("content") or "").strip()
                 if author_value:
                     metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
 
@@ -12621,7 +12768,8 @@ Special Sites:
                         with `--thread-author all`.
   Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
                         use `First sentence - Author on Site`.
-  Pocket Casts:        `-w/--transcribe` downloads the RSS audio enclosure and
+  Pocket Casts, Xiaoyuzhou:
+                        `-w/--transcribe` downloads the episode audio and
                         transcribes it locally with transcribe.cpp. Configure
                         `[Transcription].model_path` with a GGUF model file.
 
@@ -12801,7 +12949,7 @@ Twitter/X Backend:
         "-w",
         "--transcribe",
         action="store_true",
-        help="Transcribe a Pocket Casts episode locally with transcribe.cpp (requires [Transcription].model_path)",
+        help="Transcribe a Pocket Casts or Xiaoyuzhou episode locally with transcribe.cpp (requires [Transcription].model_path)",
     )
 
     # Other options
@@ -13077,8 +13225,8 @@ Twitter/X Backend:
             sys.exit(1)
 
         if args.transcribe:
-            if site_name != "pocketcasts":
-                parser.error("-w/--transcribe currently supports Pocket Casts episode URLs only")
+            if site_name not in {"pocketcasts", "xiaoyuzhoufm"}:
+                parser.error("-w/--transcribe currently supports Pocket Casts and Xiaoyuzhou episode URLs only")
             try:
                 html_content = Fetcher._transcribe_podcast_content(
                     html_content,
