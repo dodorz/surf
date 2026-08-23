@@ -738,8 +738,16 @@ __version__ = _get_version()
 # Suppress warnings
 warnings.filterwarnings("ignore")
 
-# Configure logging (default: WARNING level, no timestamps)
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+# Configure logging (default: WARNING level, no timestamps; override with
+# the SURF_LOG_LEVEL environment variable, e.g. SURF_LOG_LEVEL=INFO)
+logging.basicConfig(
+    level=getattr(
+        logging,
+        str(os.environ.get("SURF_LOG_LEVEL", "WARNING")).strip().upper(),
+        logging.WARNING,
+    ),
+    format="%(levelname)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 _INTERRUPTED = False
 
@@ -1348,6 +1356,9 @@ class Config:
 
     def get(self, section, key, fallback=None):
         return self.config.get(section, key, fallback=fallback)
+
+    def has_section(self, section):
+        return self.config.has_section(section)
 
     def get_path(self, section, key, fallback=None):
         value = self.get(section, key, fallback=fallback)
@@ -4870,13 +4881,17 @@ class Fetcher:
         from obscura_backend import ObscuraBackend
 
         _, proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        has_section = getattr(config, "has_section", lambda _name: False)
-        browser_config = config["Browser"] if has_section("Browser") else {}
-        executable = browser_config.get("obscura_executable", "obscura").strip() or "obscura"
-        endpoint = browser_config.get("obscura_endpoint", "http://127.0.0.1:9222").strip()
-        stealth = browser_config.getboolean("obscura_stealth", fallback=False)
+        executable = (
+            (config.get("Browser", "obscura_executable", fallback="obscura") or "obscura").strip()
+        )
+        endpoint = (
+            config.get("Browser", "obscura_endpoint", fallback="http://127.0.0.1:9222") or ""
+        ).strip()
+        stealth = str(
+            config.get("Browser", "obscura_stealth", fallback="false")
+        ).strip().lower() in {"1", "true", "yes", "on"}
         try:
-            startup_timeout = float(browser_config.get("obscura_startup_timeout", "15"))
+            startup_timeout = float(config.get("Browser", "obscura_startup_timeout", fallback="15"))
         except (TypeError, ValueError):
             startup_timeout = 15.0
         logger.warning("Using experimental Obscura backend at %s", endpoint)

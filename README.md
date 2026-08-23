@@ -104,6 +104,8 @@ We recommend using `uv` for a clean environment.
 
     Playwright remains Surf's default and most compatible browser backend. Surf also has an experimental Obscura backend. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases), then set `[Browser] backend = obscura` in `config.ini`. Surf starts `obscura serve` on demand and connects through CDP. The experimental backend is intended for ordinary dynamic pages; Twitter/X, Zhihu, headed login, CAPTCHA, and complex browser features continue to use Playwright.
 
+    Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
+
 3.  **Optional: Install OCR engine(s) for image OCR**:
     `surf` prefers `RapidOCR` via the Python package dependency. If you need to install it separately, run:
     ```bash
