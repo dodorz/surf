@@ -52,7 +52,8 @@
 - 使用 `-w/--transcribe` 时，会下载 RSS 中的音频地址，转换为 16 kHz 单声道 float32 PCM，并通过本地 `transcribe-cpp` 转写（小宇宙剧集同样支持）。
 - 可选后端通过 `uv sync --extra transcribe` 安装；`[Transcription].model_path` 必须指向 GGUF 模型，系统还需要安装 `ffmpeg`。
 - 转写结果以分段时间戳写入 `## Transcript` 小节。转写文本遵循与正文相同的语言模式（命令行/配置/默认值的 `trans` / `raw` / `both`）。Show Notes 与 Transcript 会分别做语言检测和翻译，避免中文说明导致英文转写被整篇跳过。第一版不会自动下载模型，也不启用说话人识别。
-- 当前不会自动下载或转写音频；音频地址仅作为可选播放链接保留。
+- Web 界面只有在识别到 Pocket Casts 或小宇宙剧集 URL 后才显示 Podcast 转写复选框；勾选后执行与 `-w/--transcribe` 相同的本地转写。
+- 当前不会自动下载模型或启用说话人识别；只有使用 `-w/--transcribe`（或 Web 界面识别到该站点后显示的 Podcast 转写入口）时才会下载并转写音频。
 
 ---
 

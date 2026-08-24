@@ -675,9 +675,9 @@ HTML_TEMPLATE = """
                         <label for="browser">使用浏览器渲染 (JavaScript)</label>
                     </div>
 
-                    <div class="form-group checkbox-group">
-                        <input type="checkbox" id="podcastTranscribe" name="podcast_transcribe">
-                        <label for="podcastTranscribe">转写音频</label>
+                    <div class="form-group checkbox-group" id="podcastTranscribeGroup" style="display: none;">
+                        <input type="checkbox" id="podcastTranscribe" name="podcast_transcribe" disabled>
+                        <label for="podcastTranscribe">转写 Podcast 音频（-w）</label>
                     </div>
 
                     <div class="form-group wide">
@@ -892,6 +892,7 @@ HTML_TEMPLATE = """
             site_name: null,
             lang_mode: 'trans',
             ocr_enabled: {{ 'true' if default_ocr_enabled else 'false' }},
+            podcast_transcribe_supported: false,
         };
         let siteDefaultsRequestId = 0;
         let siteDefaultsTimer = null;
@@ -970,6 +971,7 @@ HTML_TEMPLATE = """
                     site_name: result.site_name || null,
                     lang_mode: result.lang_mode || 'trans',
                     ocr_enabled: !!result.ocr_enabled,
+                    podcast_transcribe_supported: !!result.podcast_transcribe_supported,
                 };
 
                 if ((force || !langModeTouched) && currentSiteDefaults.lang_mode) {
@@ -979,6 +981,7 @@ HTML_TEMPLATE = """
                     langModeProgrammaticUpdate = false;
                 }
                 updateOcrControls();
+                updatePodcastTranscribeControls();
             } catch (error) {
                 langModeProgrammaticUpdate = false;
             }
@@ -1048,6 +1051,21 @@ HTML_TEMPLATE = """
         document.querySelectorAll('input[name="ocr_mode"], input[name="ocr_engine"]').forEach((input) => {
             input.addEventListener('change', updateOcrControls);
         });
+
+        function updatePodcastTranscribeControls() {
+            const group = document.getElementById('podcastTranscribeGroup');
+            const checkbox = document.getElementById('podcastTranscribe');
+            if (!group || !checkbox) {
+                return;
+            }
+
+            const supported = currentSiteDefaults.podcast_transcribe_supported;
+            group.style.display = supported ? 'flex' : 'none';
+            checkbox.disabled = !supported;
+            if (!supported) {
+                checkbox.checked = false;
+            }
+        }
 
         function updateLanguageControls() {
             const keepOriginal = getCheckedRadioValue('lang') === 'raw';
@@ -2278,6 +2296,7 @@ def resolve_web_site_defaults(config, url=None):
         "site_name": site_name,
         "lang_mode": lang_mode,
         "ocr_enabled": bool(ocr_enabled),
+        "podcast_transcribe_supported": site_name in {"pocketcasts", "xiaoyuzhoufm"},
     }
 
 

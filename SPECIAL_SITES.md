@@ -71,6 +71,7 @@ Each site entry may define:
 - With `-w/--transcribe`, the RSS audio enclosure is downloaded and converted to 16 kHz mono float32 PCM, then transcribed locally through `transcribe-cpp` (also supported for Xiaoyuzhou episodes).
 - The optional backend is installed with `uv sync --extra transcribe`; `[Transcription].model_path` must point to a GGUF model and `ffmpeg` must be available.
 - The transcript is appended under `## Transcript` with segment timestamps. Transcript text follows the same language mode as the rest of the document (`trans` / `raw` / `both` from CLI, config defaults, and site policy). Show Notes and Transcript are language-detected and translated independently so Chinese notes cannot suppress English transcript translation. The current first version does not automatically download models or enable diarization.
+- In Surf Web, the Podcast transcription checkbox is shown only after the URL is recognized as a Pocket Casts or Xiaoyuzhou episode; checking it performs the same local transcription as `-w/--transcribe`.
 
 ---
 

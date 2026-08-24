@@ -545,6 +545,25 @@ def test_web_github_defaults_to_translation_language():
     assert payload["lang_mode"] == "trans"
 
 
+def test_web_site_defaults_exposes_podcast_transcription_only_for_supported_sites():
+    client = surf_web.app.test_client()
+
+    pocketcasts = client.get(
+        "/api/site-defaults?url=https://pca.st/episode/afc4d300-505a-013c-f72d-0acc26574db2"
+    )
+    xiaoyuzhou = client.get(
+        "/api/site-defaults?url=https://www.xiaoyuzhoufm.com/episode/62382c1103bea1ebfffa1c00"
+    )
+    other = client.get("/api/site-defaults?url=https://example.com/article")
+
+    assert pocketcasts.status_code == 200
+    assert pocketcasts.get_json()["podcast_transcribe_supported"] is True
+    assert xiaoyuzhou.status_code == 200
+    assert xiaoyuzhou.get_json()["podcast_transcribe_supported"] is True
+    assert other.status_code == 200
+    assert other.get_json()["podcast_transcribe_supported"] is False
+
+
 def test_web_github_untouched_translation_mode_checks_translation(monkeypatch):
     monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
 
