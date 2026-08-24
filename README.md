@@ -124,13 +124,14 @@ The web form exposes the most commonly used Surf options directly, including:
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
+- Podcast transcription (`-w/--transcribe`) for Pocket Casts and Xiaoyuzhou episodes; the checkbox appears after the URL is recognized as one of these supported episode sites
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
 - the input area also includes a paste button, an inline fetch button, and a `Save full text` mode that keeps pasted text intact even when it contains URLs
 - after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
 - when one submission produces multiple result cards, Surf Web also shows an aggregate save card so you can merge all successful results into one Markdown/HTML/PDF/Audio file
 - when translation is enabled, Surf Web returns the raw result card first and finishes translation in a background job; the same card refreshes automatically when the translated result is ready
 
-As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, and sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR.
+As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR, and the Podcast transcription checkbox appears only for Pocket Casts or Xiaoyuzhou episode URLs.
 
 GitHub repo and Markdown URLs use the normal Surf Web language default: content is checked and non-Chinese Markdown is translated to Chinese unless you manually choose raw mode. Directly fetched GitHub Markdown still has embedded HTML fragments converted back to Markdown, while fenced code examples are preserved.
 

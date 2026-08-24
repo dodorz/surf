@@ -52,7 +52,36 @@
 - 使用 `-w/--transcribe` 时，会下载 RSS 中的音频地址，转换为 16 kHz 单声道 float32 PCM，并通过本地 `transcribe-cpp` 转写（小宇宙剧集同样支持）。
 - 可选后端通过 `uv sync --extra transcribe` 安装；`[Transcription].model_path` 必须指向 GGUF 模型，系统还需要安装 `ffmpeg`。
 - 转写结果以分段时间戳写入 `## Transcript` 小节。转写文本遵循与正文相同的语言模式（命令行/配置/默认值的 `trans` / `raw` / `both`）。Show Notes 与 Transcript 会分别做语言检测和翻译，避免中文说明导致英文转写被整篇跳过。第一版不会自动下载模型，也不启用说话人识别。
-- 当前不会自动下载或转写音频；音频地址仅作为可选播放链接保留。
+- Web 界面只有在识别到 Pocket Casts 或小宇宙剧集 URL 后才显示 Podcast 转写复选框；勾选后执行与 `-w/--transcribe` 相同的本地转写。
+- 当前不会自动下载模型或启用说话人识别；只有使用 `-w/--transcribe`（或 Web 界面识别到该站点后显示的 Podcast 转写入口）时才会下载并转写音频。
+
+---
+
+### 小宇宙（播客剧集）
+
+**域名**:
+- `xiaoyuzhoufm.com`
+
+**匹配规则**:
+```regex
+^https?://(www\.)?xiaoyuzhoufm\.com/episode/<episode-id>
+```
+
+**处理函数**: `Fetcher._fetch_xiaoyuzhoufm_episode`（复用 Pocket Casts 的 payload 流程）
+
+**处理流程**:
+1. 使用普通请求获取剧集页面。
+2. 解析页面内嵌的 `__NEXT_DATA__` JSON，提取剧集对象：标题、Show Notes HTML、发布时间、时长、音频地址、播客名称和作者。
+3. 如果 `__NEXT_DATA__` 不可用，则复用 Pocket Casts 的提取器回退到 Open Graph 元数据（`og:title`、`og:description`、`og:audio`）。
+4. 如果普通请求没有取得标题，再通过 Playwright 浏览器链路重试一次。
+5. 生成与 Pocket Casts 相同结构的 direct Markdown payload，翻译、Markdown、HTML、PDF 和 front matter 行为保持一致。
+
+**降级行为**:
+- `source` 使用最终剧集页 URL。
+- 生成的剧集标题采用 `剧集标题 - 播客名称`；默认文件名会在前面增加 `[播客]`。
+- Show Notes 放在 `## Show Notes` 小节下；`Podcast`、`Podcast ID` 和 `Episode ID` 标签不会被翻译，作者写入 front matter 的 `author`。
+- 时长渲染为 `HH:MM:SS`；如能取得发布日期则写入 front matter 的 `created`。
+- 使用 `-w/--transcribe` 时，会下载剧集音频并通过本地 `transcribe-cpp` 转写，行为与 Pocket Casts 一致。
 
 ---
 
