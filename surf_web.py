@@ -517,6 +517,63 @@ HTML_TEMPLATE = """
         .toast-error { background: #dc3545; }
         .toast-info { background: #17a2b8; }
 
+        .save-queue-title {
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .save-queue-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 260px;
+            overflow-y: auto;
+        }
+
+        .save-queue-item {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.65);
+            font-size: 13px;
+            word-break: break-all;
+        }
+
+        .save-queue-type {
+            flex-shrink: 0;
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        .save-queue-url {
+            color: inherit;
+        }
+
+        .save-queue-status {
+            margin-left: auto;
+            flex-shrink: 0;
+            white-space: nowrap;
+            font-weight: 600;
+        }
+
+        .save-queue-status-pending { color: #856404; }
+        .save-queue-status-running { color: #004085; }
+        .save-queue-status-done { color: #155724; }
+        .save-queue-status-error { color: #721c24; }
+
+        .save-queue-detail {
+            display: block;
+            width: 100%;
+            color: inherit;
+            opacity: 0.85;
+        }
+
         @keyframes toastIn {
             from { transform: translateX(100%); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
@@ -1472,7 +1529,8 @@ HTML_TEMPLATE = """
                                 });
                                 const saveResult = await parseJsonResponse(saveResp);
                                 if (saveResult.success && saveResult.job_id) {
-                                    showStatus('success', '全文保存已加入后台队列');
+                                    showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
+                                    notifySaveJobState(saveResult.job_id, 'pending');
                                     pollSaveJob(saveResult.job_id);
                                 } else {
                                     showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
@@ -1521,7 +1579,7 @@ HTML_TEMPLATE = """
             showStatus('processing', '正在获取并保存...');
             try {
                 const fileType = getCheckedRadioValue('format') || 'md';
-                let queuedCount = 0;
+                const queuedJobs = [];
                 for (let i = 0; i < inputs.length; i += 1) {
                     const input = inputs[i];
                     showStatus('processing', `正在获取并保存 ${i + 1}/${inputs.length}: ${input}`);
@@ -1542,10 +1600,18 @@ HTML_TEMPLATE = """
                     if (!result.success || !result.job_id) {
                         throw new Error(result.error || '保存提交失败');
                     }
-                    queuedCount += 1;
+                    queuedJobs.push({ jobId: result.job_id, url: input });
                     pollSaveJob(result.job_id);
                 }
-                showStatus('success', `已将 ${queuedCount} 个${fileType.toUpperCase()} 保存任务加入后台队列`);
+                let message;
+                if (queuedJobs.length === 1) {
+                    message = `已将 1 个${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
+                } else {
+                    const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
+                    message = `已将 ${queuedJobs.length} 个${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px; text-align: left;">${urlList}</ul>`;
+                }
+                showStatus('success', message);
+                queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
             } catch (error) {
                 showStatus('error', '直接保存失败: ' + error.message);
             } finally {
@@ -1573,6 +1639,87 @@ HTML_TEMPLATE = """
             statusDiv.className = 'card status status-' + type + ' show';
             statusDiv.innerHTML = message;
             statusDiv.style.display = 'block';
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        const SAVE_QUEUE_STATUS_LABELS = {
+            pending: '排队中',
+            running: '保存中',
+            done: '已完成',
+            error: '失败'
+        };
+        const knownSaveJobStates = new Map();
+
+        function notifySaveJobState(jobId, status) {
+            if (!jobId || !status) {
+                return;
+            }
+            if (knownSaveJobStates.get(jobId) === status) {
+                return;
+            }
+            knownSaveJobStates.set(jobId, status);
+            refreshSaveQueuePanel();
+        }
+
+        async function refreshSaveQueuePanel() {
+            let panel = document.getElementById('saveQueuePanel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'saveQueuePanel';
+                panel.className = 'card';
+                panel.style.display = 'none';
+                const statusDiv = document.getElementById('status') || createStatusDiv();
+                statusDiv.after(panel);
+            }
+
+            try {
+                const response = await fetch(API_BASE + '/api/save-jobs?limit=20');
+                const payload = await parseJsonResponse(response);
+                if (!payload.success) {
+                    return;
+                }
+                const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+                const hasActiveJobs = jobs.some(job => job.status === 'pending' || job.status === 'running');
+                if (!hasActiveJobs) {
+                    // Hide the queue card only when every queued item has finished
+                    panel.style.display = 'none';
+                    panel.innerHTML = '';
+                    return;
+                }
+
+                const items = jobs.map(job => {
+                    const statusLabel = SAVE_QUEUE_STATUS_LABELS[job.status] || job.status;
+                    const fileTypeLabel = (job.fileType || '?').toUpperCase();
+                    let detailHtml = '';
+                    if (job.status === 'done' && job.savePath) {
+                        detailHtml = `<span class="save-queue-detail">${escapeHtml(job.savePath)}</span>`;
+                    } else if (job.status === 'error' && job.error) {
+                        detailHtml = `<span class="save-queue-detail">错误: ${escapeHtml(job.error)}</span>`;
+                    }
+                    return `<li class="save-queue-item">
+                        <span class="save-queue-type">${escapeHtml(fileTypeLabel)}</span>
+                        <span class="save-queue-url">${escapeHtml(job.url || '(未知 URL)')}</span>
+                        <span class="save-queue-status save-queue-status-${escapeHtml(job.status)}">${escapeHtml(statusLabel)}</span>
+                        ${detailHtml}
+                    </li>`;
+                }).join('');
+
+                panel.innerHTML = `
+                    <div class="save-queue-title">保存队列</div>
+                    <ul class="save-queue-list">${items}</ul>
+                `;
+                panel.style.display = 'block';
+            } catch (error) {
+                // Silently ignore queue panel refresh failures
+            }
         }
 
 
@@ -1665,6 +1812,7 @@ HTML_TEMPLATE = """
                 try {
                     const response = await fetch(API_BASE + `/api/save-jobs/${encodeURIComponent(jobId)}`);
                     const job = await parseJsonResponse(response);
+                    notifySaveJobState(jobId, job.status);
                     if (!job.success) {
                         showToast('error', '保存失败: ' + (job.error || 'unknown error'));
                         saveJobIds.delete(jobId);
@@ -1735,7 +1883,11 @@ HTML_TEMPLATE = """
                 });
                 const result = await parseJsonResponse(response);
                 if (result.success && result.job_id) {
-                    showStatus('success', `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL`);
+                    const urlSuffix = inputUrl
+                        ? `：<br><span style="word-break: break-all;">${escapeHtml(inputUrl)}</span>`
+                        : '';
+                    showStatus('success', `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL${urlSuffix}`);
+                    notifySaveJobState(result.job_id, 'pending');
                     pollSaveJob(result.job_id);
                 } else {
                     showStatus('error', '保存提交失败: ' + (result.error || 'unknown error'));
@@ -2639,6 +2791,44 @@ def save_file_async():
     except Exception as exc:
         logger.error("Failed to enqueue save job: %s", exc)
         return jsonify({"success": False, "error": str(exc)})
+
+
+@app.route("/api/save-jobs", methods=["GET"])
+def save_jobs_list():
+    """List recent async save jobs, newest first."""
+    try:
+        limit = max(1, min(int(request.args.get("limit", 20)), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    with _SAVE_JOBS_LOCK:
+        jobs = sorted(
+            _SAVE_JOBS.items(),
+            key=lambda kv: kv[1].get("created_at") or 0,
+            reverse=True,
+        )
+
+    entries = []
+    for job_id, job in jobs[:limit]:
+        job_data = job.get("data") or {}
+        form_data = job_data.get("formData") or {}
+        result_data = job_data.get("data") or {}
+        entry = {
+            "job_id": job_id,
+            "status": job.get("status"),
+            "fileType": job_data.get("fileType"),
+            "url": form_data.get("url") or result_data.get("input_url") or "",
+            "title": (job_data.get("customTitle") or "").strip(),
+            "created_at": job.get("created_at"),
+            "updated_at": job.get("updated_at"),
+        }
+        if job.get("status") == "done":
+            entry["savePath"] = job.get("savePath")
+        elif job.get("status") == "error":
+            entry["error"] = job.get("error") or "Save failed"
+        entries.append(entry)
+
+    return jsonify({"success": True, "jobs": entries})
 
 
 @app.route("/api/save-jobs/<job_id>", methods=["GET"])
