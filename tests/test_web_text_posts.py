@@ -545,6 +545,17 @@ def test_web_github_defaults_to_translation_language():
     assert payload["lang_mode"] == "trans"
 
 
+def test_web_form_has_direct_save_without_clipboard_button():
+    response = surf_web.app.test_client().get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'id="directSaveBtn"' in html
+    assert 'id="pasteBtn"' not in html
+    assert "navigator.clipboard" not in html
+    assert "直接保存" in html
+
+
 def test_web_site_defaults_exposes_podcast_transcription_only_for_supported_sites():
     client = surf_web.app.test_client()
 

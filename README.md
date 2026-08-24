@@ -16,6 +16,7 @@
 - **GitHub Markdown Source Preservation**: GitHub repo and branchless Markdown URLs can be fetched from the resolved README/blob file while front matter `source` preserves the user-facing URL you entered.
 - **Accurate Translation Metadata**: Front matter includes `translator` only when content or title translation actually changed the output; language detection alone does not count.
 - **Optional Wayback Archiving**: Use `--archive` in CLI or the Web checkbox to submit the final front matter `source` URL to the Internet Archive and write the snapshot URL as `archive`.
+- **Paywall Archive Fallback**: When a paywalled article is detected, Surf checks the archive service through `archive.is`, `archive.ph`, `archive.today`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md` in sequence. Each domain is retried with the configured proxy and direct access before Surf cycles through visible browsers for CAPTCHA completion.
 - **Batch Web Processing**: The Web UI processes every URL found in the input one by one and renders separate result cards with independent save actions; text without URLs is saved as a single post using its first sentence as the title.
 - **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
 - **Filename Safety with Minimal Loss**: When titles are used as filenames, Surf preserves valid punctuation (including CJK punctuation) and only removes filesystem-illegal filename characters.
@@ -126,7 +127,8 @@ The web form exposes the most commonly used Surf options directly, including:
 - optional LLM provider override for translation, shown only when language mode is not `raw`
 - Podcast transcription (`-w/--transcribe`) for Pocket Casts and Xiaoyuzhou episodes; the checkbox appears after the URL is recognized as one of these supported episode sites
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
-- the input area also includes a paste button, an inline fetch button, and a `Save full text` mode that keeps pasted text intact even when it contains URLs
+- the input area also includes an inline fetch button and a `Save full text` mode that keeps pasted text intact even when it contains URLs
+- `Direct save` processes the current URL/text and selected output format, then queues the file without rendering a preview card; the success message shows which URL was queued and a save queue list below it tracks every background save job (queued / saving / done / failed); the queue list persists across successive enqueues and hides automatically once every queued job has finished
 - after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
 - when one submission produces multiple result cards, Surf Web also shows an aggregate save card so you can merge all successful results into one Markdown/HTML/PDF/Audio file
 - when translation is enabled, Surf Web returns the raw result card first and finishes translation in a background job; the same card refreshes automatically when the translated result is ready
