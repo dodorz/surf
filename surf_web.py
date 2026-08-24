@@ -625,8 +625,8 @@ HTML_TEMPLATE = """
                             <label for="saveFullText">全文保存</label>
                         </div>
                         <div class="input-actions">
-                            <button type="button" class="btn btn-secondary" id="pasteBtn">粘贴</button>
                             <button type="submit" class="btn btn-primary" id="submitBtn">开始获取</button>
+                            <button type="button" class="btn btn-secondary" id="directSaveBtn">直接保存</button>
                         </div>
                     </div>
                     <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
@@ -1501,21 +1501,60 @@ HTML_TEMPLATE = """
             }
         });
 
-        document.getElementById('pasteBtn').addEventListener('click', async function() {
-            try {
-                const text = await navigator.clipboard.readText();
-                if (!text) {
-                    showStatus('error', '剪贴板为空');
-                    return;
-                }
-                urlInput.value = text;
-                await refreshProxyDefault(true);
-                await refreshSiteDefaults(true);
-            } catch (error) {
-                showStatus('error', '读取剪贴板失败: ' + error.message);
+        async function directSave() {
+            const directSaveBtn = document.getElementById('directSaveBtn');
+            const rawInput = (urlInput?.value || '').trim();
+            const formData = getCurrentFormData('');
+            const inputs = formData.save_full_text
+                ? (rawInput ? [rawInput] : [])
+                : (() => {
+                    const urls = extractUrlsFromInput(rawInput);
+                    return urls.length ? urls : (rawInput ? [rawInput] : []);
+                })();
+
+            if (!inputs.length) {
+                showStatus('error', '请输入 URL 或文本');
+                return;
             }
-        });
-        
+
+            directSaveBtn.disabled = true;
+            showStatus('processing', '正在获取并保存...');
+            try {
+                const fileType = getCheckedRadioValue('format') || 'md';
+                let queuedCount = 0;
+                for (let i = 0; i < inputs.length; i += 1) {
+                    const input = inputs[i];
+                    showStatus('processing', `正在获取并保存 ${i + 1}/${inputs.length}: ${input}`);
+                    const itemFormData = { ...formData, url: input };
+                    const response = await fetch(API_BASE + '/api/save-async', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            fileType,
+                            saveDir: '',
+                            customTitle: '',
+                            data: {},
+                            formData: itemFormData,
+                            speak: false,
+                        }),
+                    });
+                    const result = await parseJsonResponse(response);
+                    if (!result.success || !result.job_id) {
+                        throw new Error(result.error || '保存提交失败');
+                    }
+                    queuedCount += 1;
+                    pollSaveJob(result.job_id);
+                }
+                showStatus('success', `已将 ${queuedCount} 个${fileType.toUpperCase()} 保存任务加入后台队列`);
+            } catch (error) {
+                showStatus('error', '直接保存失败: ' + error.message);
+            } finally {
+                directSaveBtn.disabled = false;
+            }
+        }
+
+        document.getElementById('directSaveBtn').addEventListener('click', directSave);
+
         function createStatusDiv() {
             const div = document.createElement('div');
             div.id = 'status';
