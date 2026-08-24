@@ -89,6 +89,34 @@ Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取
 
 ---
 
+### 小宇宙（播客剧集）
+
+**域名**:
+- `xiaoyuzhoufm.com`
+
+**匹配规则**:
+```regex
+^https?://(www\.)?xiaoyuzhoufm\.com/episode/<episode-id>
+```
+
+**处理函数**: `Fetcher._fetch_xiaoyuzhoufm_episode`（复用 Pocket Casts 的 payload 流程）
+
+**处理流程**:
+1. 使用普通请求获取剧集页面。
+2. 解析页面内嵌的 `__NEXT_DATA__` JSON，提取剧集对象：标题、Show Notes HTML、发布时间、时长、音频地址、播客名称和作者。
+3. 如果 `__NEXT_DATA__` 不可用，则复用 Pocket Casts 的提取器回退到 Open Graph 元数据（`og:title`、`og:description`、`og:audio`）。
+4. 如果普通请求没有取得标题，再通过 Playwright 浏览器链路重试一次。
+5. 生成与 Pocket Casts 相同结构的 direct Markdown payload，翻译、Markdown、HTML、PDF 和 front matter 行为保持一致。
+
+**降级行为**:
+- `source` 使用最终剧集页 URL。
+- 生成的剧集标题采用 `剧集标题 - 播客名称`；默认文件名会在前面增加 `[播客]`。
+- Show Notes 放在 `## Show Notes` 小节下；`Podcast`、`Podcast ID` 和 `Episode ID` 标签不会被翻译，作者写入 front matter 的 `author`。
+- 时长渲染为 `HH:MM:SS`；如能取得发布日期则写入 front matter 的 `created`。
+- 使用 `-w/--transcribe` 时，会下载剧集音频并通过本地 `transcribe-cpp` 转写，行为与 Pocket Casts 一致。
+
+---
+
 ### 1. Twitter/X (推特)
 
 **域名**:

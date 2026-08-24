@@ -86,6 +86,8 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
 
     Playwright 仍然是 Surf 默认且兼容性最好的浏览器后端。Surf 也提供实验性的 Obscura 后端。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件，然后在 `config.ini` 的 `[Browser]` 中设置 `backend = obscura`。Surf 会按需启动 `obscura serve` 并通过 CDP 连接。该实验后端主要用于普通动态页面；Twitter/X、知乎、有头登录、CAPTCHA 以及复杂浏览器功能仍使用 Playwright。
 
+    Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
+
 3.  **可选：安装图片 OCR 引擎**：
     `surf` 默认优先使用 Python 依赖中的 RapidOCR。如果您额外安装了本地 Tesseract，Surf 会在需要时自动回退，或者可通过 `--ocr-engine tesseract` 强制使用。请确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
 

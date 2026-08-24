@@ -107,6 +107,34 @@ When Surf detects a paywall, it looks up an existing archive snapshot before fai
 
 ---
 
+### Xiaoyuzhou (小宇宙) Episodes
+
+**Domains**:
+- `xiaoyuzhoufm.com`
+
+**Matching patterns**:
+```regex
+^https?://(www\.)?xiaoyuzhoufm\.com/episode/<episode-id>
+```
+
+**Handler**: `Fetcher._fetch_xiaoyuzhoufm_episode` (reuses the Pocket Casts payload flow)
+
+**Processing flow**:
+1. Fetch the episode page with a regular request.
+2. Parse the embedded `__NEXT_DATA__` JSON for the episode object: title, Show Notes HTML, publication date, duration, audio enclosure URL, podcast title, and author.
+3. If `__NEXT_DATA__` is unavailable, fall back to Open Graph metadata (`og:title`, `og:description`, `og:audio`) using the same extractor as Pocket Casts.
+4. If the regular request does not yield a title, retry once through the Playwright browser path.
+5. Return the same direct Markdown payload shape as Pocket Casts so translation, Markdown, HTML, PDF, and front matter behavior stays consistent.
+
+**Fallback behavior**:
+- Front matter `source` uses the final episode URL.
+- The generated episode title is `Episode Title - Podcast Name`; the default filename prefixes it with `[播客]`.
+- Show Notes are emitted under `## Show Notes`; the `Podcast`, `Podcast ID`, and `Episode ID` labels are protected from translation, and the author is written to front matter `author`.
+- Duration is rendered as `HH:MM:SS`; the publication date is written to front matter `created` when available.
+- With `-w/--transcribe`, the episode audio enclosure is downloaded and transcribed locally through `transcribe-cpp`, exactly like Pocket Casts.
+
+---
+
 For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf.py`.
 
 ---
