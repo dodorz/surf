@@ -127,7 +127,8 @@ The web form exposes the most commonly used Surf options directly, including:
 - optional LLM provider override for translation, shown only when language mode is not `raw`
 - Podcast transcription (`-w/--transcribe`) for Pocket Casts and Xiaoyuzhou episodes; the checkbox appears after the URL is recognized as one of these supported episode sites
 - free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
-- the input area also includes a paste button, an inline fetch button, and a `Save full text` mode that keeps pasted text intact even when it contains URLs
+- the input area also includes an inline fetch button and a `Save full text` mode that keeps pasted text intact even when it contains URLs
+- `Direct save` processes the current URL/text and selected output format, then queues the file without rendering a preview card
 - after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
 - when one submission produces multiple result cards, Surf Web also shows an aggregate save card so you can merge all successful results into one Markdown/HTML/PDF/Audio file
 - when translation is enabled, Surf Web returns the raw result card first and finishes translation in a background job; the same card refreshes automatically when the translated result is ready
