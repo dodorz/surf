@@ -11752,6 +11752,12 @@ class OutputHandler:
                 metadata["title"] = translated_title
             yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
 
+        # Refuse to create useless empty files when extraction produced nothing
+        if not str(content or "").strip() and not yaml_frontmatter.strip():
+            raise ValueError(
+                f"No content extracted for '{filename_title}'; skipped saving an empty markdown file"
+            )
+
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(yaml_frontmatter)
