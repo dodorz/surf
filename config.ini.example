@@ -44,6 +44,9 @@ backend = auto
 model_path =
 ; auto, zh, en, etc.
 language = auto
+; Transcript timestamp style: none = plain paragraphs (default), segment = [HH:MM:SS] prefix per line
+; CLI override: --transcript-timestamps {none,segment}
+timestamps = none
 ; ffmpeg executable or absolute path
 ffmpeg_path = ffmpeg
 ; Maximum downloaded audio size in MB

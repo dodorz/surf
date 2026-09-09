@@ -110,18 +110,24 @@ def test_pocketcasts_audio_url_falls_back_to_markdown_link():
     assert Fetcher._extract_podcast_audio_url(html) == "https://audio.example/episode.m4a"
 
 
-def test_transcribe_cpp_appends_timestamped_transcript(monkeypatch, tmp_path):
-    class Segment:
-        t0_ms = 1250
-        text = "Hello from the podcast"
+def _make_segment(t0_ms, t1_ms, text):
+    return SimpleNamespace(t0_ms=t0_ms, t1_ms=t1_ms, text=text)
+
+
+def _setup_transcribe(monkeypatch, tmp_path, config_values, segments, result_text=None):
+    segment_tuple = tuple(segments)
+    full_text = result_text if result_text is not None else " ".join(s.text for s in segments)
 
     class FakeResult:
-        segments = (Segment(),)
-        text = "Hello from the podcast"
+        segments = segment_tuple
+        text = full_text
+
+    captured = {}
 
     class FakeTranscribeCpp:
         @staticmethod
         def transcribe(*args, **kwargs):
+            captured["kwargs"] = kwargs
             return FakeResult()
 
     class AudioResponse:
@@ -143,16 +149,11 @@ def test_transcribe_cpp_appends_timestamped_transcript(monkeypatch, tmp_path):
 
     class Config:
         def get(self, section, key, fallback=""):
-            return {
-                "model_path": str(tmp_path / "model.gguf"),
-                "backend": "cpu",
-                "language": "auto",
-                "ffmpeg_path": "ffmpeg",
-                "max_audio_mb": "1",
-            }.get(key, fallback)
+            if section != "Transcription":
+                return fallback
+            return config_values.get(key, fallback)
 
-    model_path = tmp_path / "model.gguf"
-    model_path.write_bytes(b"fake model")
+    (tmp_path / "model.gguf").write_bytes(b"fake model")
     html = surf._build_direct_markdown_payload(
         "**Audio:** [Play episode](https://audio.example/episode.mp3)",
         "Episode - Show",
@@ -168,12 +169,96 @@ def test_transcribe_cpp_appends_timestamped_transcript(monkeypatch, tmp_path):
         "surf.Fetcher._get_proxies",
         lambda config, proxy_mode_override=None, custom_proxy_override=None: (None, None),
     )
+    return html, captured
 
-    result = Fetcher._transcribe_podcast_content(html, Config())
+
+def _make_config(values):
+    class Config:
+        def get(self, section, key, fallback=""):
+            if section != "Transcription":
+                return fallback
+            return values.get(key, fallback)
+
+    return Config()
+
+
+BASE_TRANSCRIPTION_CONFIG = {
+    "backend": "cpu",
+    "language": "auto",
+    "ffmpeg_path": "ffmpeg",
+    "max_audio_mb": "1",
+}
+
+
+def test_transcribe_cpp_defaults_to_plain_transcript(monkeypatch, tmp_path):
+    segments = [
+        _make_segment(1250, 4000, "Hello from the podcast."),
+        _make_segment(4500, 8000, "Second sentence continues here."),
+    ]
+    values = dict(BASE_TRANSCRIPTION_CONFIG, model_path=str(tmp_path / "model.gguf"))
+    html, captured = _setup_transcribe(monkeypatch, tmp_path, values, segments)
+
+    result = Fetcher._transcribe_podcast_content(html, _make_config(values))
     markdown = _extract_direct_markdown_payload(result)["markdown"]
 
     assert "## Transcript" in markdown
-    assert "[00:00:01] Hello from the podcast" in markdown
+    assert "[00:00:01]" not in markdown and "[00:00:04]" not in markdown
+    assert "Hello from the podcast. Second sentence continues here." in markdown
+    assert captured["kwargs"]["timestamps"] == "segment"
+
+
+def test_transcribe_cpp_segment_style_via_config(monkeypatch, tmp_path):
+    segments = [_make_segment(3661000, 3664000, "Timestamped line")]
+    values = dict(BASE_TRANSCRIPTION_CONFIG, model_path=str(tmp_path / "model.gguf"), timestamps="segment")
+    html, _ = _setup_transcribe(monkeypatch, tmp_path, values, segments)
+
+    result = Fetcher._transcribe_podcast_content(html, _make_config(values))
+    markdown = _extract_direct_markdown_payload(result)["markdown"]
+
+    assert "[01:01:01] Timestamped line" in markdown
+
+
+def test_transcribe_cli_override_disables_timestamps(monkeypatch, tmp_path):
+    segments = [_make_segment(1250, 4000, "Override line")]
+    values = dict(BASE_TRANSCRIPTION_CONFIG, model_path=str(tmp_path / "model.gguf"), timestamps="segment")
+    html, _ = _setup_transcribe(monkeypatch, tmp_path, values, segments)
+
+    result = Fetcher._transcribe_podcast_content(
+        html,
+        _make_config(values),
+        timestamps_override="none",
+    )
+    markdown = _extract_direct_markdown_payload(result)["markdown"]
+
+    assert "[00:00:01] Override line" not in markdown
+    assert "Override line" in markdown
+
+
+def test_transcribe_plain_mode_splits_paragraphs_on_pauses(monkeypatch, tmp_path):
+    segments = [
+        _make_segment(0, 20000, "First paragraph content"),
+        _make_segment(24000, 44000, "After a pause new paragraph"),
+    ]
+    values = dict(BASE_TRANSCRIPTION_CONFIG, model_path=str(tmp_path / "model.gguf"))
+    html, _ = _setup_transcribe(monkeypatch, tmp_path, values, segments)
+
+    result = Fetcher._transcribe_podcast_content(html, _make_config(values))
+    markdown = _extract_direct_markdown_payload(result)["markdown"]
+
+    assert "First paragraph content\n\nAfter a pause new paragraph" in markdown
+
+
+def test_transcribe_invalid_timestamps_style_raises(monkeypatch, tmp_path):
+    segments = [_make_segment(0, 1000, "text")]
+    values = dict(BASE_TRANSCRIPTION_CONFIG, model_path=str(tmp_path / "model.gguf"), timestamps="word")
+    html, _ = _setup_transcribe(monkeypatch, tmp_path, values, segments)
+
+    try:
+        Fetcher._transcribe_podcast_content(html, _make_config(values))
+    except ValueError as exc:
+        assert "Unsupported [Transcription].timestamps 'word'" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for invalid timestamps style")
 
 
 def test_pocketcasts_handler_keeps_show_notes_and_audio_link(monkeypatch):

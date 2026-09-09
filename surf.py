@@ -170,6 +170,7 @@ def _translate_markdown_document(
             protected_markdown_line_pattern=protected_pattern,
         )
         if transcript_markdown:
+            has_timestamps = bool(re.search(r"\[\d{2}:\d{2}:\d{2}\]", transcript_markdown))
             translated_transcript, _ = ContentProcessor.translate_if_needed(
                 transcript_markdown,
                 title=None,
@@ -178,8 +179,12 @@ def _translate_markdown_document(
                 llm_provider=llm_provider,
                 protected_markdown_line_pattern=r"^##\s+Transcript\s*$",
                 extra_system_instruction=(
-                    "Keep [HH:MM:SS] timestamps and the ## Transcript heading unchanged. "
-                    "Translate only the spoken transcript text after each timestamp."
+                    (
+                        "Keep [HH:MM:SS] timestamps and the ## Transcript heading unchanged. "
+                        "Translate only the spoken transcript text after each timestamp."
+                    )
+                    if has_timestamps
+                    else "Keep the ## Transcript heading unchanged. Translate only the spoken transcript paragraphs."
                 ),
             )
             translated_markdown = _join_markdown_sections(translated_body, translated_transcript)
@@ -8329,7 +8334,52 @@ class Fetcher:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     @staticmethod
-    def _transcribe_podcast_content(html_content, config, proxy_mode_override=None, custom_proxy_override=None):
+    def _is_cjk_char(ch):
+        return "\u4e00" <= ch <= "\u9fff" or ch in "，。！？；：、）》」』】"
+
+    @staticmethod
+    def _join_transcript_texts(texts):
+        """Join transcript segment texts into flowing text.
+
+        Avoids inserting spaces between CJK neighbors while keeping normal
+        spacing for Latin scripts."""
+        parts = []
+        for text in texts:
+            if not text:
+                continue
+            if parts and not (Fetcher._is_cjk_char(parts[-1][-1]) or Fetcher._is_cjk_char(text[0])):
+                parts.append(" ")
+            parts.append(text)
+        return "".join(parts)
+
+    @staticmethod
+    def _build_plain_transcript(segments, gap_ms=2000):
+        """Group (t0_ms, t1_ms, text) segments into paragraphs of plain text.
+
+        Paragraph breaks are placed where the speaker paused at least
+        ``gap_ms``; without usable timings everything becomes one paragraph."""
+        paragraphs = []
+        current = []
+        prev_end = None
+        for start, end, text in segments:
+            if current and prev_end and start - prev_end >= gap_ms:
+                paragraphs.append(Fetcher._join_transcript_texts(current))
+                current = []
+            current.append(text)
+            if end > start:
+                prev_end = end
+        if current:
+            paragraphs.append(Fetcher._join_transcript_texts(current))
+        return paragraphs
+
+    @staticmethod
+    def _transcribe_podcast_content(
+        html_content,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        timestamps_override=None,
+    ):
         """Append a local transcribe.cpp transcript to a podcast direct payload."""
         audio_url = Fetcher._extract_podcast_audio_url(html_content)
         if not audio_url:
@@ -8368,6 +8418,17 @@ class Fetcher:
             )
         language = config_value("language", "auto").lower() or "auto"
         language = None if language == "auto" else language
+        timestamps_style = (
+            timestamps_override
+            or config_value("timestamps", "none").lower()
+            or "none"
+        ).lower()
+        allowed_timestamps_styles = {"none", "segment"}
+        if timestamps_style not in allowed_timestamps_styles:
+            raise ValueError(
+                f"Unsupported [Transcription].timestamps '{timestamps_style}'. "
+                f"Choose one of: {', '.join(sorted(allowed_timestamps_styles))}"
+            )
         ffmpeg = config_value("ffmpeg_path", "ffmpeg") or "ffmpeg"
         max_audio_mb = int(config_value("max_audio_mb", "2048") or "2048")
         audio_timeout = max(30, int(config_value("audio_timeout", "120") or "120"))
@@ -8477,13 +8538,23 @@ class Fetcher:
         payload = _extract_direct_markdown_payload(html_content)
         if not payload:
             raise ValueError("Podcast transcription requires the Pocket Casts direct Markdown payload")
-        transcript_lines = ["", "## Transcript", ""]
+        collected_segments = []
         for segment in getattr(result, "segments", ()):
             text = str(getattr(segment, "text", "") or "").strip()
             if not text:
                 continue
             start = getattr(segment, "t0_ms", 0)
-            transcript_lines.append(f"[{Fetcher._format_transcript_timestamp(start)}] {text}")
+            end = getattr(segment, "t1_ms", 0)
+            collected_segments.append((start or 0, end or 0, text))
+        transcript_lines = ["", "## Transcript", ""]
+        if timestamps_style == "segment":
+            for start, _, text in collected_segments:
+                transcript_lines.append(f"[{Fetcher._format_transcript_timestamp(start)}] {text}")
+        else:
+            for paragraph in Fetcher._build_plain_transcript(collected_segments):
+                if transcript_lines[-1] != "":
+                    transcript_lines.append("")
+                transcript_lines.append(paragraph)
         if len(transcript_lines) == 3 and getattr(result, "text", ""):
             transcript_lines.append(str(result.text).strip())
         if len(transcript_lines) == 3:
@@ -12764,6 +12835,9 @@ Special Sites:
                         `-w/--transcribe` downloads the episode audio and
                         transcribes it locally with transcribe.cpp. Configure
                         `[Transcription].model_path` with a GGUF model file.
+                        Transcripts are plain paragraphs by default; pass
+                        `--transcript-timestamps segment` for `[HH:MM:SS]`
+                        prefixes (config: `[Transcription].timestamps`).
 
 Authentication:
   surf --login xiaohongshu                   # Login to Xiaohongshu
@@ -12942,6 +13016,11 @@ Twitter/X Backend:
         "--transcribe",
         action="store_true",
         help="Transcribe a Pocket Casts or Xiaoyuzhou episode locally with transcribe.cpp (requires [Transcription].model_path)",
+    )
+    parser.add_argument(
+        "--transcript-timestamps",
+        choices=["none", "segment"],
+        help="Transcript timestamp style for -w/--transcribe: segment=[HH:MM:SS] per line, none=plain paragraphs (default: [Transcription].timestamps, none)",
     )
 
     # Other options
@@ -13225,6 +13304,7 @@ Twitter/X Backend:
                     config,
                     proxy_mode_override=proxy_mode,
                     custom_proxy_override=custom_proxy,
+                    timestamps_override=args.transcript_timestamps,
                 )
             except Exception as exc:
                 logger.error(f"Podcast transcription failed: {exc}")
