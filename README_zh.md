@@ -86,7 +86,7 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
     uv run playwright install
     ```
 
-    Playwright 仍然是 Surf 默认且兼容性最好的浏览器后端。Surf 也提供实验性的 Obscura 后端。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件，然后在 `config.ini` 的 `[Browser]` 中设置 `backend = obscura`。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。线程和 gunicorn worker 之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。该实验后端主要用于普通动态页面；Twitter/X、知乎、有头登录、CAPTCHA 以及复杂浏览器功能仍使用 Playwright。
+    Playwright 仍然是 Surf 默认且兼容性最好的浏览器后端。Surf 也提供实验性的 Obscura 后端。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件，然后在 `config.ini` 的 `[Browser]` 中设置 `backend = obscura`。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。线程和 gunicorn worker 之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、知乎、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。只有有头交互式登录和 PDF 生成仍必须使用 Playwright。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长，应小于 gunicorn worker 超时；对较慢的浏览器/archive 流程请调大该超时（例如 `gunicorn --timeout 120`）。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。
 
     Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
 

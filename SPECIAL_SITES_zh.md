@@ -9,6 +9,8 @@
 
 本文档中的常见短网址（包括 `pca.st`）会在特殊网站匹配前解析为最终长网址，匹配规则、抓取和 front matter 的 `source` 默认使用 canonical URL。
 
+> 浏览器后端说明：下文处理器中描述的无头浏览器步骤（含 Twitter/X、知乎、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads、付费墙 archive 快照等）统一使用配置文件 `[Browser] backend` 指定的后端（`playwright` 或 `obscura`）。只有有头交互式登录、PDF 生成，以及 NCPSSD 全文 PDF 下载仍使用 Playwright。
+
 - `patterns`: URL 匹配的正则表达式列表
 - `handler`: 处理函数，接收 `(url, config, proxy_mode_override, custom_proxy_override)` 参数
 - `default_no_proxy` (可选): 默认不使用代理，可被命令行参数覆盖

@@ -181,11 +181,16 @@ class ObscuraBackend:
         endpoint: str = "http://127.0.0.1:9222",
         startup_timeout: float = 15.0,
         stealth: bool = False,
+        navigation_timeout: float = 60.0,
     ) -> None:
         self.executable = executable
         self.endpoint = endpoint.rstrip("/")
         self.startup_timeout = startup_timeout
         self.stealth = stealth
+        # Upper bound (seconds) for a single navigation.  Kept below the
+        # gunicorn worker timeout so a slow page cannot get the worker
+        # SIGKILLed; callers can override it from config.
+        self.navigation_timeout = max(5.0, float(navigation_timeout))
         self._state_path, self._lock_path = self._coordination_paths(self.endpoint)
 
     @staticmethod
@@ -330,12 +335,14 @@ class ObscuraBackend:
             _remove_file(self._state_path)
         self._start_managed_server(proxy)
 
-    def fetch(self, url: str, proxy: Optional[str] = None) -> str:
-        """Return rendered HTML for *url* using Playwright over CDP.
+    @contextmanager
+    def session(self, proxy: Optional[str] = None) -> Iterator["object"]:
+        """Yield a Playwright ``Browser`` connected to the shared Obscura CDP server.
 
-        The coordination lock deliberately covers navigation as well as server
-        startup.  Obscura's proxy is a server-level option; this prevents a
-        proxy switch from terminating a browser used by another request.
+        The coordination lock is held for the whole ``with`` block, and the
+        managed server is reference-counted so it is not stopped while other
+        requests are still using it.  Callers may create contexts/pages on the
+        yielded browser and run arbitrary page interactions before it closes.
         """
         process_lock = _lock_for(self._lock_path)
         with process_lock:
@@ -343,23 +350,53 @@ class ObscuraBackend:
                 self._ensure_server(proxy)
                 managed_user = self._acquire_server_user()
                 try:
-                    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
                     from playwright.sync_api import sync_playwright
 
                     with sync_playwright() as playwright:
                         browser = playwright.chromium.connect_over_cdp(self.endpoint)
-                        context = browser.contexts[0] if browser.contexts else browser.new_context()
-                        page = context.new_page()
                         try:
-                            try:
-                                page.goto(url, wait_until="networkidle", timeout=60000)
-                            except PlaywrightTimeoutError:
-                                page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                            page.wait_for_timeout(2000)
-                            return page.content()
+                            yield browser
                         finally:
-                            page.close()
-                        # connect_over_cdp's browser.close() only disconnects Playwright.
+                            # connect_over_cdp's browser.close() only disconnects
+                            # Playwright; it never stops the shared server.
+                            try:
+                                browser.close()
+                            except Exception:
+                                pass
                 finally:
                     if managed_user:
                         self._release_server_user()
+
+    def fetch(self, url: str, proxy: Optional[str] = None) -> str:
+        """Return rendered HTML for *url* using Playwright over CDP.
+
+        The coordination lock deliberately covers navigation as well as server
+        startup.  Obscura's proxy is a server-level option; this prevents a
+        proxy switch from terminating a browser used by another request.
+        """
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        nav_timeout_ms = int(self.navigation_timeout * 1000)
+        # domcontentloaded fallback is capped so the call stays well below the
+        # gunicorn worker timeout even when networkidle times out.
+        fallback_timeout_ms = min(nav_timeout_ms, int(max(5.0, self.navigation_timeout * 0.5) * 1000))
+        with self.session(proxy) as browser:
+            reuse_context = bool(browser.contexts)
+            context = browser.contexts[0] if reuse_context else browser.new_context()
+            page = context.new_page()
+            try:
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=nav_timeout_ms)
+                except PlaywrightTimeoutError:
+                    page.goto(url, wait_until="domcontentloaded", timeout=fallback_timeout_ms)
+                page.wait_for_timeout(2000)
+                return page.content()
+            finally:
+                page.close()
+                # Close only the context we created ourselves; the default
+                # context of a CDP browser belongs to the shared server.
+                if not reuse_context:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass

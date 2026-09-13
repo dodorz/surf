@@ -35,6 +35,11 @@ import unicodedata
 import signal
 from array import array
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
+from contextlib import contextmanager
+
+# Sentinel so callers can explicitly pass "no proxy" (None) to _browser_session.
+_UNSET = object()
+
 
 def _build_direct_markdown_payload(
     markdown_text,
@@ -4643,27 +4648,10 @@ class Fetcher:
 
     @staticmethod
     def _fetch_wechat_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
-        from playwright.sync_api import sync_playwright
-
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--disable-web-security",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-infobars",
-                    "--disable-background-timer-throttling",
-                    "--disable-popup-blocking",
-                    "--disable-extensions",
-                ],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-            browser = p.chromium.launch(**launch_args)
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             context = Fetcher._create_stealth_context(browser, url)
             page = context.new_page()
             try:
@@ -4702,7 +4690,7 @@ class Fetcher:
                 logger.warning(f"WeChat handler failed: {e}")
                 return None
             finally:
-                browser.close()
+                context.close()
 
     @staticmethod
     def _is_twitter_url(url):
@@ -4866,26 +4854,20 @@ class Fetcher:
             return payload
 
     @staticmethod
-    def _fetch_with_obscura_sync(
-        url,
-        config,
-        proxy_mode_override=None,
-        custom_proxy_override=None,
-        is_twitter_article=False,
-        trusted_host_map=None,
-    ):
-        """Fetch a regular dynamic page through the experimental Obscura backend."""
-        is_zhihu_url = bool(
-            re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
-        )
-        if is_twitter_article or Fetcher._is_twitter_url(url) or is_zhihu_url:
-            raise RuntimeError("Obscura backend is not enabled for Twitter/X or Zhihu")
-        if trusted_host_map:
-            raise RuntimeError("Obscura backend does not support trusted host resolver rules yet")
+    def _browser_backend(config):
+        """Return the configured browser backend name (``playwright`` or ``obscura``)."""
+        has_section = getattr(config, "has_section", lambda _name: False)
+        if has_section("Browser"):
+            return (
+                config.get("Browser", "backend", fallback="playwright") or "playwright"
+            ).strip().lower()
+        return "playwright"
 
+    @staticmethod
+    def _build_obscura_backend(config):
+        """Construct an :class:`ObscuraBackend` from the ``[Browser]`` config section."""
         from obscura_backend import ObscuraBackend
 
-        _, proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         executable = (
             (config.get("Browser", "obscura_executable", fallback="obscura") or "obscura").strip()
         )
@@ -4899,13 +4881,78 @@ class Fetcher:
             startup_timeout = float(config.get("Browser", "obscura_startup_timeout", fallback="15"))
         except (TypeError, ValueError):
             startup_timeout = 15.0
-        logger.warning("Using experimental Obscura backend at %s", endpoint)
+        try:
+            navigation_timeout = float(
+                config.get("Browser", "obscura_navigation_timeout", fallback="60")
+            )
+        except (TypeError, ValueError):
+            navigation_timeout = 60.0
         return ObscuraBackend(
             executable=executable,
             endpoint=endpoint,
             startup_timeout=startup_timeout,
             stealth=stealth,
-        ).fetch(url, proxy=proxy)
+            navigation_timeout=navigation_timeout,
+        )
+
+    @staticmethod
+    @contextmanager
+    def _browser_session(
+        config,
+        url=None,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        *,
+        headless=True,
+        launch_args=None,
+        use_proxy=True,
+        pw_proxy=_UNSET,
+    ):
+        """Yield a Playwright ``Browser`` using the configured browser backend.
+
+        This is the single entry point for all browser-based handlers: when
+        ``[Browser] backend = obscura`` the browser is connected over CDP to a
+        managed, reference-counted Obscura server; otherwise a local Chromium
+        is launched.  Headed sessions always use Playwright because the Obscura
+        backend is headless-only.  ``pw_proxy`` can be supplied by callers that
+        resolve proxies specially (e.g. Twitter's forced proxy).
+        """
+        backend = Fetcher._browser_backend(config)
+        if pw_proxy is _UNSET:
+            _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        if backend == "obscura" and headless:
+            backend_obj = Fetcher._build_obscura_backend(config)
+            logger.warning("Using experimental Obscura backend at %s", backend_obj.endpoint)
+            with backend_obj.session(proxy=pw_proxy if use_proxy else None) as browser:
+                yield browser
+            return
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            kwargs = {"headless": headless, "args": list(launch_args or [])}
+            if use_proxy and pw_proxy:
+                kwargs["proxy"] = pw_proxy
+            browser = p.chromium.launch(**kwargs)
+            try:
+                yield browser
+            finally:
+                browser.close()
+
+    @staticmethod
+    def _fetch_with_obscura_sync(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        is_twitter_article=False,
+        trusted_host_map=None,
+    ):
+        """Fetch a regular dynamic page through the experimental Obscura backend."""
+        _, proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        backend_obj = Fetcher._build_obscura_backend(config)
+        logger.warning("Using experimental Obscura backend at %s", backend_obj.endpoint)
+        return backend_obj.fetch(url, proxy=proxy)
 
     @staticmethod
     def _fetch_with_browser_sync(
@@ -4917,21 +4964,24 @@ class Fetcher:
         trusted_host_map=None,
     ):
         """Fetch a page with Playwright's synchronous API."""
-        has_section = getattr(config, "has_section", lambda _name: False)
-        backend = (
-            config.get("Browser", "backend", fallback="playwright").strip().lower()
-            if has_section("Browser")
-            else "playwright"
-        )
+        backend = Fetcher._browser_backend(config)
         if backend == "obscura":
-            return Fetcher._fetch_with_obscura_sync(
-                url,
-                config,
-                proxy_mode_override,
-                custom_proxy_override,
-                is_twitter_article,
-                trusted_host_map,
-            )
+            if trusted_host_map:
+                # trusted host resolver rules are a Playwright-only feature; keep
+                # the feature working by falling back to Playwright for this call.
+                logger.info(
+                    "trusted host resolver rules require Playwright; using Playwright for this request"
+                )
+                backend = "playwright"
+            else:
+                return Fetcher._fetch_with_obscura_sync(
+                    url,
+                    config,
+                    proxy_mode_override,
+                    custom_proxy_override,
+                    is_twitter_article,
+                    trusted_host_map,
+                )
         if backend not in {"playwright", "chromium"}:
             raise ValueError(f"Unsupported browser backend: {backend}")
 
@@ -5667,19 +5717,11 @@ class Fetcher:
         thread_mode = Fetcher._normalize_thread_mode(fetch_thread)
         thread_author = Fetcher._normalize_thread_author(fetch_thread_author)
 
-        from playwright.sync_api import sync_playwright
-
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -5812,7 +5854,6 @@ class Fetcher:
                 return None
             finally:
                 context.close()
-                browser.close()
 
     @staticmethod
     def _get_twitter_thread_items(
@@ -5840,19 +5881,11 @@ class Fetcher:
             return cli_items, cli_current_index
 
         try:
-            from playwright.sync_api import sync_playwright
-
             _, pw_proxy = Fetcher._get_twitter_forced_proxies(config, proxy_mode_override, custom_proxy_override)
 
-            with sync_playwright() as p:
-                launch_args = {
-                    "headless": True,
-                    "args": ["--disable-blink-features=AutomationControlled"],
-                }
-                if pw_proxy:
-                    launch_args["proxy"] = pw_proxy
-
-                browser = p.chromium.launch(**launch_args)
+            with Fetcher._browser_session(
+                config, url, proxy_mode_override, custom_proxy_override, pw_proxy=pw_proxy
+            ) as browser:
                 context = Fetcher._create_stealth_context(browser, url, auth_site_name="twitter")
                 page = context.new_page()
 
@@ -5906,7 +5939,6 @@ class Fetcher:
                     return Fetcher._extract_thread_items(items, current_index, thread_mode, thread_author)
                 finally:
                     context.close()
-                    browser.close()
         except Exception as e:
             logger.warning(f"Failed to fetch Twitter/X thread items: {e}")
             return [], -1
@@ -6135,8 +6167,6 @@ class Fetcher:
         Supports both direct URLs and xhslink.com short URLs.
         Requires prior login using --login xiaohongshu
         """
-        from playwright.sync_api import sync_playwright
-
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         # Check if this is a short link and resolve it
@@ -6160,9 +6190,9 @@ class Fetcher:
             )
             return None
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, proxy=pw_proxy) if pw_proxy else p.chromium.launch(headless=True)
-
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             # Try to use saved auth state
             context = AuthHandler.create_context_with_auth(
                 browser,
@@ -6569,7 +6599,7 @@ class Fetcher:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
             finally:
-                browser.close()
+                context.close()
 
     @staticmethod
     def _is_ncpssd_secure_article_url(url):
@@ -7043,19 +7073,11 @@ class Fetcher:
         Fetch NCPSSD (国家哲学社会科学文献中心) literature pages.
         Mandates: force browser, no translation, h1 title, full content capture.
         """
-        from playwright.sync_api import sync_playwright
-
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -7128,7 +7150,7 @@ class Fetcher:
                 logger.warning(f"NCPSSD handler failed: {e}")
                 return None
             finally:
-                browser.close()
+                context.close()
 
     @staticmethod
     def _fetch_github_readme(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -7162,8 +7184,6 @@ class Fetcher:
                     pass
             return direct_markdown
 
-        from playwright.sync_api import sync_playwright
-
         logger.info(f"Fetching GitHub README: {url}")
 
         # Parse URL to get owner and repo
@@ -7177,15 +7197,9 @@ class Fetcher:
 
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -7315,7 +7329,7 @@ class Fetcher:
                 logger.warning(f"GitHub handler failed: {e}")
                 return None
             finally:
-                browser.close()
+                context.close()
 
     @staticmethod
     def _fetch_arxiv(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -7478,21 +7492,13 @@ class Fetcher:
         Fetch Wikipedia article with content optimization.
         Removes citation marks, fixes table captions, and cleans up navigation elements.
         """
-        from playwright.sync_api import sync_playwright
-
         logger.info(f"Fetching Wikipedia article: {url}")
 
         _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
-        with sync_playwright() as p:
-            launch_args = {
-                "headless": True,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if pw_proxy:
-                launch_args["proxy"] = pw_proxy
-
-            browser = p.chromium.launch(**launch_args)
+        with Fetcher._browser_session(
+            config, url, proxy_mode_override, custom_proxy_override
+        ) as browser:
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -7609,7 +7615,7 @@ class Fetcher:
                 logger.warning(f"Wikipedia handler failed: {e}")
                 return None
             finally:
-                browser.close()
+                context.close()
 
     @staticmethod
     def _fetch_bluesky(
@@ -9610,7 +9616,7 @@ class Fetcher:
         ``(html_content, snapshot_url)`` or ``(None, None)``.
         """
         try:
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         except ImportError:
             logger.warning("Playwright is not installed; cannot fetch from archive domains")
             return None, None
@@ -9628,11 +9634,14 @@ class Fetcher:
             "--disable-popup-blocking", "--disable-extensions",
         ]
 
-        def _launch_browser(p, headless, use_proxy=True):
-            kwargs = {"headless": headless, "args": list(browser_args)}
-            if use_proxy and pw_proxy:
-                kwargs["proxy"] = pw_proxy
-            return p.chromium.launch(**kwargs)
+        @contextmanager
+        def _launch_browser(headless, use_proxy=True):
+            """Yield a browser for one archive attempt using the configured backend."""
+            with Fetcher._browser_session(
+                config, None, proxy_mode_override, custom_proxy_override,
+                headless=headless, launch_args=browser_args, use_proxy=use_proxy,
+            ) as browser:
+                yield browser
 
         def _run_workflow(page, archive_domain, headless=False, manual_lookup_timeout=120):
             """Go to one archive listing page, pick a snapshot, and extract it."""
@@ -9855,78 +9864,83 @@ class Fetcher:
             logger.info(f"{archive_domain}: snapshot fetched successfully: {snapshot_url}")
             return html_content, snapshot_url
 
-        def _try_browser(p, archive_domain, headless, use_proxy=True, manual_lookup_timeout=120):
-            browser = None
+        def _try_browser(archive_domain, headless, use_proxy=True, manual_lookup_timeout=120):
             try:
-                browser = _launch_browser(p, headless=headless, use_proxy=use_proxy)
-                context = Fetcher._create_stealth_context(
-                    browser, f"https://{archive_domain}/"
-                )
-                page = context.new_page()
-                page.set_default_timeout(30000)
-                return _run_workflow(
-                    page,
-                    archive_domain,
-                    headless=headless,
-                    manual_lookup_timeout=manual_lookup_timeout,
-                )
+                with _launch_browser(headless=headless, use_proxy=use_proxy) as browser:
+                    context = Fetcher._create_stealth_context(
+                        browser, f"https://{archive_domain}/"
+                    )
+                    page = context.new_page()
+                    page.set_default_timeout(30000)
+                    try:
+                        return _run_workflow(
+                            page,
+                            archive_domain,
+                            headless=headless,
+                            manual_lookup_timeout=manual_lookup_timeout,
+                        )
+                    finally:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
             except Exception as exc:
                 logger.warning(f"{archive_domain}: browser attempt failed: {exc}")
                 return None, None
-            finally:
-                if browser is not None:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
 
         # Try all aliases headlessly before opening a visible browser. This
         # keeps a blocked alias from consuming the manual CAPTCHA wait.
         try:
-            with sync_playwright() as p:
-                for archive_domain in archive_domains:
-                    logger.info(f"Trying archive domain: {archive_domain}")
+            for archive_domain in archive_domains:
+                logger.info(f"Trying archive domain: {archive_domain}")
+                html_result, snap_url = _try_browser(archive_domain, headless=True)
+                if html_result is not None:
+                    return html_result, snap_url
+
+                if pw_proxy:
+                    logger.info(
+                        f"{archive_domain}: proxy attempt failed; retrying headless without proxy"
+                    )
                     html_result, snap_url = _try_browser(
-                        p, archive_domain, headless=True,
+                        archive_domain, headless=True, use_proxy=False,
                     )
                     if html_result is not None:
                         return html_result, snap_url
 
-                    if pw_proxy:
-                        logger.info(
-                            f"{archive_domain}: proxy attempt failed; retrying headless without proxy"
-                        )
-                        html_result, snap_url = _try_browser(
-                            p, archive_domain, headless=True, use_proxy=False,
-                        )
-                        if html_result is not None:
-                            return html_result, snap_url
-
-                logger.info(
-                    "All headless archive domain attempts failed; retrying with visible browsers "
-                    "for manual CAPTCHA completion..."
+            logger.info("All headless archive domain attempts failed")
+            if not AuthHandler.can_launch_headed_browser():
+                # On a headless host the visible fallback can never work (no X
+                # server / $DISPLAY), so fail fast instead of spamming a
+                # guaranteed-to-fail browser launch for every alias.
+                logger.warning(
+                    "No graphical session available (DISPLAY/WAYLAND_DISPLAY unset); "
+                    "skipping the visible-browser CAPTCHA fallback for archive domains."
                 )
-                for archive_domain in archive_domains:
-                    print(
-                        "\n" + "=" * 60 + "\n"
-                        + f"  {archive_domain} 需要人工完成 CAPTCHA 验证\n"
-                        + "  正在打开可见浏览器窗口...\n"
-                        + "  请在新窗口中完成验证，完成后程序将自动继续\n"
-                        + "=" * 60 + "\n"
-                    )
-                    html_result, snap_url = _try_browser(
-                        p,
-                        archive_domain,
-                        headless=False,
-                        use_proxy=False if pw_proxy else True,
-                        manual_lookup_timeout=30,
-                    )
-                    if html_result is not None:
-                        return html_result, snap_url
-                    logger.warning(
-                        f"{archive_domain}: visible browser attempt failed; trying the next archive domain"
-                    )
                 return None, None
+
+            logger.info(
+                "Retrying with visible browsers for manual CAPTCHA completion..."
+            )
+            for archive_domain in archive_domains:
+                print(
+                    "\n" + "=" * 60 + "\n"
+                    + f"  {archive_domain} 需要人工完成 CAPTCHA 验证\n"
+                    + "  正在打开可见浏览器窗口...\n"
+                    + "  请在新窗口中完成验证，完成后程序将自动继续\n"
+                    + "=" * 60 + "\n"
+                )
+                html_result, snap_url = _try_browser(
+                    archive_domain,
+                    headless=False,
+                    use_proxy=False if pw_proxy else True,
+                    manual_lookup_timeout=30,
+                )
+                if html_result is not None:
+                    return html_result, snap_url
+                logger.warning(
+                    f"{archive_domain}: visible browser attempt failed; trying the next archive domain"
+                )
+            return None, None
         except Exception as e:
             logger.warning(f"Archive snapshot fetch failed: {e}")
             return None, None

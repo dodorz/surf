@@ -65,6 +65,9 @@ obscura_endpoint = http://127.0.0.1:9222
 obscura_stealth = false
 ; Seconds to wait for the Obscura CDP endpoint during startup
 obscura_startup_timeout = 15
+; Upper bound (seconds) for a single page navigation through Obscura.
+; Keep it below the gunicorn worker timeout (recommended: --timeout 120).
+obscura_navigation_timeout = 60
 
 [Network]
 ; Proxy mode: env (environment vars), win (Windows Internet Settings), custom (use custom_proxy), no (no proxy)

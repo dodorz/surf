@@ -10,6 +10,8 @@ Chinese version: `SPECIAL_SITES_zh.md`
 
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
 Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target.
+
+> Browser backend note: the headless browser steps described for the handlers below (including Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and the paywall archive-snapshot fallback) all use the backend configured by `[Browser] backend` (`playwright` or `obscura`). Only headed interactive login, PDF generation, and the NCPSSD full-text PDF download still use Playwright.
 Each site entry may define:
 - `patterns`: URL regex list
 - `handler`: handler function
