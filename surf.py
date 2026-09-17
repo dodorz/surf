@@ -4001,6 +4001,11 @@ class Fetcher:
             img["style"] = "width: 60px; height: 60px; object-fit: cover; border-radius: 50%;"
             logger.debug(f"Applied 60x60 styling to avatar: {img.get('src', '')}")
 
+        # Remove meta description tags that may have been included from the original page structure
+        # These would incorrectly end up as the front matter description field
+        for meta_desc in soup.find_all("meta", attrs={"name": "description"}):
+            meta_desc.decompose()
+
         # Fix images with 403 errors by adding proper referrer meta tag
         # Some xhscdn images require a referrer
         meta_referrer = soup.new_tag("meta")
