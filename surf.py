@@ -16,6 +16,14 @@ import ssl
 import socket
 import requests  # type: ignore
 import threading
+
+# Optional curl-cffi import for TLS fingerprint impersonation (Cloudflare bypass)
+try:
+    from curl_cffi.requests import Session as CurlCffiSession
+    _HAS_CURL_CFFI = True
+except ImportError:
+    CurlCffiSession = None
+    _HAS_CURL_CFFI = False
 import queue
 from requests.utils import get_encoding_from_headers
 from readability import Document
@@ -913,6 +921,57 @@ _SYSTEM_TRUST_REQUESTS_SESSION.mount("https://", _SystemTrustHTTPAdapter())
 def _requests_get_with_system_trust_interruptibly(*args, **kwargs):
     """Requests.get via a session that uses the system default trust chain."""
     return _session_get_interruptibly(_SYSTEM_TRUST_REQUESTS_SESSION, *args, **kwargs)
+
+# curl-cffi TLS fingerprint impersonation support
+_CURLCFFI_SESSION = None
+_CURLCFFI_SESSION_LOCK = threading.Lock()
+
+def _get_curlcffi_session():
+    """Lazy-initialize a persistent curl-cffi Session with browser impersonation."""
+    global _CURLCFFI_SESSION
+    if _CURLCFFI_SESSION is None:
+        if not _HAS_CURL_CFFI:
+            raise ImportError("curl_cffi is not installed. Install with: uv sync --extra curlcffi")
+        with _CURLCFFI_SESSION_LOCK:
+            if _CURLCFFI_SESSION is None:
+                _CURLCFFI_SESSION = CurlCffiSession(
+                    impersonate="chrome131",
+                    timeout=15,
+                )
+    return _CURLCFFI_SESSION
+
+def _curlcffi_enabled(config):
+    """Determine if curl-cffi should be used based on config."""
+    if not _HAS_CURL_CFFI:
+        return False
+    mode = (config.get("Browser", "curlcffi_mode", fallback="auto") or "auto").strip().lower()
+    return mode in ("true", "auto", "yes", "on", "1")
+
+def _curlcffi_get_interruptibly(url, headers=None, proxies=None, timeout=15):
+    """Perform a GET request using curl-cffi with TLS fingerprint impersonation.
+    
+    Returns a curl_cffi Response object (has .content, .text, .status_code, .raise_for_status()).
+    Runs in a daemon thread for Ctrl+C responsiveness.
+    """
+    session = _get_curlcffi_session()
+    
+    kwargs = {}
+    if headers:
+        kwargs["headers"] = headers
+    if timeout:
+        kwargs["timeout"] = timeout
+    
+    # Convert requests-style proxies {'http': ..., 'https': ...}
+    # to curl-cffi proxy format (single string)
+    if proxies:
+        if isinstance(proxies, dict):
+            https_proxy = proxies.get("https") or proxies.get("http")
+            if https_proxy:
+                kwargs["proxy"] = https_proxy
+        elif isinstance(proxies, str):
+            kwargs["proxy"] = proxies
+    
+    return _call_interruptibly(session.get, url, **kwargs)
 
 def _get_local_dns_addresses(hostname):
     addresses = []
@@ -1956,14 +2015,57 @@ class Fetcher:
                     proxies=req_proxies,
                     timeout=10,
                 )
-                response.raise_for_status()
                 decoded_text = Fetcher._decode_response_text(response)
 
-                # Check if likely dynamic (heuristic: very short content or explicit noscript)
-                if len(decoded_text) < 1000 or "<noscript>" in decoded_text or Fetcher._is_cloudflare_challenge(decoded_text):
-                    logger.info("Content seems short, requires JS, or is a Cloudflare challenge. Switching to browser...")
+                # Check if likely dynamic (heuristic: very short content, explicit noscript,
+                # Cloudflare challenge, or error status like 403)
+                is_error_status = response.status_code >= 400
+                needs_browser = (
+                    len(decoded_text) < 1000
+                    or "<noscript>" in decoded_text
+                    or Fetcher._is_cloudflare_challenge(decoded_text)
+                    or is_error_status
+                )
+                if needs_browser:
+                    logger.info("Content seems short, requires JS, is a Cloudflare challenge, or returned HTTP %d.", response.status_code)
+                    
+                    # Try curl-cffi before browser (lighter weight)
+                    if _curlcffi_enabled(config):
+                        logger.warning("Trying curl-cffi TLS impersonation before browser fallback...")
+                        try:
+                            curl_headers = {
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                                ),
+                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                                "Accept-Language": "en-US,en;q=0.9",
+                            }
+                            curl_resp = _curlcffi_get_interruptibly(
+                                url,
+                                headers=curl_headers,
+                                proxies=req_proxies,
+                                timeout=15,
+                            )
+                            curl_text = Fetcher._decode_response_text(curl_resp)
+                            curl_is_ok = (
+                                curl_resp.status_code < 400
+                                and len(curl_text) >= 1000
+                                and "<noscript>" not in curl_text
+                                and not Fetcher._is_cloudflare_challenge(curl_text)
+                            )
+                            if curl_is_ok:
+                                logger.warning("curl-cffi succeeded (status %d), avoiding browser fallback", curl_resp.status_code)
+                                return curl_text
+                            else:
+                                logger.warning("curl-cffi returned status %d or challenge page, falling back to browser", curl_resp.status_code)
+                        except Exception as e:
+                            logger.warning("curl-cffi fallback failed: %s", e)
+                    
+                    logger.info("Switching to browser...")
                     should_use_browser = True
                 else:
+                    response.raise_for_status()
                     return decoded_text
 
             except Exception as e:
@@ -1971,12 +2073,19 @@ class Fetcher:
                     logger.warning(f"Requests failed via implicit proxy: {e}. Retrying direct connection...")
                     try:
                         response = _requests_get_with_system_trust_interruptibly(url, headers=headers, timeout=10)
-                        response.raise_for_status()
                         decoded_text = Fetcher._decode_response_text(response)
-                        if len(decoded_text) < 1000 or "<noscript>" in decoded_text or Fetcher._is_cloudflare_challenge(decoded_text):
-                            logger.info("Direct retry succeeded but content still seems short, requires JS, or is a Cloudflare challenge. Switching to browser...")
+                        is_error_status = response.status_code >= 400
+                        needs_browser = (
+                            len(decoded_text) < 1000
+                            or "<noscript>" in decoded_text
+                            or Fetcher._is_cloudflare_challenge(decoded_text)
+                            or is_error_status
+                        )
+                        if needs_browser:
+                            logger.info("Direct retry succeeded but content still seems short, requires JS, is a Cloudflare challenge, or returned HTTP %d. Switching to browser...", response.status_code)
                             should_use_browser = True
                         else:
+                            response.raise_for_status()
                             return decoded_text
                     except Exception as retry_error:
                         logger.warning(f"Direct retry after proxy failure failed: {retry_error}. Switching to browser...")
@@ -1995,7 +2104,37 @@ class Fetcher:
         # plain requests call — requests often has a different TLS fingerprint
         # that evades the challenge.
         if browser_result and Fetcher._is_cloudflare_challenge(browser_result):
-            logger.warning("Browser returned bot challenge page. Retrying with plain requests after delay...")
+            logger.warning("Browser returned bot challenge page. Retrying with curl-cffi (TLS impersonation)...")
+            
+            # --- curl-cffi attempt with TLS fingerprint impersonation ---
+            if _curlcffi_enabled(config):
+                import time as _time
+                _time.sleep(1)
+                try:
+                    curl_headers = {
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                        ),
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                    }
+                    curl_resp = _curlcffi_get_interruptibly(
+                        url,
+                        headers=curl_headers,
+                        proxies=req_proxies,
+                        timeout=15,
+                    )
+                    curl_resp.raise_for_status()
+                    curl_text = Fetcher._decode_response_text(curl_resp)
+                    if curl_text and not Fetcher._is_cloudflare_challenge(curl_text):
+                        logger.info("curl-cffi TLS impersonation succeeded after browser challenge")
+                        return curl_text
+                except Exception as _curl_err:
+                    logger.warning("curl-cffi attempt also failed: %s", _curl_err)
+            
+            # --- Existing plain-requests retries (unchanged) ---
+            logger.warning("Retrying with plain requests after delay...")
             import time as _time
             _time.sleep(2)
             try:

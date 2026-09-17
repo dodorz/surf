@@ -97,6 +97,20 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
     ```
     Surf 也支持 RapidOCR 作为备选。如需使用 RapidOCR，请运行 `uv pip install rapidocr-onnxruntime` 并在 `config.ini` 中设置 `[OCR] engine = rapidocr`。如果您额外安装了本地 Tesseract，Surf 会在需要时自动回退，或者可通过 `--ocr-engine tesseract` 强制使用。请确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
 
+4.  **可选：安装 curl-cffi 绕过 Cloudflare 防护**：
+    部分网站（如 ACM 数字图书馆）使用 Cloudflare 反爬虫保护。Surf 可以使用 `curl-cffi` 模拟浏览器 TLS 指纹来绕过这些挑战。安装方法：
+    ```bash
+    uv sync --extra curlcffi
+    ```
+    然后在 `config.ini` 中配置：
+    ```ini
+    [Browser]
+    ; 使用 curl-cffi TLS 指纹模拟绕过 Cloudflare 挑战
+    ; 可选值: false（默认）, true（始终使用）, auto（仅作为回退）
+    curlcffi_mode = auto
+    ```
+    设置为 `auto` 时，Surf 会先尝试标准 requests，然后尝试 curl-cffi，最后才回退到浏览器渲染。这种方式比启动完整浏览器更轻量。
+
 ## Web 界面
 
 `surf_web.py` 提供的是一个基于 Flask 的本地 Web 界面，适合开发和个人使用。它内部调用的 `app.run(...)` 是 Flask 自带的开发服务器，所以你看到“不要用于生产部署”的提示是正常的。

@@ -116,6 +116,20 @@ We recommend using `uv` for a clean environment.
     ```
     Surf also supports RapidOCR as a fallback. To use it instead, run `uv pip install rapidocr-onnxruntime` and set `[OCR] engine = rapidocr` in `config.ini`. If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
 
+4.  **Optional: Install curl-cffi for Cloudflare bypass**:
+    Some websites (e.g., ACM Digital Library) use Cloudflare's anti-bot protection. Surf can use `curl-cffi` to impersonate browser TLS fingerprints and bypass these challenges. Install it with:
+    ```bash
+    uv sync --extra curlcffi
+    ```
+    Then configure in `config.ini`:
+    ```ini
+    [Browser]
+    ; Use curl-cffi TLS fingerprint impersonation to bypass Cloudflare challenges
+    ; Values: false (default), true (always use), auto (use as fallback only)
+    curlcffi_mode = auto
+    ```
+    When set to `auto`, Surf first tries standard requests, then attempts curl-cffi before falling back to browser rendering. This is lighter weight than launching a full browser.
+
 ## Web UI
 
 `surf_web.py` provides a local Flask-based web interface for development and personal use. The built-in `app.run(...)` server is Flask's development server, so the warning about production deployment is expected.
