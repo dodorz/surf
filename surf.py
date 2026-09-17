@@ -8701,7 +8701,7 @@ class Fetcher:
                 except Exception as exc:
                     logger.info("Pocket Casts: browser page request failed: %s", exc)
 
-            source_url = canonical_url if canonical_url.startswith("http") else original_url
+            source_url = original_url if original_url.startswith("http") else canonical_url
             return Fetcher._build_podcast_episode_payload(
                 page_info,
                 original_url,

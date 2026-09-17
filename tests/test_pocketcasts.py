@@ -330,6 +330,35 @@ def test_pocketcasts_handler_returns_redirect_metadata_when_page_is_blocked(monk
     ) == "[播客] my-episode - my-show"
 
 
+def test_pocketcasts_short_url_preserved_as_source(monkeypatch):
+    """Short pca.st URL is preserved as source in front matter."""
+    short_url = f"https://pca.st/episode/{EPISODE_ID}"
+
+    monkeypatch.setattr("surf.Fetcher._resolve_url_with_redirects", lambda *args, **kwargs: CANONICAL_URL)
+
+    class PageResponse:
+        content = b""
+        headers = {"Content-Type": "text/html"}
+        url = CANONICAL_URL
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("surf._requests_get_interruptibly", lambda *args, **kwargs: PageResponse())
+    monkeypatch.setattr(
+        "surf.Fetcher._get_proxies",
+        lambda config, proxy_mode_override=None, custom_proxy_override=None: (None, None),
+    )
+    monkeypatch.setattr("surf.Fetcher.fetch_with_browser", lambda *args, **kwargs: None)
+
+    result = Fetcher._fetch_pocketcasts_episode(short_url, {}, None, None)
+    payload = _extract_direct_markdown_payload(result)
+
+    # Source URL should be the short URL, not the resolved canonical URL
+    assert f'source-url" content="{short_url}"' in result
+    assert f'source-url" content="{CANONICAL_URL}"' not in result
+
+
 def test_split_markdown_at_transcript_heading():
     markdown = (
         "**Podcast:** Show\n\n"
