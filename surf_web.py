@@ -2034,10 +2034,10 @@ def get_web_ui_context(config):
         llm_providers.insert(0, default_llm_provider)
 
     default_ocr_engine = (
-        config.get("OCR", "engine", fallback="rapidocr").strip().lower() or "rapidocr"
+        config.get("OCR", "engine", fallback="paddleocr").strip().lower() or "paddleocr"
     )
     if default_ocr_engine not in {"rapidocr", "tesseract", "paddleocr", "auto"}:
-        default_ocr_engine = "rapidocr"
+        default_ocr_engine = "paddleocr"
 
     default_ocr_lang = (config.get("OCR", "lang", fallback="chi_sim+eng") or "").strip()
     if not default_ocr_lang:

@@ -103,18 +103,18 @@ We recommend using `uv` for a clean environment.
     uv sync
     uv run playwright install
     ```
-    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `rapidocr-onnxruntime` for image OCR.
+    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr` for image OCR.
 
-    Playwright remains Surf's default and most compatible browser backend. Surf also has an experimental Obscura backend. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases), then set `[Browser] backend = obscura` in `config.ini`. Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across threads and gunicorn workers; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Only headed interactive login and PDF generation still require Playwright. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; keep it below the gunicorn worker timeout and raise that timeout for slow browser/archive flows (for example `gunicorn --timeout 120`). On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback.
+    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across threads and gunicorn workers; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Only headed interactive login and PDF generation still require Playwright. To use Playwright instead, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; keep it below the gunicorn worker timeout and raise that timeout for slow browser/archive flows (for example `gunicorn --timeout 120`). On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback.
 
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
 
 3.  **Optional: Install OCR engine(s) for image OCR**:
-    `surf` prefers `RapidOCR` via the Python package dependency. If you need to install it separately, run:
+    `surf` prefers `PaddleOCR` for image OCR. If you need to install it separately, run:
     ```bash
-    uv pip install rapidocr-onnxruntime
+    uv pip install paddleocr
     ```
-    If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
+    Surf also supports RapidOCR as a fallback. To use it instead, run `uv pip install rapidocr-onnxruntime` and set `[OCR] engine = rapidocr` in `config.ini`. If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
 
 ## Web UI
 

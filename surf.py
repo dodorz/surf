@@ -4859,9 +4859,9 @@ class Fetcher:
         has_section = getattr(config, "has_section", lambda _name: False)
         if has_section("Browser"):
             return (
-                config.get("Browser", "backend", fallback="playwright") or "playwright"
+                config.get("Browser", "backend", fallback="obscura") or "obscura"
             ).strip().lower()
-        return "playwright"
+        return "obscura"
 
     @staticmethod
     def _build_obscura_backend(config):
@@ -10537,9 +10537,9 @@ class OcrHandler:
 
     @staticmethod
     def _get_engine_setting(args, config):
-        value = getattr(args, "ocr_engine", None) or config.get("OCR", "engine", fallback="rapidocr")
+        value = getattr(args, "ocr_engine", None) or config.get("OCR", "engine", fallback="paddleocr")
         value = str(value).strip().lower()
-        return value or "rapidocr"
+        return value or "paddleocr"
 
     @staticmethod
     def _get_engine_chain(args, config):
@@ -10552,8 +10552,8 @@ class OcrHandler:
             return ["rapidocr", "tesseract"]
         if engine == "auto":
             return ["paddleocr", "rapidocr", "tesseract"]
-        logger.warning("Unknown OCR engine '%s'; falling back to rapidocr", engine)
-        return ["rapidocr", "tesseract"]
+        logger.warning("Unknown OCR engine '%s'; falling back to paddleocr", engine)
+        return ["paddleocr", "rapidocr", "tesseract"]
 
     @staticmethod
     def _normalize_ocr_text(text):
@@ -12987,7 +12987,7 @@ Twitter/X Backend:
     parser.add_argument(
         "--ocr-engine",
         choices=["rapidocr", "tesseract", "paddleocr", "auto"],
-        help="OCR engine: rapidocr (default), tesseract, paddleocr, or auto (paddleocr > rapidocr > tesseract)",
+        help="OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)",
     )
     parser.add_argument(
         "-e",

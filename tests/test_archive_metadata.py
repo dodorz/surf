@@ -10,9 +10,14 @@ from surf import Fetcher, OutputHandler
 class _FakeConfig:
     llm_provider = ""
 
+    def has_section(self, section):
+        return section == "Browser"
+
     def get(self, section, key, fallback=None):
         if section == "Output" and key == "target_language":
             return "zh-cn"
+        if section == "Browser" and key == "backend":
+            return "playwright"
         return fallback
 
     def get_path(self, section, key, fallback=None):

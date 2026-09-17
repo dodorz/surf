@@ -55,8 +55,8 @@ max_audio_mb = 2048
 audio_timeout = 120
 
 [Browser]
-; Browser backend for dynamic pages: playwright (default) or obscura (experimental)
-backend = playwright
+; Browser backend for dynamic pages: obscura (default) or playwright
+backend = obscura
 ; Obscura executable name or absolute path
 obscura_executable = obscura
 ; Obscura CDP endpoint; Surf starts and reuses a managed server when unavailable
@@ -88,8 +88,8 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
-; OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)
-engine = rapidocr
+; OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)
+engine = paddleocr
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
 ; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
