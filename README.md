@@ -533,6 +533,43 @@ For Twitter/X, `surf --login twitter` first tries to import cookies from your re
 For Reddit post URLs, Surf fetches the post from Reddit's JSON comments endpoint, reuses saved `reddit.com` cookies when available, and only includes reply threads when you explicitly pass `--thread after|both` or `-t`.
 For site-specific behavior details (including NCPSSD download rules), refer to `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md`.
 
+### Cloudflare Bypass Cookies
+
+Some websites use Cloudflare WAF to block automated access. Surf can use `cf_clearance` cookies extracted from your real browser to bypass these blocks.
+
+**How to extract cookies:**
+
+1. Open Chrome and visit the target website
+2. Pass the Cloudflare challenge (wait for the real page to load)
+3. Open DevTools (F12) > **Application** tab > **Cookies** > select the domain
+4. Find `cf_clearance` and copy its **Value**
+5. Configure via CLI or config.ini:
+
+```bash
+# Set cookie via CLI
+surf --set-cf-clearance example.com "cf_clearance=YOUR_COOKIE_VALUE"
+
+# Use normally - surf will automatically inject the cookie
+surf "https://example.com/article"
+
+# Clear cookies when expired
+surf --clear-cf-clearance example.com
+```
+
+Or add directly to `config.ini`:
+
+```ini
+[Cloudflare]
+example.com = cf_clearance=YOUR_COOKIE_VALUE
+```
+
+**Important notes:**
+
+- The cookie **must** come from Chrome or a Chromium-based browser (Surf uses Chrome 131 TLS fingerprint)
+- Cookies from Firefox or Safari will **not** work
+- Cookies typically expire in 30 minutes to 24 hours
+- When cookies expire, Surf falls back to its normal Cloudflare challenge handling
+
 ## Help
 
 ```bash

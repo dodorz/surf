@@ -947,6 +947,57 @@ def _curlcffi_enabled(config):
     mode = (config.get("Browser", "curlcffi_mode", fallback="auto") or "auto").strip().lower()
     return mode in ("true", "auto", "yes", "on", "1")
 
+def _get_cloudflare_cookie_for_url(url, config):
+    """Get Cloudflare cf_clearance cookies from config.ini [Cloudflare] for a URL's domain.
+    
+    Returns a Cookie header string, or None.
+    Tries exact domain match, then walks up parent domains.
+    """
+    if not config or not config.has_section("Cloudflare"):
+        return None
+    try:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").strip().lower()
+    except Exception:
+        return None
+    if not hostname:
+        return None
+    
+    # Try exact match, then parent domains
+    parts = hostname.split(".")
+    for i in range(len(parts)):
+        candidate = ".".join(parts[i:])
+        if candidate:
+            value = config.get("Cloudflare", candidate, fallback=None)
+            if value and value.strip():
+                return value.strip()
+    return None
+
+def _set_cloudflare_cookie(domain, cookie_value, config):
+    """Save a Cloudflare cookie to config.ini [Cloudflare] section."""
+    if not config.has_section("Cloudflare"):
+        config.config.add_section("Cloudflare")
+    config.config.set("Cloudflare", domain.strip().lower(), cookie_value.strip())
+    config_path = _get_default_config_path()
+    with open(config_path, "w", encoding="utf-8") as f:
+        config.config.write(f)
+
+def _clear_cloudflare_cookie(domain, config):
+    """Remove a Cloudflare cookie from config.ini."""
+    if config.has_section("Cloudflare"):
+        config.config.remove_option("Cloudflare", domain.strip().lower())
+        config_path = _get_default_config_path()
+        with open(config_path, "w", encoding="utf-8") as f:
+            config.config.write(f)
+
+def _clear_all_cloudflare_cookies(config):
+    """Remove the entire [Cloudflare] section from config.ini."""
+    if config.has_section("Cloudflare"):
+        config.config.remove_section("Cloudflare")
+        config_path = _get_default_config_path()
+        with open(config_path, "w", encoding="utf-8") as f:
+            config.config.write(f)
+
 def _curlcffi_get_interruptibly(url, headers=None, proxies=None, timeout=15):
     """Perform a GET request using curl-cffi with TLS fingerprint impersonation.
     
@@ -2007,6 +2058,11 @@ class Fetcher:
                 if cookie_header:
                     headers["Cookie"] = cookie_header
                     logger.info("douban: Using saved login cookies for HTTP requests")
+            # Inject Cloudflare cf_clearance cookies if available
+            cf_cookie = _get_cloudflare_cookie_for_url(url, config)
+            if cf_cookie:
+                headers["Cookie"] = cf_cookie
+                logger.info("Cloudflare: Using saved cf_clearance cookies for %s", urlparse(url).hostname)
             try:
                 logger.info(f"Requests Proxies: {req_proxies if req_proxies else 'None'}")
                 response = _requests_get_with_system_trust_interruptibly(
@@ -2041,6 +2097,9 @@ class Fetcher:
                                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                                 "Accept-Language": "en-US,en;q=0.9",
                             }
+                            # Inject Cloudflare cookies into curl-cffi request
+                            if cf_cookie:
+                                curl_headers["Cookie"] = cf_cookie
                             curl_resp = _curlcffi_get_interruptibly(
                                 url,
                                 headers=curl_headers,
@@ -2058,6 +2117,12 @@ class Fetcher:
                                 logger.warning("curl-cffi succeeded (status %d), avoiding browser fallback", curl_resp.status_code)
                                 return curl_text
                             else:
+                                if cf_cookie:
+                                    logger.warning(
+                                        "Cloudflare cookies for %s may be expired (still challenged). "
+                                        "Extract fresh cookies from Chrome DevTools.",
+                                        urlparse(url).hostname
+                                    )
                                 logger.warning("curl-cffi returned status %d or challenge page, falling back to browser", curl_resp.status_code)
                         except Exception as e:
                             logger.warning("curl-cffi fallback failed: %s", e)
@@ -13104,6 +13169,18 @@ Twitter/X Backend:
         metavar="SITE",
         help="Clear saved authentication for a site (use 'all' to clear all)",
     )
+    # Cloudflare cookies
+    parser.add_argument(
+        "--set-cf-clearance",
+        nargs=2,
+        metavar=("DOMAIN", "COOKIE"),
+        help="Set Cloudflare cf_clearance cookie for a domain (e.g., --set-cf-clearance example.com 'cf_clearance=VALUE')",
+    )
+    parser.add_argument(
+        "--clear-cf-clearance",
+        metavar="DOMAIN",
+        help="Clear Cloudflare cookies for a domain (use 'all' to clear all)",
+    )
     parser.add_argument(
         "--export-auth",
         nargs=2,
@@ -13274,6 +13351,24 @@ Twitter/X Backend:
             if clear_site == "x":
                 clear_site = "twitter"
             AuthHandler.clear_state(clear_site)
+        return
+
+    # Handle --set-cf-clearance
+    if args.set_cf_clearance:
+        domain, cookie_value = args.set_cf_clearance
+        _set_cloudflare_cookie(domain, cookie_value, config)
+        print(f"Set Cloudflare cookie for {domain}")
+        return
+
+    # Handle --clear-cf-clearance
+    if args.clear_cf_clearance:
+        target = args.clear_cf_clearance.lower()
+        if target == "all":
+            _clear_all_cloudflare_cookies(config)
+            print("Cleared all Cloudflare cookies")
+        else:
+            _clear_cloudflare_cookie(target, config)
+            print(f"Cleared Cloudflare cookie for {target}")
         return
 
     if args.export_auth:

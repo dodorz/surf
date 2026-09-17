@@ -79,6 +79,23 @@ proxy_mode = env
 ; Custom proxy URL (e.g., http://127.0.0.1:7890)
 custom_proxy =
 
+[Cloudflare]
+; Cloudflare cf_clearance cookies to bypass WAF hard blocks.
+;
+; How to extract:
+;   1. Open Chrome, visit the target site, pass the Cloudflare challenge
+;   2. Open DevTools (F12) > Application > Cookies > [domain]
+;   3. Copy the cf_clearance cookie value
+;   4. Add below as: domain = cf_clearance_value
+;
+; IMPORTANT: Cookies MUST come from Chrome (or Chromium-based browser),
+; because curl-cffi impersonates Chrome 131's TLS fingerprint.
+; Cookies from Firefox/Safari will NOT work.
+;
+; Format: DOMAIN = cookie_value
+; Example: queue.acm.org = abc123def456...
+; queue.acm.org =
+
 [Twitter]
 ; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
 backend = cli

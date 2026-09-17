@@ -488,6 +488,43 @@ surf --clear-auth all
 对于 Reddit 帖子 URL，Surf 会优先走 Reddit comments JSON 接口抓取主贴内容；若存在已保存的 `reddit.com` Cookie，会同时复用于 requests 与浏览器抓取。只有显式传入 `--thread after|both` 或 `-t` 时，才会把回复 thread 一并带上。
 涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
 
+### Cloudflare 绕过 Cookie
+
+部分网站使用 Cloudflare WAF 阻止自动化访问。Surf 支持使用从真实浏览器提取的 `cf_clearance` Cookie 绕过这些限制。
+
+**提取步骤：**
+
+1. 打开 Chrome 访问目标网站
+2. 通过 Cloudflare 验证（等待真实页面加载）
+3. 打开开发者工具 (F12) > **Application** 标签 > **Cookies** > 选择域名
+4. 找到 `cf_clearance` 并复制其 **Value**
+5. 通过命令行或 config.ini 配置：
+
+```bash
+# 通过命令行设置 Cookie
+surf --set-cf-clearance example.com "cf_clearance=你的Cookie值"
+
+# 正常使用，Surf 会自动注入 Cookie
+surf "https://example.com/article"
+
+# Cookie 过期后清除
+surf --clear-cf-clearance example.com
+```
+
+或直接在 `config.ini` 中添加：
+
+```ini
+[Cloudflare]
+example.com = cf_clearance=你的Cookie值
+```
+
+**重要说明：**
+
+- Cookie **必须**来自 Chrome 或 Chromium 内核浏览器（Surf 使用 Chrome 131 TLS 指纹）
+- Firefox 或 Safari 的 Cookie **无法**使用
+- Cookie 通常在 30 分钟到 24 小时内过期
+- Cookie 过期后，Surf 会自动回退到正常的 Cloudflare 挑战处理流程
+
 ## 单字符参数连写
 
 单字符参数可以连写，顺序任意：
