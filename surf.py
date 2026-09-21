@@ -8750,6 +8750,19 @@ class Fetcher:
             except Exception as exc:
                 raise ValueError(f"transcribe.cpp transcription failed: {exc}") from exc
 
+            # Debug logging for transcription results
+            segments = getattr(result, "segments", ())
+            logger.info(
+                "Transcription result: %d segments, text length=%d, language=%s",
+                len(segments),
+                len(getattr(result, "text", "") or ""),
+                getattr(result, "language", "unknown"),
+            )
+            if segments:
+                logger.info("First segment: %s", segments[0])
+            else:
+                logger.warning("No segments returned from transcription")
+
         payload = _extract_direct_markdown_payload(html_content)
         if not payload:
             raise ValueError("Podcast transcription requires the Pocket Casts direct Markdown payload")
@@ -8761,6 +8774,13 @@ class Fetcher:
             start = getattr(segment, "t0_ms", 0)
             end = getattr(segment, "t1_ms", 0)
             collected_segments.append((start or 0, end or 0, text))
+        logger.info(
+            "Collected %d non-empty segments from %d total segments",
+            len(collected_segments),
+            len(getattr(result, "segments", ())),
+        )
+        if collected_segments:
+            logger.info("First collected segment: %s", collected_segments[0])
         transcript_lines = ["", "## Transcript", ""]
         if timestamps_style == "segment":
             for start, _, text in collected_segments:
@@ -8772,6 +8792,11 @@ class Fetcher:
                 transcript_lines.append(paragraph)
         if len(transcript_lines) == 3 and getattr(result, "text", ""):
             transcript_lines.append(str(result.text).strip())
+        logger.info(
+            "Final transcript lines: %d lines, first 3 lines: %s",
+            len(transcript_lines),
+            transcript_lines[:3],
+        )
         if len(transcript_lines) == 3:
             raise ValueError("transcribe.cpp returned no transcript text")
 
