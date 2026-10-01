@@ -1966,17 +1966,7 @@ def get_runtime_version():
 
 def extract_url_from_text(value):
     """Extract the first http/https URL from free-form text."""
-    text = (value or "").strip()
-    if not text:
-        return None
-
-    match = re.search(r"https?://\S+", text, re.IGNORECASE)
-    if not match:
-        return None
-
-    candidate = match.group(0).strip()
-    candidate = candidate.rstrip('`\'"<>)]}.,;!?:')
-    return candidate or None
+    return Fetcher._extract_url_from_text(value)
 
 
 def extract_text_post_title(value):

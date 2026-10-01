@@ -342,13 +342,20 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 ^https?://(www\.)?xiaohongshu\.com/discovery/item/
 ^https?://(www\.)?xiaohongshu\.com/user/profile/
 ^https?://xhslink\.com/
+^https?://xhslink\.cn/
 ```
 
 **处理函数**: `Fetcher._fetch_xiaohongshu`
 
 **特点**:
 - 需要登录才能访问完整内容
-- 支持短链接自动解析（`xhslink.com` → `xiaohongshu.com`）
+- **SSR 快速路径优先**：笔记 URL（`explore` / `discovery/item`）先用已保存的 Cookie 直接请求服务端渲染的 HTML（约 1 秒内完成、无需浏览器），从 `.note-content` DOM 提取标题/正文、从 `og:image` meta 提取有序图集；仅当该路径不可用时才回退到浏览器抓取
+- 支持短链接自动解析（`xhslink.com` / `xhslink.cn` → `xiaohongshu.com`）
+- 支持直接粘贴完整分享文本（如 `打开App查看 https://xhslink.cn/o/xxx，复制本条信息`），命令行会先提取其中的 URL
+- 短链解析时若小红书把未登录请求重定向到 `/login?redirectPath=<笔记URL>`，会自动解包 `redirectPath` 还原真实笔记地址（否则会匹配不到处理规则而输出登录页噪音）
+- 抓取后自动识别风控/验证拦截页（如 `/punish`、`/captcha` 链接、HTTP 412/429，或页面出现“当前环境异常”“请完成验证”等提示），命中时直接报错并提示刷新登录态，而不是输出验证页的界面噪音
+- 若页面被弹回首页/搜索页（已不在 `explore`、`discovery/item`、`user/profile` 内容路径上），同样直接报错，避免把导航栏等 UI 当作正文输出
+- 处理失败时不进行通用抓取回退（`no_generic_fallback`），避免登录壳/验证页被当成正文
 - 对已由专用处理器整理好的笔记 HTML，跳过通用 Readability 正文抽取，直接保留 `<article>` 中的图文内容，避免短文本笔记在二次抽取时丢失插图/题图
 - 笔记多图按正文相关容器中的 DOM 顺序提取；若正文块未直接包含图集，则按该顺序在正文前补齐缺失图片，减少图序错乱和重复图片
 - 优先从笔记详情数据中的 `imageList` / `imagesList` 等字段提取图集；一旦确定最终图集，会移除正文中的小红书图片节点，只保留单份有序图集，避免重复和无关插图
@@ -356,8 +363,9 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - 默认开启文章插图 OCR；默认优先使用 RapidOCR，必要时回退到本地 Tesseract；可通过 `--ocr-engine` 选择 PaddleOCR、Tesseract 或 auto；并在图片下追加 OCR 文本块；可通过 `--no-ocr` 显式关闭
 
 **短链接支持**:
-- 自动识别 `http://xhslink.com/xxxxx` 格式的短链接
+- 自动识别 `http://xhslink.com/xxxxx` 与 `http://xhslink.cn/xxxxx` 格式的短链接
 - 自动解析并重定向到完整的长链接
+- 短链接解析过程中若遇到 412/429 或验证/风控页面，会直接失败并给出明确提示
 - 元数据中保存的长链接仅保留 `xsec_token` 参数
 - 示例：
   - 短链接：`http://xhslink.com/o/44WPgb4b8J4`
@@ -400,6 +408,8 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 **技术实现**:
 - 使用 Playwright 的 `storage_state()` 保存/恢复登录状态
 - 状态文件默认存储在 Windows 的 `%LOCALLAPPDATA%\surf\auth\` 或 Linux/macOS 的 `~/.local/cache/surf/auth/`
+- 笔记抓取顺序：SSR 快速路径（`requests` + Cookie + `.note-content`/`og:image` 解析）→ 浏览器路径（Playwright 加载 `__INITIAL_STATE__`/DOM 提取）→ 失败即报错；登录态过期与风控命中在 SSR 阶段即快速失败，不会白白启动浏览器
+- SSR 提取时会去掉与合成 `<h1>` 重复的正文内标题；`og:image` 中的站点 logo（`picasso-static`）与头像（`sns-avatar-qc`）会被过滤，仅保留笔记图集
 - 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
 - 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数
 
@@ -686,12 +696,13 @@ surf "https://v2ex.com/t/1208365" -r -t
 
 当用户输入 URL 时，系统执行以下步骤：
 
-1. **短网址解析**: 对 `t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com` 等常见短网址先解析为最终长网址
-2. **URL 分发**: 调用 `Fetcher.fetch()` 方法
-3. **特殊处理检查**: 调用 `_get_handler_for_url(url)` 遍历 `SPECIAL_SITE_HANDLERS`
-4. **模式匹配**: 使用编译后的正则表达式匹配解析后的 URL
-5. **调用处理器**: 如果匹配成功，调用对应的 `handler` 函数
-6. **回退机制**: 如果处理器返回 `None`，回退到常规抓取（requests 或 Playwright）
+1. **输入规范化**: 若输入本身不是 URL，而是包含 URL 的分享文本（如小红书分享的 `打开App查看 https://xhslink.cn/o/xxx，复制本条信息`），先提取其中的第一个 URL
+2. **短网址解析**: 对 `t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn` 等常见短网址先解析为最终长网址
+3. **URL 分发**: 调用 `Fetcher.fetch()` 方法
+4. **特殊处理检查**: 调用 `_get_handler_for_url(url)` 遍历 `SPECIAL_SITE_HANDLERS`
+5. **模式匹配**: 使用编译后的正则表达式匹配解析后的 URL
+6. **调用处理器**: 如果匹配成功，调用对应的 `handler` 函数
+7. **回退机制**: 如果处理器返回 `None`，回退到常规抓取（requests 或 Playwright）；若站点配置了 `no_generic_fallback`（如小红书、Pocket Casts、小宇宙等），则直接失败，不进行通用回退
 
 ### 回退处理
 

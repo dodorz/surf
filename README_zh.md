@@ -12,7 +12,7 @@
 - **Podcast 音频转写**：使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写 Pocket Casts / 小宇宙剧集；配置 `[Transcription].model_path` 指向 GGUF 模型。转写结果默认为不带时间戳的纯文本段落，可用 `--transcript-timestamps segment` 或 `[Transcription].timestamps` 开启 `[HH:MM:SS]` 时间戳。Web 界面也提供相同选项。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
 - **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
-- **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`pca.st/episode/...` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。
+- **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。若输入不是裸 URL 而是包含 URL 的分享文本（如小红书分享消息），会自动提取其中的第一个 URL。
 - **GitHub Markdown 来源保留**：GitHub 仓库页和不带分支的 Markdown 文件 URL 可以从实际 README/blob 文件抓取内容，但 front matter 的 `source` 会保留用户输入的页面 URL。
 - **翻译元数据更准确**：只有正文或标题实际被翻译改写时，front matter 才写入 `translator`；单纯语言判断不计入翻译器记录。
 - **可选 Wayback 快照**：CLI 使用 `--archive` 或在 Web 勾选对应选项后，会把最终写入 front matter `source` 的 URL 提交到 Internet Archive，并将快照地址写入 `archive` 字段。
@@ -486,6 +486,7 @@ surf --clear-auth all
 在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
 对于 Twitter/X，`surf --login twitter` 会先通过 `twitter-cli` 尝试从真实浏览器（或 `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` 环境变量）导入 Cookie，这通常比在自动化登录页里手动登录更可靠；导入失败时才回退到可见的 Playwright 登录窗口。Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
 对于 Reddit 帖子 URL，Surf 会优先走 Reddit comments JSON 接口抓取主贴内容；若存在已保存的 `reddit.com` Cookie，会同时复用于 requests 与浏览器抓取。只有显式传入 `--thread after|both` 或 `-t` 时，才会把回复 thread 一并带上。
+对于小红书笔记 URL，Surf 会先用已保存的登录态 Cookie 直接抓取服务端渲染的笔记页（速度快、无需浏览器），仅在该路径不可用时才回退到浏览器抓取；登录态过期或触发风控/验证拦截时会给出明确报错，而不是把验证页当成内容输出。
 涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
 
 ### Cloudflare 绕过 Cookie

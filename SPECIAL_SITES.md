@@ -9,7 +9,7 @@ Chinese version: `SPECIAL_SITES_zh.md`
 ## Overview
 
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
-Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target.
+Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target. When the input itself is not a URL but free-form share text containing one (for example a copied Xiaohongshu share message), the first URL is extracted before this resolution runs.
 
 > Browser backend note: the headless browser steps described for the handlers below (including Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and the paywall archive-snapshot fallback) all use the backend configured by `[Browser] backend` (`playwright` or `obscura`). Only headed interactive login, PDF generation, and the NCPSSD full-text PDF download still use Playwright.
 Each site entry may define:
@@ -155,6 +155,11 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 ### WeChat / Xiaohongshu
 - Default: no proxy, no translation (unless overridden).
 - Xiaohongshu enables image OCR by default (RapidOCR then Tesseract fallback; PaddleOCR available via --ocr-engine).
+- Note URLs are fetched through a server-side rendered fast path first: the saved cookies are sent with a plain requests call, the title/body come from the `.note-content` DOM and the ordered gallery from `og:image` meta tags (about a second, no browser). The Playwright/Obscura browser path only runs when that fast path is unavailable (e.g. profile pages or an SSR miss).
+- When unauthenticated short-link resolution lands on `xiaohongshu.com/login?redirectPath=...`, the encoded target note URL is unwrapped automatically so special-handler matching and fetching use the real note address instead of the login shell.
+- Xiaohongshu short links on both `xhslink.com` and `xhslink.cn` are recognized and resolved to long note URLs (keeping only `xsec_token`).
+- Xiaohongshu fetches require a saved auth state (`surf --login xiaohongshu`); when the handler fails (missing/expired auth, risk-control or verification interstitial, redirect off the note page), the generic requests/browser fallback is skipped so login shells and verification pages are never emitted as content.
+- Risk-control states are detected from both the final URL (`/punish`, `/captcha`, verification paths) and HTTP 412/429 responses as well as visible page text (for example "当前环境异常", "请完成验证") and reported as explicit errors.
 
 ### Zhihu
 - Default: no proxy, no translation.

@@ -1552,6 +1552,7 @@ class Fetcher:
         "youtu.be",
         "b23.tv",
         "xhslink.com",
+        "xhslink.cn",
         "pca.st",
     }
 
@@ -3716,11 +3717,21 @@ class Fetcher:
             logger.info(f"Normalized Douban URL for processing: {url} -> {normalized_douban}")
             return normalized_douban
 
+        unwrapped_xhs = Fetcher._unwrap_xiaohongshu_login_redirect(url)
+        if unwrapped_xhs != url:
+            logger.info(f"Unwrapped Xiaohongshu login redirect: {url} -> {unwrapped_xhs}")
+            url = unwrapped_xhs
+
         if not Fetcher._is_common_short_url(url):
             return url
 
         req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         resolved = Fetcher._resolve_url_with_redirects(url, proxies=req_proxies, timeout=timeout)
+        if resolved:
+            unwrapped = Fetcher._unwrap_xiaohongshu_login_redirect(resolved)
+            if unwrapped != resolved:
+                logger.info(f"Unwrapped Xiaohongshu login redirect: {unwrapped}")
+                resolved = unwrapped
         if resolved and resolved != url:
             logger.info(f"Resolved short URL for processing: {url} -> {resolved}")
             return resolved
@@ -6207,9 +6218,162 @@ class Fetcher:
         return Fetcher._extract_thread_items(items, current_index, thread_mode, thread_author)
 
     @staticmethod
+    def _is_xhslink_short_url(url):
+        """Whether URL is an xhslink.com / xhslink.cn Xiaohongshu short link."""
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host in {"xhslink.com", "xhslink.cn"}
+
+    @staticmethod
+    def _is_xiaohongshu_risk_url(url):
+        """Whether URL points at a Xiaohongshu anti-bot / risk-control page."""
+        if not url:
+            return False
+        return bool(
+            re.search(
+                r"/(?:punish|captcha|antispider|verify|verification|"
+                r"security[_-]?(?:check|verify|authentication)|"
+                r"xsec[_-]?verify|sec[_-]?verify)(?:[/?#.]|$)",
+                url,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _is_xiaohongshu_content_url(url):
+        """Whether URL is a fetchable Xiaohongshu content page (note / item / profile)."""
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
+            return False
+        return bool(re.match(r"^/(?:explore/|discovery/item/|user/profile/)", parsed.path or ""))
+
+    # Visible text markers of Xiaohongshu risk-control / verification interstitials.
+    # Kept specific so genuine note text (e.g. tech posts mentioning "captcha")
+    # cannot trigger a false positive.
+    _XHS_RISK_BODY_MARKERS = (
+        "当前环境异常",
+        "网络环境异常",
+        "检测到异常流量",
+        "请完成验证",
+        "滑动验证",
+        "人机验证",
+        "拼图验证",
+        "拖动滑块",
+        "操作频繁，请稍",
+        "请求过于频繁，请稍",
+        "verify you are human",
+        "unusual traffic",
+    )
+
+    @staticmethod
+    def _detect_xiaohongshu_risk_control(current_url, body_text):
+        """
+        Detect Xiaohongshu anti-bot / risk-control states after navigation.
+
+        Returns:
+            str | None: human-readable reason when risk control is detected, else None.
+        """
+        if Fetcher._is_xiaohongshu_risk_url(current_url):
+            return f"redirected to risk-control URL: {current_url}"
+
+        sample = (body_text or "").strip()[:20000]
+        if not sample:
+            return None
+        lower_sample = sample.lower()
+        for marker in Fetcher._XHS_RISK_BODY_MARKERS:
+            if marker in sample or marker in lower_sample:
+                return f"page shows risk-control message: {marker}"
+        return None
+
+    @staticmethod
+    def _extract_url_from_text(text):
+        """Extract the first http/https URL from free-form share text."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        # RFC 3986 character set: stops at CJK text/punctuation commonly found in
+        # pasted share messages (e.g. "... https://xhslink.cn/o/x，复制本条信息").
+        match = re.search(
+            r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        candidate = match.group(0)
+        candidate = candidate.rstrip("`'\"<>)]}.,;!?:")
+        candidate = candidate.rstrip("，。！？；：、）】》」』“”‘’")
+        return candidate or None
+
+    @staticmethod
+    def _unwrap_xiaohongshu_login_redirect(url):
+        """
+        Recover the target note URL from a Xiaohongshu /login?redirectPath=... hop.
+
+        Unauthenticated short-link resolution gets 302'd to the login page while
+        the real note URL stays encoded in `redirectPath`; without this, the
+        resolved login URL matches no special handler and yields login-shell noise.
+        """
+        if not url:
+            return url
+        current = url
+        for _ in range(3):
+            try:
+                parsed = urlparse(current)
+            except Exception:
+                return current
+            host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
+                return current
+            if (parsed.path or "").rstrip("/").lower() not in {"/login", "/signin"}:
+                return current
+            params = parse_qs(parsed.query)
+            target = (params.get("redirectPath") or params.get("redirect_path") or [""])[0]
+            if not target:
+                return current
+            # Handle (double) encoded targets like http%3A%2F%2F...
+            for _ in range(2):
+                if target.startswith(
+                    ("http%3A", "https%3A", "http%253A", "https%253A")
+                ):
+                    target = unquote(target)
+                else:
+                    break
+            if not Fetcher._is_xiaohongshu_content_url(target):
+                return current
+            # redirectPath often carries a legacy http:// target
+            try:
+                target_parsed = urlparse(target)
+                if target_parsed.scheme == "http":
+                    target = urlunparse(target_parsed._replace(scheme="https"))
+            except Exception:
+                pass
+            current = target
+        return current
+
+    @staticmethod
     def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
         """
-        Resolve xhslink.com short URL to full xiaohongshu.com URL.
+        Resolve xhslink.com / xhslink.cn short URL to full xiaohongshu.com URL.
         Only keeps xsec_token parameter in the final URL.
 
         Args:
@@ -6223,7 +6387,7 @@ class Fetcher:
         import requests
         from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-        if "xhslink.com" not in url:
+        if not Fetcher._is_xhslink_short_url(url):
             # Not a short link, return as-is
             return url, url
 
@@ -6246,6 +6410,20 @@ class Fetcher:
             final_url = response.url
 
             logger.info(f"Resolved to: {final_url}")
+
+            # Unauthenticated resolution may land on /login?redirectPath=<note URL>
+            unwrapped_url = Fetcher._unwrap_xiaohongshu_login_redirect(final_url)
+            if unwrapped_url != final_url:
+                logger.info(f"Unwrapped Xiaohongshu login redirect: {unwrapped_url}")
+                final_url = unwrapped_url
+
+            # Risk-control interstitial (412/429 or verification/punish page)
+            if response.status_code in (412, 429) or Fetcher._is_xiaohongshu_risk_url(final_url):
+                logger.warning(
+                    f"Xiaohongshu risk control during short URL resolution "
+                    f"(HTTP {response.status_code}): {final_url}"
+                )
+                return None, None
 
             # Check if we got a valid xiaohongshu URL
             if "xiaohongshu.com" not in final_url:
@@ -6370,17 +6548,177 @@ class Fetcher:
         return image_urls[1:] + image_urls[:1]
 
     @staticmethod
+    def _is_xiaohongshu_note_url(url):
+        """Whether URL is a single-note page (explore / discovery item), not a profile."""
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
+            return False
+        return bool(re.match(r"^/(?:explore|discovery/item)/[^/?#]+", parsed.path or ""))
+
+    @staticmethod
+    def _extract_xiaohongshu_ssr_note(html):
+        """
+        Extract title/content/images from a server-side rendered Xiaohongshu note page.
+
+        Returns:
+            tuple: (title, content_html, image_urls) or None when the page has no note body.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        content_el = soup.select_one(".note-content")
+        if content_el is None:
+            content_el = soup.select_one("#detail-desc")
+        if content_el is None:
+            return None
+
+        title_el = soup.select_one("h1#detail-title") or soup.select_one("h1.title")
+        if title_el is None:
+            title_el = content_el.find("h1")
+        title = title_el.get_text(strip=True) if title_el else ""
+        if not title:
+            og_title = soup.find("meta", property="og:title")
+            title = (og_title.get("content") or "").strip() if og_title else ""
+            title = re.sub(r"\s*-\s*小红书\s*$", "", title)
+        if not title:
+            return None
+
+        # The assembled document adds its own <h1>; drop the in-content copy.
+        if title_el is not None:
+            title_el.extract()
+
+        content = content_el.decode_contents()
+
+        image_urls = []
+        seen = set()
+        for meta in soup.find_all("meta", property="og:image"):
+            img = (meta.get("content") or "").strip()
+            if not img:
+                continue
+            if img.startswith("//"):
+                img = f"https:{img}"
+            canonical = Fetcher._canonicalize_xiaohongshu_image_url(img)
+            if not canonical or "picasso-static" in canonical or "sns-avatar" in canonical:
+                continue
+            if "xhscdn.com" not in canonical and "xiaohongshu.com" not in canonical:
+                continue
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            image_urls.append(img)
+
+        return title, content, image_urls
+
+    @staticmethod
+    def _fetch_xiaohongshu_ssr(url, cookies, proxies=None, timeout=30):
+        """
+        Fetch a Xiaohongshu note through server-side rendered HTML with saved cookies
+        (no browser). This is the fast path for note URLs.
+
+        Returns:
+            tuple: (html, fatal_reason). `html` is the note document on success.
+            When `html` is None, a non-empty `fatal_reason` tells the caller to fail
+            fast with that message (auth expired / risk control) instead of falling
+            back to the browser; a plain (None, None) means the browser path should
+            be tried.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.xiaohongshu.com/",
+        }
+        try:
+            response = _requests_get_interruptibly(
+                url,
+                headers=headers,
+                cookies=cookies or {},
+                proxies=proxies,
+                timeout=timeout,
+                allow_redirects=True,
+            )
+        except Exception as e:
+            logger.warning(f"Xiaohongshu SSR fetch failed: {e}")
+            return None, None
+
+        final_url = response.url
+        status = response.status_code
+        logger.info(f"Xiaohongshu SSR fetch: HTTP {status} -> {final_url[:160]}")
+
+        auth_hint = (
+            "Refresh the auth state with `surf --login xiaohongshu`, then re-run the fetch. "
+            "On headless servers, re-export the refreshed state and import it there."
+        )
+        if status in (412, 429):
+            return None, (
+                f"Xiaohongshu risk control during fetch (HTTP {status}): {final_url}. {auth_hint}"
+            )
+        if "/login" in final_url or "/signin" in final_url:
+            return None, f"Saved auth state appears expired for xiaohongshu. {auth_hint}"
+        if Fetcher._is_xiaohongshu_risk_url(final_url):
+            return None, (
+                f"Xiaohongshu risk control triggered: redirected to {final_url}. {auth_hint}"
+            )
+        risk_reason = Fetcher._detect_xiaohongshu_risk_control(final_url, response.text)
+        if risk_reason:
+            return None, f"Xiaohongshu risk control triggered: {risk_reason}. {auth_hint}"
+        if not Fetcher._is_xiaohongshu_content_url(final_url):
+            return None, (
+                f"Xiaohongshu redirected away from the content page to: {final_url}. "
+                "The note may be deleted or region-restricted. "
+            )
+        if status != 200:
+            return None, None
+
+        note = Fetcher._extract_xiaohongshu_ssr_note(response.text)
+        if not note:
+            logger.info("Xiaohongshu SSR page did not contain a note body")
+            return None, None
+        title, content, image_urls = note
+        logger.info(
+            f"Xiaohongshu SSR note extracted: title={title[:60]!r}, "
+            f"content={len(content)} chars, images={len(image_urls)}"
+        )
+
+        html_parts = [
+            "<html><head><meta charset='utf-8'>",
+            f"<title>{escape(title)}</title>",
+            f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
+            '<meta name="surf-source-site" content="xiaohongshu">',
+            "</head><body><article>",
+            f"<h1>{escape(title)}</h1>",
+        ]
+        if image_urls:
+            html_parts.append("<div class='images'>")
+            for img_url in image_urls:
+                html_parts.append(f'<img src="{escape(img_url, quote=True)}" />')
+            html_parts.append("</div>")
+        html_parts.append(content)
+        html_parts.append("</article></body></html>")
+        html_content = "".join(html_parts)
+        return Fetcher._clean_xiaohongshu_content(html_content), None
+
+    @staticmethod
     def _fetch_xiaohongshu(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Xiaohongshu (小红书) content with authentication support.
-        Supports both direct URLs and xhslink.com short URLs.
+        Supports both direct URLs and xhslink.com / xhslink.cn short URLs.
         Requires prior login using --login xiaohongshu
         """
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         # Check if this is a short link and resolve it
         original_short_url = None
-        if "xhslink.com" in url:
+        if Fetcher._is_xhslink_short_url(url):
             original_short_url = url
             _, url = Fetcher._resolve_xhslink_short_url(url, proxies=req_proxies)
             if not url:
@@ -6398,6 +6736,27 @@ class Fetcher:
                 "`surf --import-auth xiaohongshu <FILE>` if this server is headless."
             )
             return None
+
+        # Fast path: server-side rendered note page fetched with the saved cookies,
+        # no browser needed. Falls back to the browser path below when unavailable.
+        if Fetcher._is_xiaohongshu_note_url(url):
+            cookies = {
+                c.get("name"): c.get("value")
+                for c in state.get("cookies", [])
+                if c.get("name")
+            }
+            ssr_html, fatal_reason = Fetcher._fetch_xiaohongshu_ssr(
+                url, cookies, proxies=req_proxies
+            )
+            if ssr_html:
+                logger.info("Xiaohongshu note fetched via SSR fast path (no browser)")
+                return ssr_html
+            if fatal_reason:
+                logger.error(fatal_reason)
+                return None
+            logger.info(
+                "Xiaohongshu SSR fast path did not yield a note; falling back to browser fetch"
+            )
 
         with Fetcher._browser_session(
             config, url, proxy_mode_override, custom_proxy_override
@@ -6425,6 +6784,30 @@ class Fetcher:
                         "Saved auth state appears expired for xiaohongshu. Refresh it with "
                         "`surf --login xiaohongshu`, then re-run the fetch. On headless servers, "
                         "re-export the refreshed state and import it there."
+                    )
+                    return None
+
+                # Detect risk-control / verification interstitials (412 pages, captcha, punish)
+                body_text = page.evaluate(
+                    "() => document.body ? (document.body.innerText || '').slice(0, 20000) : ''"
+                )
+                risk_reason = Fetcher._detect_xiaohongshu_risk_control(current_url, body_text)
+                if risk_reason:
+                    logger.error(
+                        f"Xiaohongshu risk control triggered: {risk_reason}. "
+                        "Refresh the auth state with `surf --login xiaohongshu`, wait a while, "
+                        "and retry; switching network/proxy may also help."
+                    )
+                    return None
+
+                # The note page must still be on a content URL; otherwise XHS bounced
+                # us to the homepage/search/verification page and extraction would
+                # produce UI chrome instead of the note.
+                if not Fetcher._is_xiaohongshu_content_url(current_url):
+                    logger.error(
+                        f"Xiaohongshu redirected away from the content page to: {current_url}. "
+                        "The note may be deleted, region-restricted, or the auth state expired; "
+                        "refresh it with `surf --login xiaohongshu` and retry."
                     )
                     return None
 
@@ -10261,11 +10644,15 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?xiaohongshu\.com/discovery/item/",
             r"^https?://(www\.)?xiaohongshu\.com/user/profile/",
             r"^https?://xhslink\.com/",
+            r"^https?://xhslink\.cn/",
         ],
         "handler": Fetcher._fetch_xiaohongshu,
         "default_no_proxy": True,  # Default: don't use proxy (can be overridden by command line)
         "default_no_translate": True,  # Default: don't translate (can be overridden by command line)
         "default_ocr": True,
+        # Auth-gated browser fetch: a generic requests fallback would only
+        # surface login shells or risk-control interstitials as content.
+        "no_generic_fallback": True,
     },
     "ncpssd": {
         "patterns": [
@@ -13490,6 +13877,14 @@ Twitter/X Backend:
     # Check if url is required but not provided
     if not args.url:
         parser.error("URL is required (unless using --login or --clear-auth)")
+
+    # Allow pasting full share text (e.g. Xiaohongshu share messages):
+    # extract the first URL when the input itself is not a URL.
+    if args.url and not args.url.lstrip().lower().startswith(("http://", "https://")):
+        extracted_url = Fetcher._extract_url_from_text(args.url)
+        if extracted_url:
+            logger.info(f"Extracted URL from input text: {extracted_url}")
+            args.url = extracted_url
 
     # Direct image OCR mode: --ocr with a local image path
     if _is_local_image_input(args.url):
