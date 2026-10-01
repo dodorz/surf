@@ -154,7 +154,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 
 ### WeChat / Xiaohongshu
 - Default: no proxy, no translation (unless overridden).
-- Xiaohongshu enables image OCR by default (RapidOCR then Tesseract fallback; PaddleOCR available via --ocr-engine).
+- Xiaohongshu enables image OCR by default (the engine is chosen globally via `[OCR] engine` / `--ocr-engine`, default PaddleOCR; OCR text is appended below each image).
 - Note URLs are fetched through a server-side rendered fast path first: the saved cookies are sent with a plain requests call, the title/body come from the `.note-content` DOM and the ordered gallery from `og:image` meta tags (about a second, no browser). The Playwright/Obscura browser path only runs when that fast path is unavailable (e.g. profile pages or an SSR miss).
 - When unauthenticated short-link resolution lands on `xiaohongshu.com/login?redirectPath=...`, the encoded target note URL is unwrapped automatically so special-handler matching and fetching use the real note address instead of the login shell.
 - Xiaohongshu short links on both `xhslink.com` and `xhslink.cn` are recognized and resolved to long note URLs (keeping only `xsec_token`).

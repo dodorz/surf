@@ -75,7 +75,7 @@ surf "https://example.com" -r
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
-- **Experimental Image OCR**: Optional local OCR on article images. RapidOCR is preferred by default, with Tesseract as fallback. Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
+- **Experimental Image OCR**: Optional local OCR on article images. PaddleOCR is the default engine; RapidOCR and Tesseract are selectable via `[OCR] engine` / `--ocr-engine` (including `auto`, which tries PaddleOCR > RapidOCR > Tesseract). Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
 - **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
@@ -103,18 +103,15 @@ We recommend using `uv` for a clean environment.
     uv sync
     uv run playwright install
     ```
-    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr` for image OCR.
+    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr`, `rapidocr-onnxruntime`, and `pytesseract` for image OCR (the Tesseract binary itself must be installed separately).
 
     Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across threads and gunicorn workers; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Only headed interactive login and PDF generation still require Playwright. To use Playwright instead, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; keep it below the gunicorn worker timeout and raise that timeout for slow browser/archive flows (for example `gunicorn --timeout 120`). On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback.
 
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
 
 3.  **Optional: Install OCR engine(s) for image OCR**:
-    `surf` prefers `PaddleOCR` for image OCR. If you need to install it separately, run:
-    ```bash
-    uv pip install paddleocr
-    ```
-    Surf also supports RapidOCR as a fallback. To use it instead, run `uv pip install rapidocr-onnxruntime` and set `[OCR] engine = rapidocr` in `config.ini`. If you also install local Tesseract, Surf can fall back to it automatically, or you can force it with `--ocr-engine tesseract`. Ensure `tesseract` is on `PATH`, or set `[OCR].tesseract_cmd` in `config.ini`.
+    `uv sync` already installs both PaddleOCR and RapidOCR (declared in `pyproject.toml`), so no extra Python packages are needed. Select an engine with `[OCR] engine` in `config.ini` or `--ocr-engine` on the command line: `paddleocr` (default), `rapidocr`, `tesseract`, or `auto` (PaddleOCR > RapidOCR > Tesseract).
+    Tesseract is optional and needs a local binary: install it yourself and ensure `tesseract` is on `PATH`, or set `[OCR] tesseract_cmd` in `config.ini`. It is used when `tesseract` is selected explicitly, and as the fallback for the `rapidocr` and `auto` chains.
 
 4.  **Optional: Install curl-cffi for Cloudflare bypass**:
     Some websites (e.g., ACM Digital Library) use Cloudflare's anti-bot protection. Surf can use `curl-cffi` to impersonate browser TLS fingerprints and bypass these challenges. Install it with:
@@ -262,10 +259,10 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
-; OCR engine: rapidocr (default), tesseract, or auto (rapidocr then tesseract)
-engine = rapidocr
+; OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)
+engine = paddleocr
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
-; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
+; Ignored by RapidOCR and PaddleOCR; used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
 ; Optional explicit path to the local tesseract executable
 tesseract_cmd =
@@ -464,8 +461,8 @@ surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 
 Notes:
 
-- OCR prefers `rapidocr-onnxruntime` by default.
-- If RapidOCR is unavailable or produces no usable text, Surf falls back to local Tesseract unless you force `--ocr-engine tesseract`.
+- The default OCR engine is PaddleOCR; choose `rapidocr`, `tesseract`, or `auto` with `--ocr-engine` (or `[OCR] engine`).
+- Fallback follows the selected chain: with `rapidocr`, Surf falls back to local Tesseract when RapidOCR is unavailable or produces no usable text (unless you force `--ocr-engine tesseract`); `auto` tries PaddleOCR, then RapidOCR, then Tesseract.
 - `--ocr-lang` only applies to Tesseract.
 - Xiaohongshu enables image OCR by default.
 - OCR failures only skip the affected image; they do not abort the article fetch.

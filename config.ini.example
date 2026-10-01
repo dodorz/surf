@@ -112,7 +112,7 @@ enabled = false
 ; OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)
 engine = paddleocr
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
-; Ignored by RapidOCR, used when Tesseract is selected or as fallback.
+; Ignored by RapidOCR and PaddleOCR; used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
 ; Optional explicit path to the local tesseract executable
 ; On Windows, '~/Tools/tesseract.exe' also works and resolves under %USERPROFILE%.

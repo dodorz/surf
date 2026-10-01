@@ -27,7 +27,7 @@
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
 - **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用，也适用于 Reddit 等需要 Cookie 的站点。
-- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认优先使用 RapidOCR，必要时回退到 Tesseract。小红书默认开启，其它网站需显式传 `--ocr` 或在 `[OCR].enabled = true` 中开启。
+- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认使用 PaddleOCR，可通过 `[OCR] engine` / `--ocr-engine` 选择 RapidOCR、Tesseract 或 `auto`（PaddleOCR > RapidOCR > Tesseract）。小红书默认开启，其它网站需显式传 `--ocr` 或在 `[OCR].enabled = true` 中开启。
 - **内嵌 SVG 插图保留**：会将正文中的内嵌 SVG 图表转换为 Markdown 图片引用，同时过滤装饰性图标。
 
 ### Pocket Casts 剧集
@@ -91,11 +91,8 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
     Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
 
 3.  **可选：安装图片 OCR 引擎**：
-    `surf` 默认优先使用 PaddleOCR 进行图片 OCR。如需单独安装，请运行：
-    ```bash
-    uv pip install paddleocr
-    ```
-    Surf 也支持 RapidOCR 作为备选。如需使用 RapidOCR，请运行 `uv pip install rapidocr-onnxruntime` 并在 `config.ini` 中设置 `[OCR] engine = rapidocr`。如果您额外安装了本地 Tesseract，Surf 会在需要时自动回退，或者可通过 `--ocr-engine tesseract` 强制使用。请确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR].tesseract_cmd` 中指定路径。
+    `uv sync` 已随 `pyproject.toml` 安装 PaddleOCR、RapidOCR 和 `pytesseract`，无需额外安装 Python 包。通过 `config.ini` 的 `[OCR] engine` 或命令行 `--ocr-engine` 选择引擎：`paddleocr`（默认）、`rapidocr`、`tesseract` 或 `auto`（PaddleOCR > RapidOCR > Tesseract）。
+    Tesseract 为可选项，需要本机二进制：请自行安装并确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR] tesseract_cmd` 中指定路径。仅在显式选择 `tesseract`，或 `rapidocr` / `auto` 链回退时才会用到。
 
 4.  **可选：安装 curl-cffi 绕过 Cloudflare 防护**：
     部分网站（如 ACM 数字图书馆）使用 Cloudflare 反爬虫保护。Surf 可以使用 `curl-cffi` 模拟浏览器 TLS 指纹来绕过这些挑战。安装方法：
@@ -244,10 +241,10 @@ profile =
 [OCR]
 ; 默认是否对文章插图执行 OCR（默认 false；小红书站点会覆盖为 true）
 enabled = false
-; OCR 引擎：rapidocr（默认）、tesseract、paddleocr，或 auto（paddleocr > rapidocr > tesseract）
-engine = rapidocr
+; OCR 引擎：paddleocr（默认）、rapidocr、tesseract，或 auto（paddleocr > rapidocr > tesseract）
+engine = paddleocr
 ; Tesseract 语言，例如：chi_sim+eng、eng、jpn+eng
-; RapidOCR 不使用这个参数，仅在选择/回退到 Tesseract 时生效
+; RapidOCR 与 PaddleOCR 不使用这个参数，仅在选择/回退到 Tesseract 时生效
 lang = chi_sim+eng
 ; 可选：本地 tesseract 可执行文件路径
 tesseract_cmd =
@@ -419,8 +416,8 @@ surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 
 说明：
 
-- OCR 默认优先使用 `rapidocr-onnxruntime`；可通过 `--ocr-engine` 选择 `paddleocr`（精度更高）、`tesseract`，或 `auto`（PaddleOCR > RapidOCR > Tesseract）。
-- 如果 RapidOCR 不可用或没有产出可用文本，Surf 会自动回退到本地 Tesseract；如需强制使用，可传 `--ocr-engine tesseract` 或 `--ocr-engine paddleocr`。
+- OCR 默认使用 `paddleocr`；可通过 `--ocr-engine` 选择 `rapidocr`、`tesseract` 或 `auto`（PaddleOCR > RapidOCR > Tesseract）。
+- 回退仅沿所选引擎链发生：`rapidocr` 在不可用或无文本时回退到本地 Tesseract（除非用 `--ocr-engine tesseract` 强制指定）；`auto` 依次尝试 PaddleOCR、RapidOCR、Tesseract。
 - `--ocr-lang` 仅对 Tesseract 生效。
 - 小红书默认开启插图 OCR。
 - OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。
