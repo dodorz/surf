@@ -3,7 +3,7 @@
 target_language = zh-cn
 ; On Windows, Surf accepts '~/Note' style paths here and maps '~' to %USERPROFILE%.
 ; Directory to save Markdown notes
-note_dir = ./notes
+md_dir = ./notes
 ; Directory to save PDF files (default: current directory)
 pdf_dir = ./pdf
 ; Directory to save Audio files (default: current directory)
@@ -109,8 +109,8 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
-; OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)
-engine = paddleocr
+; OCR engine: auto (default; paddleocr > rapidocr > tesseract), paddleocr, rapidocr, or tesseract
+engine = auto
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
 ; Ignored by RapidOCR and PaddleOCR; used when Tesseract is selected or as fallback.
 lang = chi_sim+eng

@@ -75,7 +75,7 @@ surf "https://example.com" -r
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
-- **Experimental Image OCR**: Optional local OCR on article images. PaddleOCR is the default engine; RapidOCR and Tesseract are selectable via `[OCR] engine` / `--ocr-engine` (including `auto`, which tries PaddleOCR > RapidOCR > Tesseract). Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
+- **Experimental Image OCR**: Optional local OCR on article images. The default engine is the `auto` chain (PaddleOCR > RapidOCR > Tesseract); `paddleocr`, `rapidocr`, and `tesseract` can be selected via `[OCR] engine` / `--ocr-engine`. Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
 - **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
 - **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
 
@@ -110,7 +110,7 @@ We recommend using `uv` for a clean environment.
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
 
 3.  **Optional: Install OCR engine(s) for image OCR**:
-    `uv sync` already installs both PaddleOCR and RapidOCR (declared in `pyproject.toml`), so no extra Python packages are needed. Select an engine with `[OCR] engine` in `config.ini` or `--ocr-engine` on the command line: `paddleocr` (default), `rapidocr`, `tesseract`, or `auto` (PaddleOCR > RapidOCR > Tesseract).
+    `uv sync` already installs both PaddleOCR and RapidOCR (declared in `pyproject.toml`), so no extra Python packages are needed. Select an engine with `[OCR] engine` in `config.ini` or `--ocr-engine` on the command line: `auto` (default; PaddleOCR > RapidOCR > Tesseract), `paddleocr`, `rapidocr`, or `tesseract`.
     Tesseract is optional and needs a local binary: install it yourself and ensure `tesseract` is on `PATH`, or set `[OCR] tesseract_cmd` in `config.ini`. It is used when `tesseract` is selected explicitly, and as the fallback for the `rapidocr` and `auto` chains.
 
 4.  **Optional: Install curl-cffi for Cloudflare bypass**:
@@ -225,7 +225,7 @@ api_key = your_deepseek_api_key
 model = deepseek-chat
 
 [Output]
-note_dir = ./notes
+md_dir = ./notes
 target_language = zh-cn
 ; Directory to save PDF files (default: current directory)
 pdf_dir = .
@@ -259,8 +259,8 @@ profile =
 [OCR]
 ; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
 enabled = false
-; OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)
-engine = paddleocr
+; OCR engine: auto (default; paddleocr > rapidocr > tesseract), paddleocr, rapidocr, or tesseract
+engine = auto
 ; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
 ; Ignored by RapidOCR and PaddleOCR; used when Tesseract is selected or as fallback.
 lang = chi_sim+eng
@@ -340,7 +340,7 @@ uv run surf.py "https://example.com" --llm l2
 
 ### Save Note (-n)
 
-Save to the configured `note_dir`.
+Save to the configured `md_dir`.
 
 ```bash
 uv run surf.py "https://example.com" -n
@@ -461,7 +461,7 @@ surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
 
 Notes:
 
-- The default OCR engine is PaddleOCR; choose `rapidocr`, `tesseract`, or `auto` with `--ocr-engine` (or `[OCR] engine`).
+- The default OCR engine is `auto` (PaddleOCR > RapidOCR > Tesseract); choose `paddleocr`, `rapidocr`, `tesseract`, or `auto` with `--ocr-engine` (or `[OCR] engine`).
 - Fallback follows the selected chain: with `rapidocr`, Surf falls back to local Tesseract when RapidOCR is unavailable or produces no usable text (unless you force `--ocr-engine tesseract`); `auto` tries PaddleOCR, then RapidOCR, then Tesseract.
 - `--ocr-lang` only applies to Tesseract.
 - Xiaohongshu enables image OCR by default.

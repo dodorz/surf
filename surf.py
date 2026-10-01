@@ -11225,7 +11225,7 @@ class OcrHandler:
 
     @staticmethod
     def _get_engine_setting(args, config):
-        value = getattr(args, "ocr_engine", None) or config.get("OCR", "engine", fallback="paddleocr")
+        value = getattr(args, "ocr_engine", None) or config.get("OCR", "engine", fallback="auto")
         value = str(value).strip().lower()
         return value or "paddleocr"
 
@@ -11240,7 +11240,10 @@ class OcrHandler:
             return ["rapidocr", "tesseract"]
         if engine == "auto":
             return ["paddleocr", "rapidocr", "tesseract"]
-        logger.warning("Unknown OCR engine '%s'; falling back to paddleocr", engine)
+        logger.warning(
+            "Unknown OCR engine '%s'; falling back to auto (paddleocr > rapidocr > tesseract)",
+            engine,
+        )
         return ["paddleocr", "rapidocr", "tesseract"]
 
     @staticmethod
@@ -13687,7 +13690,7 @@ Twitter/X Backend:
     parser.add_argument(
         "--ocr-engine",
         choices=["rapidocr", "tesseract", "paddleocr", "auto"],
-        help="OCR engine: paddleocr (default), rapidocr, tesseract, or auto (paddleocr > rapidocr > tesseract)",
+        help="OCR engine: auto (default; paddleocr > rapidocr > tesseract), paddleocr, rapidocr, tesseract",
     )
     parser.add_argument(
         "-e",
