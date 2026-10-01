@@ -44,6 +44,7 @@ When Surf detects a paywall, it looks up an existing archive snapshot before fai
 - Reddit
 - NCPSSD
 - Douban
+- BBC
 
 ### Pocket Casts Episodes
 
@@ -210,6 +211,29 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Reuses `--login ncpssd` auth state.
 - Original PDF filename prefers: `PaperTitle-Author-Journal.pdf`.
 - If metadata is not present in DOM, falls back to page async API metadata.
+
+### BBC
+
+**Domains**:
+- `bbc.com`
+
+**Matching patterns**:
+```regex
+^https?://(www\.)?bbc\.(?:com|co\.uk)/(?:zhongwen|news|[a-z]{2,})/
+```
+
+**Handler**: `Fetcher._fetch_bbc`
+
+**Processing flow**:
+1. Fetch the article page with a regular HTTP request (requests library).
+2. BBC articles are server-side rendered (Next.js), so the full article content is available in the initial HTML response.
+3. Return the raw HTML for the generic extraction pipeline (Readability/trafilatura).
+
+**Default policies**:
+- `default_no_proxy`: True (BBC is accessible without proxy in most regions)
+
+**Fallback behavior**:
+- If the special handler fails, Surf falls back to the generic fetch flow which may use the browser backend.
 
 ---
 

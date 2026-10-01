@@ -7696,6 +7696,38 @@ class Fetcher:
         return "".join(html_parts)
 
     @staticmethod
+    def _fetch_bbc(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """
+        Fetch BBC article content.
+
+        BBC articles are server-side rendered (Next.js), so the full content
+        is available in the initial HTML response. We just need to fetch with
+        requests and return the HTML.
+        """
+        logger.info(f"Fetching BBC article: {url}")
+
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        }
+
+        try:
+            response = _requests_get_with_system_trust_interruptibly(
+                url,
+                headers=headers,
+                proxies=req_proxies,
+                timeout=20,
+            )
+            response.raise_for_status()
+            html_content = Fetcher._decode_response_text(response)
+            return html_content
+        except Exception as e:
+            logger.warning(f"BBC requests fetch failed: {e}")
+            return None
+
+    @staticmethod
     def _fetch_wikipedia(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Wikipedia article with content optimization.
@@ -10323,6 +10355,13 @@ SPECIAL_SITE_HANDLERS = {
         "skip_title_translation": True,
         "no_generic_fallback": True,
     },
+    "bbc": {
+        "patterns": [
+            r"^https?://(www\.)?bbc\.(?:com|co\.uk)/(?:zhongwen|news|[a-z]{2,})/",
+        ],
+        "handler": Fetcher._fetch_bbc,
+        "default_no_proxy": True,
+    },
 }
 
 # Cache for compiled regex patterns (performance optimization)
@@ -10481,9 +10520,12 @@ class ContentProcessor:
             if curr.find_all("img"):
                 best_candidate = curr
 
-            # Stop if we hit a semantic article boundary
+            # Stop if we hit a semantic article boundary (article/main/section with relevant id)
+            # but NOT heading elements (h1-h6) which may have ids like "content"
             if curr.name in ["article", "main"] or (
-                curr.get("id") and curr.get("id").lower() in ["main", "content", "article"]
+                curr.name not in ["h1", "h2", "h3", "h4", "h5", "h6"]
+                and curr.get("id")
+                and curr.get("id").lower() in ["main", "content", "article"]
             ):
                 best_candidate = curr
                 break

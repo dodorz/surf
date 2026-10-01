@@ -26,6 +26,24 @@ Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取
 
 ## 特殊网站列表
 
+- Pocket Casts（播客剧集）
+- 小宇宙（播客剧集）
+- Twitter/X
+- Reddit
+- 豆瓣帖子
+- 微信公众号文章
+- 知乎
+- 小红书
+- GitHub
+- Wikipedia
+- arXiv
+- Bluesky
+- 微博
+- Threads
+- V2EX
+- 国家哲学社会科学文献中心 (NCPSSD)
+- BBC News
+
 ### Pocket Casts（播客剧集）
 
 **域名**:
@@ -637,6 +655,28 @@ surf "https://v2ex.com/t/1208365" -r -t
 - 构建结构化的 HTML 文章，包含标题、作者、机构、出版物、摘要等部分。
 - 处理完成后，由系统转换为标准的 Markdown 格式。
 - PDF 直链下载通过 Playwright `expect_download` + 点击“全文下载”按钮触发，并使用保存的 `ncpssd` 登录态处理受保护资源。
+
+### 13. BBC News
+
+**域名**: `bbc.com`
+
+**匹配规则**:
+```regex
+^https?://(www\.)?bbc\.(?:com|co\.uk)/(?:zhongwen|news|[a-z]{2,})/
+```
+
+**处理函数**: `Fetcher._fetch_bbc`
+
+**处理流程**:
+1. 使用 `requests` 库发起普通 HTTP 请求获取文章页面。
+2. BBC 文章采用服务端渲染（Next.js），完整内容已在初始 HTML 响应中，无需 JavaScript 渲染。
+3. 直接返回原始 HTML，交由通用提取流程（Readability/trafilatura）处理。
+
+**默认策略**:
+- `default_no_proxy`: True（大多数地区可直接访问 BBC，默认不使用代理）
+
+**降级行为**:
+- 若特殊处理器失败，回退到常规抓取流程（可能会使用浏览器后端）。
 
 ---
 
