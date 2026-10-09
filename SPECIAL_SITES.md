@@ -11,7 +11,7 @@ Chinese version: `SPECIAL_SITES_zh.md`
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
 Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target. When the input itself is not a URL but free-form share text containing one (for example a copied Xiaohongshu share message), the first URL is extracted before this resolution runs.
 
-> Browser backend note: the headless browser steps described for the handlers below (including Twitter/X, Zhihu, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and the paywall archive-snapshot fallback) all use the backend configured by `[Browser] backend` (`playwright` or `obscura`). Only headed interactive login, PDF generation, and the NCPSSD full-text PDF download still use Playwright.
+> Browser backend note: the headless browser steps described for the handlers below (including Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and the paywall archive-snapshot fallback) all use the backend configured by `[Browser] backend` (`playwright` or `obscura`). Zhihu's browser fallback is an exception: it always launches the visible Playwright browser, because Zhihu's `zse-ck` challenge does not resolve in a headless session. Only headed interactive login, PDF generation, and the NCPSSD full-text PDF download still use Playwright.
 Each site entry may define:
 - `patterns`: URL regex list
 - `handler`: handler function
@@ -165,8 +165,12 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Default: no proxy, no translation.
 - Uses Zhihu-specific API/mirror/browser chain.
 - Reuses saved Zhihu cookies for API/mirror requests when available.
+- Direct page candidates are tried in order (article: original URL, `zhuanlan.zhihu.com/p/{id}`, `www.zhihu.com/p/{id}`, `m.zhihu.com/article/{id}`; answer: original URL, `www.zhihu.com/answer/{id}`, `m.zhihu.com/answer/{id}`), and the first candidate that yields extractable content wins.
+- Every candidate response is validated: `zse-ck` challenge pages, error pages (for example `www.zhihu.com/p/{id}` answers new article ids with a 404 page), sign-in walls and homepage redirects are rejected so the next fallback runs instead of a bogus document.
+- The browser fallback always launches the visible Playwright browser (even when `[Browser] backend = obscura`) because the `zse-ck` challenge does not resolve headlessly; it needs a graphical session (`DISPLAY`/`WAYLAND_DISPLAY`).
+- `Accept-Encoding` advertises `br` only when a brotli decoder (`brotli`/`brotlicffi`) is installed.
 - Filters links starting with `https://zhida.zhihu.com/search` from the extracted body while preserving visible text.
-- Source URL, author, created time, and updated time are written to front matter instead of leading body paragraphs.
+- Source URL, author, created time, and updated time are written to front matter instead of leading body paragraphs; author names are stripped of zero-width padding first.
 - Upvote/comment counts are not emitted into the body.
 
 ### Social Thread Sites (Twitter/X, Bluesky, Weibo, Threads)

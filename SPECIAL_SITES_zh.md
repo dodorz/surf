@@ -312,16 +312,20 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 3. 对专栏页调用知乎 API `https://www.zhihu.com/api/v4/articles/{article_id}`（同上）
 4. 从 API 返回中提取标题、作者、创建/更新时间、点赞/评论统计和正文 HTML
 5. 为输出 HTML 添加 `referrer` 元标签，减少知乎图片链路的 403 问题
-6. 如果 API 被拒绝或返回异常，则尝试公开镜像页（如 `en.zhihu.com/answer/{id}`）提取正文
-7. 如果镜像页也失败，再回退到 Playwright 浏览器抓取
-8. 浏览器抓取时使用 `domcontentloaded` 等待策略，再从知乎 DOM 中提取正文容器
-9. 如果知乎专用链路整体失败，则直接返回失败，不再进入通用 `requests -> browser` 回退，避免再次命中 403 和安全验证页
+6. 如果 API 被拒绝或返回异常，则尝试公开镜像页（如 `en.zhihu.com/answer/{id}`、`www.zhihu.com/p/{id}`）提取正文，响应同样先做可用性校验
+7. 镜像页失败后依次尝试直连候选页：专栏为原始 URL、`zhuanlan.zhihu.com/p/{id}`、`www.zhihu.com/p/{id}`、`m.zhihu.com/article/{id}`，问答为原始 URL、`www.zhihu.com/answer/{id}`、`m.zhihu.com/answer/{id}`；每个候选都先做校验，再依次尝试 DOM 提取与 `js-initialData` JSON 提取，取第一个成功的候选
+8. 候选响应的可用性校验会丢弃 zse-ck 挑战页、错误页（`www.zhihu.com/p/{id}` 对新文章 ID 会返回 404 页面）、登录墙以及被重定向到首页的响应，避免把非正文页当成正文、阻断后续回退
+9. 直连全部失败后回退到浏览器抓取：知乎始终使用 **Playwright 可见浏览器策略**（即使 `[Browser] backend = obscura`），因为无头 Obscura 会卡在 zse-ck 挑战的空文档上；先访问首页获取 Cookie，再打开目标页并等待 `.Post-RichTextContainer` / `.RichContent .RichContent-inner` 等正文容器出现
+10. 如果知乎专用链路整体失败，则直接返回失败，不再进入通用 `requests -> browser` 回退，避免再次命中 403 和安全验证页
 
 **特殊说明**:
 - 主要解决知乎问答页直接 `requests` 抓取时常见的 `403 Forbidden`
 - 问答页优先保留问题标题作为文档标题
-- 专栏页支持 `zhuanlan.zhihu.com/p/...` 和 `www.zhihu.com/p/...`
+- 专栏页支持 `zhuanlan.zhihu.com/p/...` 和 `www.zhihu.com/p/...`；两者的页面结构一致（`h1.Post-Title` + `.Post-RichTextContainer .RichText`），但 `requests` 直连时都会先命中 zse-ck 挑战页，因此实际抓取依赖校验后的候选链与可见浏览器回退
 - API 被限制时会额外尝试公开镜像页，减少对浏览器环境的依赖
+- 浏览器回退需要图形会话（Linux 上的 `DISPLAY` / `WAYLAND_DISPLAY`）；缺失时会输出明确提示，建议先在桌面会话执行 `surf --login zhihu`
+- 作者名中的零宽空格会被清理后再写入 front matter
+- 页面请求的 `Accept-Encoding` 只有在本机安装了 brotli 解码器（`brotli` / `brotlicffi`）时才会声明 `br`，避免拿到无法解码的原始字节
 - **默认不使用代理**
 - **默认不翻译**
 - 支持 `surf --login zhihu` 保存知乎登录态；保存的 Cookie 会同时用于 **API / 镜像页 `requests` 请求** 与 Playwright 浏览器抓取（未登录时 API 常见 403，属预期，将自动走镜像与浏览器回退）

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "1.1.4.235"
+version = "1.1.4.236"
 description = "A powerful Python CLI tool that converts web pages into clean Markdown or PDF files"
 readme = "README.md"
 license = {text = "MIT"}
@@ -82,7 +82,7 @@ Issues = "https://github.com/dodorz/surf/issues"
 surf = "surf:run_cli"
 
 [tool.setuptools]
-py-modules = ["surf"]
+py-modules = ["surf", "obscura_backend"]
 
 [tool.black]
 line-length = 120

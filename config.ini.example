@@ -56,6 +56,9 @@ audio_timeout = 120
 
 [Browser]
 ; Browser backend for dynamic pages: obscura (default) or playwright
+; Zhihu is an exception: its browser fallback always opens a visible
+; Playwright window (the zse-ck challenge does not resolve headlessly),
+; which needs a graphical session (DISPLAY) on Linux.
 backend = obscura
 ; Obscura executable name or absolute path
 obscura_executable = obscura

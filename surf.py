@@ -1559,6 +1559,9 @@ class Fetcher:
     _HTML_META_CHARSET_RE = re.compile(rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE)
     _HTML_CONTENT_CHARSET_RE = re.compile(rb'content\s*=\s*["\'][^"\']*charset\s*=\s*([^"\';\s]+)', re.IGNORECASE)
 
+    # Cached result of the brotli decoder probe used for Accept-Encoding.
+    _zhihu_brotli_supported = None
+
     @staticmethod
     def _sniff_html_charset(prefix: bytes):
         """Charset from <meta charset> or meta Content-Type content=...;charset= (HTML5)."""
@@ -4259,6 +4262,25 @@ class Fetcher:
         }
 
     @staticmethod
+    def _zhihu_accept_encoding():
+        """Return the Accept-Encoding value this environment can actually decode.
+
+        Advertise Brotli only when a decoder is importable, otherwise ``requests``
+        hands back raw ``br`` bytes that cannot be turned into text.
+        """
+        if Fetcher._zhihu_brotli_supported is None:
+            supported = False
+            for module_name in ("brotli", "brotlicffi"):
+                try:
+                    __import__(module_name)
+                    supported = True
+                    break
+                except ImportError:
+                    continue
+            Fetcher._zhihu_brotli_supported = supported
+        return "gzip, deflate, br" if Fetcher._zhihu_brotli_supported else "gzip, deflate"
+
+    @staticmethod
     def _get_zhihu_html_headers(referer_url):
         """Build browser-like headers for fetching Zhihu page HTML (not API)."""
         return {
@@ -4268,7 +4290,7 @@ class Fetcher:
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": Fetcher._zhihu_accept_encoding(),
             "Referer": "https://www.zhihu.com/",
             "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
             "sec-ch-ua-mobile": "?0",
@@ -4339,6 +4361,9 @@ class Fetcher:
     ):
         """Build a compact HTML document from Zhihu structured content."""
         display_title = (title or question_title or "Zhihu").strip()
+        if author_name:
+            # Zhihu pads author names with zero-width spaces in the DOM.
+            author_name = re.sub(r"[\s\u200b\u200c\u200d\u2060\ufeff]+", " ", author_name).strip()
         content_html = Fetcher._clean_zhihu_content_html(content_html)
         if not content_html:
             return None
@@ -4348,8 +4373,8 @@ class Fetcher:
             "<meta name='referrer' content='no-referrer-when-downgrade'>",
             "<meta name='surf-source-site' content='zhihu'>",
         ]
-        if author_name and author_name.strip():
-            head_parts.append(f"<meta name='surf-author' content='{escape(author_name.strip())}'>")
+        if author_name:
+            head_parts.append(f"<meta name='surf-author' content='{escape(author_name)}'>")
         if created_time:
             head_parts.append(f"<meta name='surf-created' content='{escape(created_time)}'>")
         if updated_time and updated_time != created_time:
@@ -4470,7 +4495,9 @@ class Fetcher:
                 response = _requests_get_interruptibly(candidate_url, headers=headers, proxies=proxies, timeout=20)
                 response.raise_for_status()
                 decoded_text = Fetcher._decode_response_text(response)
-                if len(decoded_text) < 500:
+                issue = Fetcher._zhihu_page_issue(decoded_text, expect_content=True)
+                if issue:
+                    logger.debug("Zhihu alt page %s rejected: %s", candidate_url, issue)
                     continue
                 extracted = Fetcher._extract_zhihu_dom_content(decoded_text, candidate_url)
                 if extracted:
@@ -4481,16 +4508,58 @@ class Fetcher:
         return None
 
     @staticmethod
-    def _fetch_zhihu_page_html(url, proxies=None, cookie_header=None):
-        """Fetch Zhihu page HTML directly, trying desktop and mobile URL variants."""
+    def _zhihu_page_issue(page_text, expect_content=False):
+        """Return a short reason when *page_text* is not a usable Zhihu content page.
+
+        Zhihu answers content requests from a plain HTTP client with one of
+        several non-content responses: the ``zse-ck`` anti-bot interstitial, an
+        error page (``www.zhihu.com/p/...`` answers unknown article ids with a
+        404 page), a sign-in wall or the bare homepage after a redirect. None of
+        them carry the article, and accepting one hides the next fallback step.
+        """
+        if not page_text or len(page_text) < 500:
+            return "empty or truncated response"
+        head = page_text[:20000]
+        if "zh-zse-ck" in head:
+            return "zse-ck anti-bot challenge page"
+        if "安全验证" in page_text or "验证你是否是真人" in page_text:
+            return "security verification page"
+        if "ErrorPage-title" in page_text or re.search(r"<title>\s*40[12345]\s*-\s*知乎</title>", head):
+            return "error page"
+        if not expect_content:
+            return None
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", head, re.DOTALL | re.IGNORECASE)
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else ""
+        if not title or title in {"知乎", "知乎 - 有问题，就会有答案"}:
+            return "homepage or sign-in page"
+        has_content = any(
+            marker in page_text
+            for marker in ("Post-RichTextContainer", "Post-RichText", "AnswerItem", "RichContent-inner")
+        ) or bool(re.search(r'"(?:articles|answers|questions)"\s*:\s*\{\s*"', head))
+        if has_content:
+            return None
+        if "SignFlow" in head:
+            return "sign-in page"
+        return "no article content in page"
+
+    @staticmethod
+    def _fetch_zhihu_direct_content(url, proxies=None, cookie_header=None):
+        """Fetch Zhihu page HTML directly and extract content from the first usable page.
+
+        Tries the desktop and mobile variants of the requested article/answer,
+        rejecting error, challenge, sign-in and homepage responses so the caller
+        can continue with the next fallback instead of a bogus document.
+        """
         article_id = Fetcher._extract_zhihu_article_id(url)
         answer_id = Fetcher._extract_zhihu_answer_id(url)
+        expect_content = bool(article_id or answer_id)
 
         # Build candidate URLs: desktop first, then mobile (mobile often has weaker anti-bot)
         candidate_urls = []
         if article_id:
             candidate_urls.extend([
                 ("desktop", url),
+                ("desktop", f"https://zhuanlan.zhihu.com/p/{article_id}"),
                 ("desktop", f"https://www.zhihu.com/p/{article_id}"),
                 ("mobile", f"https://m.zhihu.com/article/{article_id}"),
             ])
@@ -4500,7 +4569,7 @@ class Fetcher:
                 ("desktop", f"https://www.zhihu.com/answer/{answer_id}"),
                 ("mobile", f"https://m.zhihu.com/answer/{answer_id}"),
             ])
-        if not article_id and not answer_id:
+        if not candidate_urls:
             candidate_urls.append(("desktop", url))
 
         # Deduplicate by URL while preserving order
@@ -4533,21 +4602,30 @@ class Fetcher:
 
             for mode, candidate_url in unique_candidates:
                 try:
+                    headers = Fetcher._get_zhihu_html_headers(candidate_url)
                     if mode == "mobile":
-                        headers = Fetcher._get_zhihu_html_headers(candidate_url)
                         headers["User-Agent"] = mobile_ua
-                    else:
-                        headers = Fetcher._get_zhihu_html_headers(candidate_url)
                     if cookie_header:
                         headers["Cookie"] = cookie_header
                     response = session.get(candidate_url, headers=headers, timeout=30)
                     response.raise_for_status()
                     text = Fetcher._decode_response_text(response)
-                    if len(text) > 500:
-                        logger.info("Zhihu direct HTML fetch succeeded for %s (%d bytes)", candidate_url, len(text))
-                        return text
                 except Exception as e:
                     logger.debug("Zhihu direct HTML fetch failed for %s: %s", candidate_url, e)
+                    continue
+
+                issue = Fetcher._zhihu_page_issue(text, expect_content=expect_content)
+                if issue:
+                    logger.info("Zhihu direct HTML fetch for %s rejected: %s", candidate_url, issue)
+                    continue
+
+                extracted = Fetcher._extract_zhihu_dom_content(text, url)
+                if not extracted:
+                    extracted = Fetcher._extract_zhihu_initial_state(text, url)
+                if extracted:
+                    logger.info("Zhihu direct HTML fetch succeeded for %s (%d bytes)", candidate_url, len(text))
+                    return extracted
+                logger.debug("Zhihu direct HTML fetch for %s yielded no extractable content", candidate_url)
         finally:
             session.close()
         return None
@@ -4710,22 +4788,33 @@ class Fetcher:
             return alt_html
 
         # Try direct HTML fetch with full browser-like headers (faster than Playwright)
-        direct_html = Fetcher._fetch_zhihu_page_html(url, proxies=req_proxies, cookie_header=cookie_header)
+        direct_html = Fetcher._fetch_zhihu_direct_content(url, proxies=req_proxies, cookie_header=cookie_header)
         if direct_html:
-            extracted = Fetcher._extract_zhihu_dom_content(direct_html, url)
-            if extracted:
-                return extracted
-            # DOM extraction failed; try extracting embedded initial state JSON
-            json_extracted = Fetcher._extract_zhihu_initial_state(direct_html, url)
-            if json_extracted:
-                return json_extracted
+            return direct_html
 
         try:
             browser_html = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
-            return Fetcher._extract_zhihu_dom_content(browser_html, url)
         except Exception as e:
             logger.warning(f"Zhihu browser fallback failed: {e}")
+            if not AuthHandler.can_launch_headed_browser():
+                logger.warning(
+                    "Zhihu's anti-bot check needs a visible browser but no graphical session "
+                    "(DISPLAY/WAYLAND_DISPLAY) was detected; run `surf --login zhihu` on a "
+                    "desktop session and retry."
+                )
             return None
+
+        issue = Fetcher._zhihu_page_issue(browser_html, expect_content=bool(answer_id or article_id))
+        if issue:
+            logger.warning("Zhihu browser fallback returned a %s; giving up", issue)
+            return None
+
+        extracted = Fetcher._extract_zhihu_dom_content(browser_html, url)
+        if not extracted:
+            extracted = Fetcher._extract_zhihu_initial_state(browser_html, url)
+        if not extracted:
+            logger.warning("Zhihu browser fallback page had no extractable content")
+        return extracted
 
     @staticmethod
     def _fetch_twitter_oembed(url, config, proxy_mode_override=None, custom_proxy_override=None):
@@ -5184,9 +5273,21 @@ class Fetcher:
         trusted_host_map=None,
     ):
         """Fetch a page with Playwright's synchronous API."""
+        is_zhihu_url = bool(
+            re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE)
+        )
         backend = Fetcher._browser_backend(config)
         if backend == "obscura":
-            if trusted_host_map:
+            if is_zhihu_url:
+                # Zhihu answers content requests with a zse-ck JS challenge that a
+                # headless Obscura session never resolves (it stalls on an empty
+                # document), while the visible Playwright strategy below solves it.
+                logger.info(
+                    "zhihu: using the visible Playwright strategy; "
+                    "headless Obscura cannot pass Zhihu's zse-ck challenge"
+                )
+                backend = "playwright"
+            elif trusted_host_map:
                 # trusted host resolver rules are a Playwright-only feature; keep
                 # the feature working by falling back to Playwright for this call.
                 logger.info(
@@ -5213,8 +5314,6 @@ class Fetcher:
             if Fetcher._is_twitter_url(url) and Fetcher._is_twitter_article_url(url)
             else url
         )
-
-        is_zhihu_url = bool(re.match(r"^https?://((www\.)?zhihu\.com|zhuanlan\.zhihu\.com)/", url, re.IGNORECASE))
 
         # For Twitter/X URLs, prefer detected proxy settings first and retry direct if needed.
         is_twitter_url = Fetcher._is_twitter_url(url)
