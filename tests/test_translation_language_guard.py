@@ -1,3 +1,6 @@
+import sys
+import types
+
 import surf
 
 
@@ -55,3 +58,44 @@ def test_sparse_chinese_markdown_still_allows_translation_path(monkeypatch):
     assert calls["called"] is True
     assert translated_text == text
     assert translated_title == "Guide"
+
+
+def test_translation_prompt_does_not_request_outer_markdown_code_block(monkeypatch):
+    monkeypatch.setattr(surf, "detect", lambda text: "en")
+
+    calls = []
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content="译文段落。\n\n```python\nprint('hello')\n```"
+                        )
+                    )
+                ]
+            )
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = types.SimpleNamespace(completions=_FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_FakeOpenAI))
+
+    translated_text, translated_title = surf.ContentProcessor.translate_if_needed(
+        "This is an English paragraph.",
+        target_lang="zh-cn",
+        config=types.SimpleNamespace(
+            get_llm_config=lambda llm_provider=None: {
+                "base_url": "https://example.com/v1",
+                "api_key": "test-key",
+                "model": "test-model",
+            }
+        ),
+    )
+
+    assert translated_title is None
+    assert translated_text == "译文段落。\n\n```python\nprint('hello')\n```"
+    assert "Wrap your entire output in" not in calls[0]["messages"][0]["content"]
