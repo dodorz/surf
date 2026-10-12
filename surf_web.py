@@ -72,6 +72,7 @@ from surf import (
     ContentProcessor,
     OcrHandler,
     OutputHandler,
+    PublishHandler,
     TTSHandler,
     _apply_browser_backend_override,
     _convert_embedded_html_in_markdown,
@@ -668,7 +669,7 @@ HTML_TEMPLATE = """
     <div class="container">
         <div class="header">
             <h1>🌊 Surf</h1>
-            <p>将网页转换为 Markdown / PDF / HTML / Audio</p>
+            <p>将网页转换为 Markdown / PDF / HTML / Audio，或发布到 Pastebin</p>
         </div>
         
         <div class="card">
@@ -928,6 +929,10 @@ HTML_TEMPLATE = """
                             <div class="radio-option">
                                 <input type="radio" id="format-audio" name="format" value="audio">
                                 <label for="format-audio">Audio (.mp3)</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="format-publish" name="format" value="publish">
+                                <label for="format-publish">发布到 Pastebin</label>
                             </div>
                         </div>
                     </div>
@@ -1840,7 +1845,11 @@ HTML_TEMPLATE = """
                     }
                     if (job.status === 'done') {
                         const fileTypeLabel = (job.fileType || '').toUpperCase();
-                        showToast('success', `${fileTypeLabel} 已保存到: ${job.savePath}`, 8000);
+                        if (job.fileType === 'publish') {
+                            showToast('success', `已发布到: ${job.savePath}`, 8000);
+                        } else {
+                            showToast('success', `${fileTypeLabel} 已保存到: ${job.savePath}`, 8000);
+                        }
                         saveJobIds.delete(jobId);
                         return;
                     }
@@ -1906,7 +1915,8 @@ HTML_TEMPLATE = """
                     const urlSuffix = inputUrl
                         ? `：<br><span style="word-break: break-all;">${escapeHtml(inputUrl)}</span>`
                         : '';
-                    showStatus('success', `${fileType.toUpperCase()} 已加入后台保存队列，可继续处理其他 URL${urlSuffix}`);
+                    const queueLabel = fileType === 'publish' ? '发布任务' : `${fileType.toUpperCase()} 保存任务`;
+                    showStatus('success', `${queueLabel}已加入后台队列，可继续处理其他 URL${urlSuffix}`);
                     notifySaveJobState(result.job_id, 'pending');
                     pollSaveJob(result.job_id);
                 } else {
@@ -1966,6 +1976,15 @@ def get_web_proxy_override(mode):
     """Return the Fetcher proxy override for a Web UI proxy mode."""
     normalized = normalize_web_proxy_mode(mode)
     return None if normalized == "auto" else normalized
+
+
+def resolve_web_save_proxy_overrides(formData):
+    """Derive proxy overrides from re-submitted form data for save-time network calls."""
+    if not formData:
+        return None, None
+    proxy_mode = normalize_web_proxy_mode(formData.get("proxy", "no"))
+    custom_proxy = (formData.get("custom_proxy") or "").strip() or None
+    return get_web_proxy_override(proxy_mode), custom_proxy
 
 
 def resolve_web_proxy_mode_default(config, url=None):
@@ -2295,19 +2314,33 @@ def _run_web_save_job(job_id):
             "audio": config.get_path("Output", "audio_dir", fallback="audio"),
         }
 
-
-        if saveDir:
-            targetDir = resolve_user_path(saveDir)
-        else:
-            targetDir = defaultDirs.get(fileType, ".")
-        os.makedirs(targetDir, exist_ok=True)
+        # Publishing to Pastebin does not write local files.
+        if fileType != "publish":
+            if saveDir:
+                targetDir = resolve_user_path(saveDir)
+            else:
+                targetDir = defaultDirs.get(fileType, ".")
+            os.makedirs(targetDir, exist_ok=True)
 
         title = customTitle or resultData.get("title", "Untitled")
         metadata = resultData.get("metadata", {})
         html_content = metadata.get("html_content", "")
         source_url = metadata.get("source_url")
 
-        if fileType == "md":
+        if fileType == "publish":
+            md_content = resultData.get("markdown", "")
+            proxy_override, custom_proxy_override = resolve_web_save_proxy_overrides(formData)
+            paste_url = PublishHandler.publish_to_pastebin(
+                title,
+                md_content,
+                config,
+                proxy_mode_override=proxy_override,
+                custom_proxy_override=custom_proxy_override,
+            )
+            if not paste_url:
+                raise ValueError("发布到 Pastebin 失败（请检查 [publish.pastebin] api_dev_key 配置）")
+            save_path = paste_url
+        elif fileType == "md":
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
                 title, "md", targetDir, source_url=source_url, html_content=html_content
@@ -2922,20 +2955,42 @@ def save_file():
         "audio": config.get_path("Output", "audio_dir", fallback="audio"),
     }
 
-    # Use user-specified directory or default
-    if saveDir:
-        targetDir = resolve_user_path(saveDir)
-    else:
-        targetDir = defaultDirs.get(fileType, ".")
+    # Use user-specified directory or default; publishing writes no local files.
+    if fileType != "publish":
+        if saveDir:
+            targetDir = resolve_user_path(saveDir)
+        else:
+            targetDir = defaultDirs.get(fileType, ".")
 
-    # Create target directory if it doesn't exist
-    os.makedirs(targetDir, exist_ok=True)
+        # Create target directory if it doesn't exist
+        os.makedirs(targetDir, exist_ok=True)
 
     try:
         title = customTitle or resultData.get("title", "Untitled")
         metadata = resultData.get("metadata", {})
         html_content = metadata.get("html_content", "")
         source_url = metadata.get("source_url")
+
+        if fileType == "publish":
+            md_content = resultData.get("markdown", "")
+            proxy_override, custom_proxy_override = resolve_web_save_proxy_overrides(
+                data.get("formData")
+            )
+            paste_url = PublishHandler.publish_to_pastebin(
+                title,
+                md_content,
+                config,
+                proxy_mode_override=proxy_override,
+                custom_proxy_override=custom_proxy_override,
+            )
+            if not paste_url:
+                return jsonify(
+                    {
+                        "success": False,
+                        "error": "发布到 Pastebin 失败（请检查 [publish.pastebin] api_dev_key 配置）",
+                    }
+                )
+            return jsonify({"success": True, "savePath": paste_url})
 
         if fileType == "md":
             md_content = resultData.get("markdown", "")

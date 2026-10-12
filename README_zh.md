@@ -116,6 +116,8 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 语言模式（`trans` / `raw` / `both`）
 - 代理模式和自定义代理（Windows: `auto/win/env/custom/no`；非 Windows: `auto/env/custom/no`）
 - 浏览器渲染
+- 浏览器后端（跟随配置 / Obscura / Playwright，对应 CLI `-B/--browser-backend`）
+- 输出格式可选 Markdown / HTML / PDF / Audio / 发布到 Pastebin（发布对应 CLI `-P/--format publish`，需在 config.ini 的 `[publish.pastebin]` 配置 `api_dev_key`；发布不写本地文件，成功后展示 Pastebin 链接）
 - 图片 OCR 开关；OCR 引擎和 OCR 语言只在未关闭 OCR 时显示
 - Thread 抓取方向（`after` / `before` / `both` / `off`）和作者范围（`same` / `all`；V2EX 将 thread 方向用作是否包含回帖）
 - 翻译时可选的 LLM Provider 覆盖；语言模式不是 `raw` / 保留原文时才显示

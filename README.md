@@ -135,6 +135,8 @@ The web form exposes the most commonly used Surf options directly, including:
 - language mode (`trans` / `raw` / `both`)
 - proxy mode and custom proxy (`auto/win/env/custom/no` on Windows, `auto/env/custom/no` on non-Windows)
 - browser rendering
+- browser backend (follow config / Obscura / Playwright, matching CLI `-B/--browser-backend`)
+- output format: Markdown / HTML / PDF / Audio / publish to Pastebin (publish matches CLI `-P/--format publish` and needs `api_dev_key` under `[publish.pastebin]` in config.ini; publishing writes no local file and shows the Pastebin URL on success)
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
