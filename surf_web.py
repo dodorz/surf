@@ -73,6 +73,7 @@ from surf import (
     OcrHandler,
     OutputHandler,
     TTSHandler,
+    _apply_browser_backend_override,
     _convert_embedded_html_in_markdown,
     _extract_direct_markdown_payload,
     _get_handler_for_url,
@@ -730,6 +731,25 @@ HTML_TEMPLATE = """
                     <div class="form-group checkbox-group">
                         <input type="checkbox" id="browser" name="browser">
                         <label for="browser">使用浏览器渲染 (JavaScript)</label>
+                    </div>
+
+                    <div class="form-group wide">
+                        <label>浏览器后端</label>
+                        <div class="radio-group">
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-auto" name="browser_backend" value="auto" checked>
+                                <label for="browser-backend-auto">跟随配置（{{ config_browser_backend }}）</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-obscura" name="browser_backend" value="obscura">
+                                <label for="browser-backend-obscura">Obscura</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-playwright" name="browser_backend" value="playwright">
+                                <label for="browser-backend-playwright">Playwright</label>
+                            </div>
+                        </div>
+                        <div class="field-hint">仅影响无头浏览器抓取；对应 CLI 的 `-B/--browser-backend`。有头登录 / PDF / 知乎兜底始终使用 Playwright。</div>
                     </div>
 
                     <div class="form-group checkbox-group" id="podcastTranscribeGroup" style="display: none;">
@@ -2033,6 +2053,12 @@ def get_web_ui_context(config):
     if not default_ocr_lang:
         default_ocr_lang = "chi_sim+eng"
 
+    config_browser_backend = (
+        config.get("Browser", "backend", fallback="obscura").strip().lower() or "obscura"
+    )
+    if config_browser_backend not in {"obscura", "playwright"}:
+        config_browser_backend = "obscura"
+
     ocr_lang_values = [default_ocr_lang, "chi_sim+eng", "eng", "jpn+eng"]
     seen = set()
     ocr_lang_options = []
@@ -2053,6 +2079,7 @@ def get_web_ui_context(config):
         "llm_providers": llm_providers,
         "default_ocr_engine": default_ocr_engine,
         "ocr_lang_options": ocr_lang_options,
+        "config_browser_backend": config_browser_backend,
     }
 
 
@@ -2553,6 +2580,9 @@ def _process_web_request(data, translate_sync=False):
     is_text_post = bool(raw_text and not url)
 
     config = get_config()
+
+    # Per-request headless browser backend override (Web UI radio).
+    _apply_browser_backend_override(config, data.get("browser_backend"))
 
     original_md = ""
     original_title = "Untitled"

@@ -105,7 +105,7 @@ We recommend using `uv` for a clean environment.
     ```
     `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr`, `rapidocr-onnxruntime`, and `pytesseract` for image OCR (the Tesseract binary itself must be installed separately).
 
-    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across threads and gunicorn workers; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Only headed interactive login and PDF generation still require Playwright. To use Playwright instead, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; keep it below the gunicorn worker timeout and raise that timeout for slow browser/archive flows (for example `gunicorn --timeout 120`). On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback.
+    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across threads and gunicorn workers; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Only headed interactive login and PDF generation still require Playwright. To use Playwright instead, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; keep it below the gunicorn worker timeout and raise that timeout for slow browser/archive flows (for example `gunicorn --timeout 120`). On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback. For a single run, `-B/--browser-backend {auto,obscura,playwright}` overrides `[Browser] backend` from the config file (`auto`, the default, follows the config); the Web UI exposes the same "浏览器后端" option.
 
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
 
@@ -386,12 +386,15 @@ Read content aloud (requires local audio output):
 uv run surf.py "https://example.com" -s
 ```
 
-### Force Browser
+### Force Browser / Browser Backend (-B / --browser-backend)
 
-Force using Playwright (useful for tricky sites).
+Force browser rendering with `--browser`; pick the headless backend with `-B` (useful for tricky sites).
 
 ```bash
 uv run surf.py "https://example.com" --browser
+uv run surf.py "https://example.com" -B playwright   # Force the Playwright headless backend for this run
+uv run surf.py "https://example.com" -B obscura      # Force the Obscura headless backend for this run
+uv run surf.py "https://example.com" -B auto         # Follow [Browser] backend in config.ini (default behavior)
 ```
 
 ### Content Extractor (-e / --extractor)

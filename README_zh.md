@@ -86,7 +86,7 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
     uv run playwright install
     ```
 
-    Obscura 是 Surf 默认且推荐的浏览器后端。Surf 也支持 Playwright 作为备选。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。线程和 gunicorn worker 之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。知乎是例外：即使 `backend = obscura`，其浏览器兜底也始终启动 Playwright 可见浏览器窗口，因为知乎的 `zse-ck` 挑战在无头会话中无法通过，因此 Linux 上需要图形会话（`DISPLAY`）。只有有头交互式登录和 PDF 生成仍必须使用 Playwright。如需使用 Playwright，请在 `config.ini` 的 `[Browser]` 中设置 `backend = playwright` 并运行 `uv run playwright install`。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长，应小于 gunicorn worker 超时；对较慢的浏览器/archive 流程请调大该超时（例如 `gunicorn --timeout 120`）。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。
+    Obscura 是 Surf 默认且推荐的浏览器后端。Surf 也支持 Playwright 作为备选。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。线程和 gunicorn worker 之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。知乎是例外：即使 `backend = obscura`，其浏览器兜底也始终启动 Playwright 可见浏览器窗口，因为知乎的 `zse-ck` 挑战在无头会话中无法通过，因此 Linux 上需要图形会话（`DISPLAY`）。只有有头交互式登录和 PDF 生成仍必须使用 Playwright。如需使用 Playwright，请在 `config.ini` 的 `[Browser]` 中设置 `backend = playwright` 并运行 `uv run playwright install`。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长，应小于 gunicorn worker 超时；对较慢的浏览器/archive 流程请调大该超时（例如 `gunicorn --timeout 120`）。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。单次运行可用 `-B/--browser-backend {auto,obscura,playwright}` 覆盖配置文件的 `[Browser] backend`（`auto` 为默认，表示跟随配置）；Web 界面提供同样的「浏览器后端」选项。
 
     Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
 
@@ -357,6 +357,9 @@ surf "https://example.com" -n          # 不使用代理
 
 ```bash
 surf "https://example.com" --browser   # 强制使用浏览器
+surf "https://example.com" -B playwright  # 本次运行强制 Playwright 无头后端
+surf "https://example.com" -B obscura     # 本次运行强制 Obscura 无头后端
+surf "https://example.com" -B auto        # 跟随 config.ini 的 [Browser] backend（默认行为）
 surf "https://x.com/user/status/123" -t   # 默认抓取 thread 后续回帖
 surf "https://x.com/user/status/123" --thread before
 surf "https://x.com/user/status/123" --thread both --thread-author same

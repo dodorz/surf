@@ -56,6 +56,8 @@ audio_timeout = 120
 
 [Browser]
 ; Browser backend for dynamic pages: obscura (default) or playwright
+; Override per run with CLI -B/--browser-backend {auto,obscura,playwright}
+; or the Web UI "浏览器后端" option (auto = follow this setting).
 ; Zhihu is an exception: its browser fallback always opens a visible
 ; Playwright window (the zse-ck challenge does not resolve headlessly),
 ; which needs a graphical session (DISPLAY) on Linux.
@@ -102,7 +104,7 @@ custom_proxy =
 [Twitter]
 ; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
 backend = cli
-; Optional executable path or command name for twitter-cli
+; Deprecated and ignored: Surf always invokes `uvx --from twitter-cli twitter`
 cli_bin =
 ; Optional browser hint for twitter-cli cookies: chrome, edge, brave, firefox, arc
 browser =

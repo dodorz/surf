@@ -1149,6 +1149,21 @@ def _resolve_proxy_args(args, parser, config):
 
     return proxy_mode, custom_proxy
 
+def _apply_browser_backend_override(config, backend):
+    """Apply a per-run browser backend override to *config*.
+
+    ``auto`` (or any unknown value) leaves the config untouched; ``obscura``
+    and ``playwright`` rewrite ``[Browser] backend`` so every headless handler
+    picks the override up through :meth:`Fetcher._browser_backend`.
+    Returns the applied backend name, or ``None`` when no override applied.
+    """
+    normalized = (backend or "auto").strip().lower()
+    if normalized in {"obscura", "playwright"}:
+        config.set("Browser", "backend", normalized)
+        logger.info("Browser backend override: %s", normalized)
+        return normalized
+    return None
+
 def _normalize_thread_argv(argv):
     """Allow `surf -t URL` even though argparse optional values are ambiguous."""
     normalized = []
@@ -1479,6 +1494,12 @@ class Config:
 
     def has_section(self, section):
         return self.config.has_section(section)
+
+    def set(self, section, key, value):
+        """Override a config value at runtime (CLI/Web per-request overrides)."""
+        if not self.config.has_section(section):
+            self.config.add_section(section)
+        self.config.set(section, key, str(value))
 
     def get_path(self, section, key, fallback=None):
         value = self.get(section, key, fallback=fallback)
@@ -13669,6 +13690,11 @@ Twitter/X Backend:
   surf --twitter-backend cli URL             # Prefer uvx --from twitter-cli twitter
   surf --twitter-backend auto URL            # CLI first, then native fallback
   surf --twitter-browser chrome URL          # Prefer Chrome cookies for twitter-cli
+
+Browser Backend:
+  surf -B auto URL                           # Follow [Browser] backend from config (default)
+  surf -B obscura URL                        # Force the Obscura headless backend
+  surf -B playwright URL                     # Force the Playwright backend
         """,
     )
     # Position argument
@@ -13839,7 +13865,18 @@ Twitter/X Backend:
     )
 
     # Other options
-    parser.add_argument("--browser", action="store_true", help="Force use of browser (Playwright)")
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="Force browser rendering (headless backend follows -B/--browser-backend or [Browser] backend)",
+    )
+    parser.add_argument(
+        "-B",
+        "--browser-backend",
+        choices=["auto", "obscura", "playwright"],
+        default="auto",
+        help="Headless browser backend: auto=follow [Browser] backend from config (default), obscura, playwright",
+    )
     thread_group = parser.add_mutually_exclusive_group()
     thread_group.add_argument(
         "-t",
@@ -13896,6 +13933,9 @@ Twitter/X Backend:
 
     # Determine config path
     config = Config(args.config) if args.config else Config()
+
+    # Per-run browser backend override (-B/--browser-backend)
+    _apply_browser_backend_override(config, args.browser_backend)
 
     # Handle --clear-auth
     if args.clear_auth:
