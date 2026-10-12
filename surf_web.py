@@ -75,6 +75,7 @@ from surf import (
     PublishHandler,
     TTSHandler,
     _apply_browser_backend_override,
+    _apply_tts_overrides,
     _config_bool,
     _convert_embedded_html_in_markdown,
     _extract_direct_markdown_payload,
@@ -256,6 +257,20 @@ HTML_TEMPLATE = """
         .checkbox-group input[type="checkbox"] {
             width: 18px;
             height: 18px;
+        }
+
+        .tts-options-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 12px;
+            align-items: end;
+        }
+
+        .tts-sublabel {
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+            margin-bottom: 6px;
         }
 
         .radio-group {
@@ -953,6 +968,28 @@ HTML_TEMPLATE = """
                         <input type="checkbox" id="archiveSource" name="archive_source" {% if default_archive %}checked{% endif %}>
                         <label for="archiveSource">保存 source 到 Internet Archive</label>
                     </div>
+
+                    <div class="form-group wide tts-options-group" id="ttsOptionsGroup" style="display: none;">
+                        <label>TTS 设置</label>
+                        <div class="tts-options-grid">
+                            <div>
+                                <label for="ttsVoice" class="tts-sublabel">语音</label>
+                                <select id="ttsVoice" name="tts_voice">
+                                    {% for option in tts_voice_options %}
+                                    <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div>
+                                <label for="ttsRate" class="tts-sublabel">语速</label>
+                                <input type="text" id="ttsRate" name="tts_rate" value="{{ default_tts_rate }}" placeholder="+0%">
+                            </div>
+                            <div>
+                                <label for="ttsVolume" class="tts-sublabel">音量</label>
+                                <input type="text" id="ttsVolume" name="tts_volume" value="{{ default_tts_volume }}" placeholder="+0%">
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
             </form>
@@ -1098,6 +1135,12 @@ HTML_TEMPLATE = """
             const htmlInlineGroup = document.getElementById('htmlInlineGroup');
             if (htmlInlineGroup) {
                 htmlInlineGroup.style.display = format === 'html' ? 'flex' : 'none';
+            }
+
+            // TTS options - only for audio
+            const ttsOptionsGroup = document.getElementById('ttsOptionsGroup');
+            if (ttsOptionsGroup) {
+                ttsOptionsGroup.style.display = format === 'audio' ? 'block' : 'none';
             }
         }
 
@@ -1936,10 +1979,11 @@ HTML_TEMPLATE = """
             }
             try {
                 showStatus('processing', '正在生成语音...');
+                const formData = getCurrentFormData(container.dataset.inputUrl || '');
                 const response = await fetch(API_BASE + '/api/play-audio', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ data: resultData })
+                    body: JSON.stringify({ data: resultData, formData })
                 });
                 const result = await parseJsonResponse(response);
                 if (result.success) {
@@ -1994,6 +2038,37 @@ def resolve_web_bool_option(data, key, config, section, option):
     if key in data:
         return bool(data[key])
     return _config_bool(config, section, option)
+
+
+# Curated common edge-tts voices for the Web UI dropdown.
+_TTS_VOICE_CHOICES = [
+    ("zh-CN-XiaoxiaoNeural", "晓晓 (zh-CN-XiaoxiaoNeural)"),
+    ("zh-CN-YunxiNeural", "云希 (zh-CN-YunxiNeural)"),
+    ("zh-CN-YunyangNeural", "云扬 (zh-CN-YunyangNeural)"),
+    ("zh-CN-XiaoyiNeural", "晓伊 (zh-CN-XiaoyiNeural)"),
+    ("zh-CN-YunjianNeural", "云健 (zh-CN-YunjianNeural)"),
+    ("zh-TW-HsiaoChenNeural", "晓臻 (zh-TW-HsiaoChenNeural)"),
+    ("zh-HK-HiuMaanNeural", "晓曼 (zh-HK-HiuMaanNeural)"),
+    ("en-US-AriaNeural", "Aria (en-US-AriaNeural)"),
+    ("en-US-GuyNeural", "Guy (en-US-GuyNeural)"),
+    ("en-US-JennyNeural", "Jenny (en-US-JennyNeural)"),
+    ("en-US-ChristopherNeural", "Christopher (en-US-ChristopherNeural)"),
+    ("en-US-MichelleNeural", "Michelle (en-US-MichelleNeural)"),
+    ("en-GB-SoniaNeural", "Sonia (en-GB-SoniaNeural)"),
+    ("ja-JP-NanamiNeural", "Nanami (ja-JP-NanamiNeural)"),
+    ("ko-KR-SunHiNeural", "SunHi (ko-KR-SunHiNeural)"),
+]
+
+
+def build_tts_voice_options(default_voice):
+    """Build Web UI TTS voice options, ensuring the configured default is present."""
+    options = [
+        {"value": value, "label": label, "selected": value == default_voice}
+        for value, label in _TTS_VOICE_CHOICES
+    ]
+    if default_voice and not any(opt["value"] == default_voice for opt in options):
+        options.insert(0, {"value": default_voice, "label": default_voice, "selected": True})
+    return options
 
 
 def resolve_web_proxy_mode_default(config, url=None):
@@ -2092,6 +2167,13 @@ def get_web_ui_context(config):
     default_no_front_matter = _config_bool(config, "Output", "no_front_matter")
     default_archive = _config_bool(config, "Output", "archive")
 
+    default_tts_voice = (config.get("TTS", "voice", fallback="zh-CN-XiaoxiaoNeural") or "").strip()
+    if not default_tts_voice:
+        default_tts_voice = "zh-CN-XiaoxiaoNeural"
+    default_tts_rate = (config.get("TTS", "rate", fallback="+0%") or "+0%").strip() or "+0%"
+    default_tts_volume = (config.get("TTS", "volume", fallback="+0%") or "+0%").strip() or "+0%"
+    tts_voice_options = build_tts_voice_options(default_tts_voice)
+
     ocr_lang_values = [default_ocr_lang, "chi_sim+eng", "eng", "jpn+eng"]
     seen = set()
     ocr_lang_options = []
@@ -2117,6 +2199,10 @@ def get_web_ui_context(config):
         "default_html_inline": default_html_inline,
         "default_no_front_matter": default_no_front_matter,
         "default_archive": default_archive,
+        "default_tts_voice": default_tts_voice,
+        "default_tts_rate": default_tts_rate,
+        "default_tts_volume": default_tts_volume,
+        "tts_voice_options": tts_voice_options,
     }
 
 
@@ -2401,6 +2487,13 @@ def _run_web_save_job(job_id):
             output_path = build_output_path(
                 title, "mp3", targetDir, source_url=source_url, html_content=html_content
             )
+            if formData:
+                _apply_tts_overrides(
+                    config,
+                    formData.get("tts_voice"),
+                    formData.get("tts_rate"),
+                    formData.get("tts_volume"),
+                )
             TTSHandler.run_tts(
                 title, md_content, config, speak=speak, save_path=output_path
             )
@@ -2941,6 +3034,13 @@ def play_audio():
         md_content = resultData.get("markdown", "")
         if not md_content.strip():
             return jsonify({"success": False, "error": "No text content to speak"})
+        form_data = data.get("formData") or {}
+        _apply_tts_overrides(
+            config,
+            form_data.get("tts_voice"),
+            form_data.get("tts_rate"),
+            form_data.get("tts_volume"),
+        )
         threading.Thread(
             target=TTSHandler.run_tts,
             args=(title, md_content, config),
@@ -3063,6 +3163,13 @@ def save_file():
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
                 title, "mp3", targetDir, source_url=source_url, html_content=html_content
+            )
+            form_data = data.get("formData") or {}
+            _apply_tts_overrides(
+                config,
+                form_data.get("tts_voice"),
+                form_data.get("tts_rate"),
+                form_data.get("tts_volume"),
             )
             TTSHandler.run_tts(
                 title, md_content, config, speak=speak, save_path=output_path

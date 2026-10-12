@@ -45,10 +45,13 @@ model = deepseek-chat
 ; Support: edge-tts
 engine = edge-tts
 ; Voice example: zh-CN-XiaoxiaoNeural, zh-CN-YunxiNeural, en-US-AriaNeural
+; CLI override: --tts-voice; Web UI: TTS voice selector
 voice = zh-CN-XiaoxiaoNeural
 ; Rate: +0%, +10%, -10%
+; CLI override: --tts-rate; Web UI: rate input
 rate = +0%
 ; Volume: +0%, +10%, -10%
+; CLI override: --tts-volume; Web UI: volume input
 volume = +0%
 
 [Transcription]

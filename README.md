@@ -72,7 +72,7 @@ surf "https://example.com" -r
 
 - **PDF Generation**: Generate PDF files using Playwright.
 - **Note Integration**: Automatically saves files to your designated notes folder.
-- **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud.
+- **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
 - **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
 - **Experimental Image OCR**: Optional local OCR on article images. The default engine is the `auto` chain (PaddleOCR > RapidOCR > Tesseract); `paddleocr`, `rapidocr`, and `tesseract` can be selected via `[OCR] engine` / `--ocr-engine`. Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
@@ -137,6 +137,7 @@ The web form exposes the most commonly used Surf options directly, including:
 - browser rendering
 - browser backend (follow config / Obscura / Playwright, matching CLI `-B/--browser-backend`)
 - output format: Markdown / HTML / PDF / Audio / publish to Pastebin (publish matches CLI `-P/--format publish` and needs `api_dev_key` under `[publish.pastebin]` in config.ini; publishing writes no local file and shows the Pastebin URL on success)
+- TTS options (voice dropdown, rate, volume) shown when the Audio format is selected, matching CLI `--tts-voice` / `--tts-rate` / `--tts-volume`; defaults come from `[TTS]` in config.ini
 - image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
 - thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
 - optional LLM provider override for translation, shown only when language mode is not `raw`
@@ -249,6 +250,7 @@ extractor = auto
 
 [TTS]
 engine = edge-tts
+; CLI --tts-voice / --tts-rate / --tts-volume and the Web UI TTS options override these per run
 voice = zh-CN-XiaoxiaoNeural
 rate = +0%
 volume = +0%
@@ -397,6 +399,13 @@ Read content aloud (requires local audio output):
 
 ```bash
 uv run surf.py "https://example.com" -s
+```
+
+Override the configured voice, rate, or volume for a single run:
+
+```bash
+uv run surf.py "https://example.com" -a --tts-voice en-US-AriaNeural
+uv run surf.py "https://example.com" -a --tts-rate +10% --tts-volume -20%
 ```
 
 ### Force Browser / Browser Backend (-B / --browser-backend)

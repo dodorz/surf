@@ -25,7 +25,7 @@
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
-- **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读。
+- **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读；语音、语速、音量可通过 `--tts-voice` / `--tts-rate` / `--tts-volume`（CLI）或 Web TTS 选项单次覆盖。
 - **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用，也适用于 Reddit 等需要 Cookie 的站点。
 - **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认使用 auto 链（PaddleOCR > RapidOCR > Tesseract），可通过 `[OCR] engine` / `--ocr-engine` 选择 paddleocr、rapidocr、tesseract 或 auto。小红书默认开启，其它网站需显式传 `--ocr` 或在 `[OCR].enabled = true` 中开启。
 - **内嵌 SVG 插图保留**：会将正文中的内嵌 SVG 图表转换为 Markdown 图片引用，同时过滤装饰性图标。
@@ -118,6 +118,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - 浏览器渲染
 - 浏览器后端（跟随配置 / Obscura / Playwright，对应 CLI `-B/--browser-backend`）
 - 输出格式可选 Markdown / HTML / PDF / Audio / 发布到 Pastebin（发布对应 CLI `-P/--format publish`，需在 config.ini 的 `[publish.pastebin]` 配置 `api_dev_key`；发布不写本地文件，成功后展示 Pastebin 链接）
+- 选择 Audio 格式时显示 TTS 设置（语音下拉框、语速、音量），对应 CLI `--tts-voice` / `--tts-rate` / `--tts-volume`，默认值来自 config.ini 的 `[TTS]`
 - 图片 OCR 开关；OCR 引擎和 OCR 语言只在未关闭 OCR 时显示
 - Thread 抓取方向（`after` / `before` / `both` / `off`）和作者范围（`same` / `all`；V2EX 将 thread 方向用作是否包含回帖）
 - 翻译时可选的 LLM Provider 覆盖；语言模式不是 `raw` / 保留原文时才显示
@@ -231,6 +232,7 @@ extractor = auto
 
 [TTS]
 engine = edge-tts
+; CLI --tts-voice / --tts-rate / --tts-volume 与 Web TTS 选项可单次覆盖
 voice = zh-CN-XiaoxiaoNeural
 rate = +0%
 volume = +0%
@@ -339,6 +341,13 @@ surf -b "https://example.com"        # 双语对比（原文 + 译文）
 
 ```bash
 surf "https://example.com" -s
+```
+
+单次覆盖配置的语音、语速或音量：
+
+```bash
+surf "https://example.com" -a --tts-voice en-US-AriaNeural
+surf "https://example.com" -a --tts-rate +10% --tts-volume -20%
 ```
 
 ### HTML 选项

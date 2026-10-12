@@ -1165,6 +1165,35 @@ def _apply_browser_backend_override(config, backend):
     return None
 
 
+_TTS_RATE_VOLUME_RE = re.compile(r"^[+-]\d{1,3}%$")
+
+
+def _apply_tts_overrides(config, voice=None, rate=None, volume=None):
+    """Apply per-run TTS overrides to ``[TTS]`` (CLI flags / Web form).
+
+    Empty values are ignored; invalid rate/volume formats are warned about
+    and skipped so the configured value stays in effect.
+    Returns True when at least one override was applied.
+    """
+    applied = False
+    voice = (voice or "").strip()
+    if voice:
+        config.set("TTS", "voice", voice)
+        logger.info("TTS voice override: %s", voice)
+        applied = True
+    for key, value in (("rate", rate), ("volume", volume)):
+        value = (value or "").strip()
+        if not value:
+            continue
+        if not _TTS_RATE_VOLUME_RE.match(value):
+            logger.warning("Ignoring invalid TTS %s override %r; expected +N%% or -N%%", key, value)
+            continue
+        config.set("TTS", key, value)
+        logger.info("TTS %s override: %s", key, value)
+        applied = True
+    return applied
+
+
 _VALID_EXTRACTORS = {"auto", "readability", "trafilatura", "raw"}
 
 
@@ -13662,6 +13691,11 @@ Extractor:
   surf -e raw https://example.com                # Skip extraction, return original HTML
   surf -U https://example.com                    # Shorthand for raw
 
+TTS:
+  surf -a https://example.com                    # Save as audio
+  surf -a https://example.com --tts-voice en-US-AriaNeural
+  surf -a https://example.com --tts-rate +10% --tts-volume -20%
+
 Local Files:
   surf /tmp/article.html                        # Read local HTML file
   surf ~/docs/readme.md                         # Read local Markdown file
@@ -13764,6 +13798,18 @@ Browser Backend:
 
     # TTS
     parser.add_argument("-s", "--speak", action="store_true", help="Speak the content")
+    parser.add_argument(
+        "--tts-voice",
+        help="Override [TTS] voice for this run (edge-tts voice name, e.g. zh-CN-XiaoxiaoNeural)",
+    )
+    parser.add_argument(
+        "--tts-rate",
+        help="Override [TTS] rate for this run (e.g. +10%%, -10%%)",
+    )
+    parser.add_argument(
+        "--tts-volume",
+        help="Override [TTS] volume for this run (e.g. +10%%, -10%%)",
+    )
 
     # Authentication
     parser.add_argument(
@@ -13962,6 +14008,9 @@ Browser Backend:
 
     # Per-run browser backend override (-B/--browser-backend)
     _apply_browser_backend_override(config, args.browser_backend)
+
+    # Per-run TTS overrides (--tts-voice/--tts-rate/--tts-volume)
+    _apply_tts_overrides(config, args.tts_voice, args.tts_rate, args.tts_volume)
 
     # Config-backed defaults; CLI flags can only force them on.
     extractor = resolve_extractor(config, args.extractor)
