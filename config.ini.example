@@ -10,6 +10,20 @@ pdf_dir = ./pdf
 audio_dir = ./auido
 ; Directory to save HTML files (default: current directory)
 html_dir = ./web
+; Save the final source URL to the Internet Archive by default
+; (CLI --archive and the Web UI checkbox can force it on per run)
+archive = false
+; Disable YAML front matter in markdown output by default
+; (CLI --no-front-matter and the Web UI checkbox can force it on per run)
+no_front_matter = false
+; Inline CSS/JS in HTML output by default
+; (CLI --html-inline and the Web UI checkbox can force it on per run)
+html_inline = false
+
+[Content]
+; Content extractor: auto (readability then trafilatura fallback), readability, trafilatura, raw
+; CLI -e/--extractor / -R / -T / -U and the Web UI extractor option override this per run.
+extractor = auto
 
 [LLM]
 ; Default LLM provider name

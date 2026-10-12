@@ -75,6 +75,7 @@ from surf import (
     PublishHandler,
     TTSHandler,
     _apply_browser_backend_override,
+    _config_bool,
     _convert_embedded_html_in_markdown,
     _extract_direct_markdown_payload,
     _get_handler_for_url,
@@ -82,6 +83,7 @@ from surf import (
     logger,
     _process_fetched_content,
     _translate_markdown_document,
+    resolve_extractor,
     resolve_user_path,
 )
 
@@ -804,19 +806,19 @@ HTML_TEMPLATE = """
                         <label>内容提取</label>
                         <div class="radio-group">
                             <div class="radio-option">
-                                <input type="radio" id="extractor-auto" name="extractor" value="auto" checked>
+                                <input type="radio" id="extractor-auto" name="extractor" value="auto" {% if default_extractor == 'auto' %}checked{% endif %}>
                                 <label for="extractor-auto">自动</label>
                             </div>
                             <div class="radio-option">
-                                <input type="radio" id="extractor-readability" name="extractor" value="readability">
+                                <input type="radio" id="extractor-readability" name="extractor" value="readability" {% if default_extractor == 'readability' %}checked{% endif %}>
                                 <label for="extractor-readability">Readability</label>
                             </div>
                             <div class="radio-option">
-                                <input type="radio" id="extractor-trafilatura" name="extractor" value="trafilatura">
+                                <input type="radio" id="extractor-trafilatura" name="extractor" value="trafilatura" {% if default_extractor == 'trafilatura' %}checked{% endif %}>
                                 <label for="extractor-trafilatura">Trafilatura</label>
                             </div>
                             <div class="radio-option">
-                                <input type="radio" id="extractor-raw" name="extractor" value="raw">
+                                <input type="radio" id="extractor-raw" name="extractor" value="raw" {% if default_extractor == 'raw' %}checked{% endif %}>
                                 <label for="extractor-raw">原始 HTML</label>
                             </div>
                         </div>
@@ -938,17 +940,17 @@ HTML_TEMPLATE = """
                     </div>
                     
                     <div class="form-group checkbox-group" id="htmlInlineGroup" style="display: none;">
-                        <input type="checkbox" id="htmlInline" name="html_inline">
+                        <input type="checkbox" id="htmlInline" name="html_inline" {% if default_html_inline %}checked{% endif %}>
                         <label for="htmlInline">内联 CSS/JS (HTML)</label>
                     </div>
 
                     <div class="form-group checkbox-group" id="noFrontMatterGroup">
-                        <input type="checkbox" id="noFrontMatter" name="no_front_matter">
+                        <input type="checkbox" id="noFrontMatter" name="no_front_matter" {% if default_no_front_matter %}checked{% endif %}>
                         <label for="noFrontMatter">禁用 YAML Front Matter</label>
                     </div>
 
                     <div class="form-group checkbox-group" id="archiveSourceGroup">
-                        <input type="checkbox" id="archiveSource" name="archive_source">
+                        <input type="checkbox" id="archiveSource" name="archive_source" {% if default_archive %}checked{% endif %}>
                         <label for="archiveSource">保存 source 到 Internet Archive</label>
                     </div>
                 </div>
@@ -1987,6 +1989,13 @@ def resolve_web_save_proxy_overrides(formData):
     return get_web_proxy_override(proxy_mode), custom_proxy
 
 
+def resolve_web_bool_option(data, key, config, section, option):
+    """Boolean option: explicit form/API value wins; otherwise fall back to config."""
+    if key in data:
+        return bool(data[key])
+    return _config_bool(config, section, option)
+
+
 def resolve_web_proxy_mode_default(config, url=None):
     """
     Resolve Web UI default proxy mode.
@@ -2078,6 +2087,11 @@ def get_web_ui_context(config):
     if config_browser_backend not in {"obscura", "playwright"}:
         config_browser_backend = "obscura"
 
+    default_extractor = resolve_extractor(config)
+    default_html_inline = _config_bool(config, "Output", "html_inline")
+    default_no_front_matter = _config_bool(config, "Output", "no_front_matter")
+    default_archive = _config_bool(config, "Output", "archive")
+
     ocr_lang_values = [default_ocr_lang, "chi_sim+eng", "eng", "jpn+eng"]
     seen = set()
     ocr_lang_options = []
@@ -2099,6 +2113,10 @@ def get_web_ui_context(config):
         "default_ocr_engine": default_ocr_engine,
         "ocr_lang_options": ocr_lang_options,
         "config_browser_backend": config_browser_backend,
+        "default_extractor": default_extractor,
+        "default_html_inline": default_html_inline,
+        "default_no_front_matter": default_no_front_matter,
+        "default_archive": default_archive,
     }
 
 
@@ -2727,7 +2745,7 @@ def _process_web_request(data, translate_sync=False):
             proxy_mode_override=proxy_override,
             custom_proxy_override=custom_proxy,
             llm_provider=(data.get("llm") or "").strip() or None,
-            extractor=(data.get("extractor") or "auto").strip().lower(),
+            extractor=resolve_extractor(config, data.get("extractor")),
         )
         source_url = processed["source_url"]
         content_base_url = processed["content_base_url"]
@@ -2746,7 +2764,12 @@ def _process_web_request(data, translate_sync=False):
 
     # archive_url: prioritize archive snapshot (from paywall fallback)
     archive_url = archive_is_url
-    if not archive_url and data.get("archive_source") and not data.get("no_front_matter", False):
+    archive_source = resolve_web_bool_option(data, "archive_source", config, "Output", "archive")
+    no_front_matter = resolve_web_bool_option(
+        data, "no_front_matter", config, "Output", "no_front_matter"
+    )
+    html_inline = resolve_web_bool_option(data, "html_inline", config, "Output", "html_inline")
+    if not archive_url and archive_source and not no_front_matter:
         archive_url = Fetcher.save_wayback_snapshot(
             source_url,
             config=config,
@@ -2785,13 +2808,13 @@ def _process_web_request(data, translate_sync=False):
             "title": title,
             "html_content": html_content,
             "original_description": processed.get("original_description"),
-            "add_front_matter": not data.get("no_front_matter", False),
+            "add_front_matter": not no_front_matter,
             "translated_title": translated_title if translation_performed else None,
             "translated_description": translated_description if translation_performed else None,
             "source_url": source_url,
             "archive_url": archive_url,
             "translator": None,
-            "html_inline": data.get("html_inline", False),
+            "html_inline": html_inline,
         },
     }
     return result, lang_mode, translation_pending

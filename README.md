@@ -15,7 +15,7 @@
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st/episode/...` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL. If the input is copied share text instead of a bare URL (e.g. a Xiaohongshu share message), the first URL is extracted automatically.
 - **GitHub Markdown Source Preservation**: GitHub repo and branchless Markdown URLs can be fetched from the resolved README/blob file while front matter `source` preserves the user-facing URL you entered.
 - **Accurate Translation Metadata**: Front matter includes `translator` only when content or title translation actually changed the output; language detection alone does not count.
-- **Optional Wayback Archiving**: Use `--archive` in CLI or the Web checkbox to submit the final front matter `source` URL to the Internet Archive and write the snapshot URL as `archive`.
+- **Optional Wayback Archiving**: Use `--archive` in CLI or the Web checkbox to submit the final front matter `source` URL to the Internet Archive and write the snapshot URL as `archive`; the default is controlled by `[Output] archive` in config.ini.
 - **Paywall Archive Fallback**: When a paywalled article is detected, Surf checks the archive service through `archive.is`, `archive.ph`, `archive.today`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md` in sequence. Each domain is retried with the configured proxy and direct access before Surf cycles through visible browsers for CAPTCHA completion.
 - **Batch Web Processing**: The Web UI processes every URL found in the input one by one and renders separate result cards with independent save actions; text without URLs is saved as a single post using its first sentence as the title.
 - **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
@@ -235,6 +235,17 @@ pdf_dir = .
 audio_dir = .
 ; Directory to save HTML files (default: current directory)
 html_dir = .
+; Save the final source URL to the Internet Archive by default (CLI --archive and the Web UI checkbox can force it on per run)
+archive = false
+; Disable YAML front matter in markdown output by default (CLI --no-front-matter and the Web UI checkbox can force it on per run)
+no_front_matter = false
+; Inline CSS/JS in HTML output by default (CLI --html-inline and the Web UI checkbox can force it on per run)
+html_inline = false
+
+[Content]
+; Content extractor: auto (readability then trafilatura fallback), readability, trafilatura, raw
+; CLI -e/--extractor / -R / -T / -U and the Web UI extractor option override this per run
+extractor = auto
 
 [TTS]
 engine = edge-tts
@@ -407,6 +418,8 @@ Choose the content extraction library used to remove ads, sidebars, and other cl
 - `readability`: Use Mozilla Readability algorithm only
 - `trafilatura`: Use Trafilatura only
 - `raw`: Skip extraction entirely, return original HTML
+
+The default extractor can be set with `[Content] extractor` in config.ini; the CLI `-e`/`-R`/`-T`/`-U` flags and the Web UI extractor option override it per run.
 
 ```bash
 # Use Trafilatura when Readability gives poor results

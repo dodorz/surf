@@ -1164,6 +1164,32 @@ def _apply_browser_backend_override(config, backend):
         return normalized
     return None
 
+
+_VALID_EXTRACTORS = {"auto", "readability", "trafilatura", "raw"}
+
+
+def _config_bool(config, section, key, fallback=False):
+    """Read a boolean option from config with tolerant parsing."""
+    raw = config.get(section, key, fallback=None)
+    if raw is None:
+        return fallback
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def resolve_extractor(config, override=None):
+    """Resolve the content extractor: explicit override > ``[Content] extractor`` > auto."""
+    if override:
+        normalized = str(override).strip().lower()
+        if normalized in _VALID_EXTRACTORS:
+            return normalized
+        logger.warning("Ignoring invalid extractor override '%s'; using auto", override)
+    configured = (config.get("Content", "extractor", fallback="auto") or "auto").strip().lower()
+    if configured not in _VALID_EXTRACTORS:
+        logger.warning("Ignoring invalid [Content] extractor '%s'; using auto", configured)
+        return "auto"
+    return configured
+
+
 def _normalize_thread_argv(argv):
     """Allow `surf -t URL` even though argparse optional values are ambiguous."""
     normalized = []
@@ -13794,7 +13820,7 @@ Browser Backend:
     )
 
     # HTML options
-    parser.add_argument("--html-inline", action="store_true", help="Inline CSS/JS in HTML output")
+    parser.add_argument("--html-inline", action="store_true", help="Inline CSS/JS in HTML output (default: [Output] html_inline from config)")
 
     ocr_group = parser.add_mutually_exclusive_group()
     ocr_group.add_argument(
@@ -13820,8 +13846,8 @@ Browser Backend:
         "-e",
         "--extractor",
         choices=["auto", "readability", "trafilatura", "raw"],
-        default="auto",
-        help="Content extractor: auto=readability then trafilatura fallback (default), readability=Readability only, trafilatura=Trafilatura only, raw=skip extraction",
+        help="Content extractor: auto=readability then trafilatura fallback, readability=Readability only, "
+        "trafilatura=Trafilatura only, raw=skip extraction (default: [Content] extractor from config, auto)",
     )
     parser.add_argument("-R", action="store_true", help="Shorthand for --extractor readability")
     parser.add_argument("-T", action="store_true", help="Shorthand for --extractor trafilatura")
@@ -13905,12 +13931,12 @@ Browser Backend:
     parser.add_argument(
         "--no-front-matter",
         action="store_true",
-        help="Disable YAML front matter in markdown output",
+        help="Disable YAML front matter in markdown output (default: [Output] no_front_matter from config)",
     )
     parser.add_argument(
         "--archive",
         action="store_true",
-        help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter",
+        help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter (default: [Output] archive from config)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--help", action="help", help="Show this help message")
@@ -13936,6 +13962,12 @@ Browser Backend:
 
     # Per-run browser backend override (-B/--browser-backend)
     _apply_browser_backend_override(config, args.browser_backend)
+
+    # Config-backed defaults; CLI flags can only force them on.
+    extractor = resolve_extractor(config, args.extractor)
+    add_archive = args.archive or _config_bool(config, "Output", "archive")
+    no_front_matter = args.no_front_matter or _config_bool(config, "Output", "no_front_matter")
+    html_inline = args.html_inline or _config_bool(config, "Output", "html_inline")
 
     # Handle --clear-auth
     if args.clear_auth:
@@ -14228,7 +14260,7 @@ Browser Backend:
             proxy_mode_override=proxy_mode,
             custom_proxy_override=custom_proxy,
             llm_provider=args.llm if hasattr(args, "llm") else None,
-            extractor=args.extractor,
+            extractor=extractor,
         )
     except Exception as e:
         logger.error(f"Failed to process fetched content: {e}")
@@ -14264,11 +14296,11 @@ Browser Backend:
                 title,
                 cleaned_html,
                 config,
-                inline=args.html_inline,
+                inline=html_inline,
                 output_path=output_path,
             )
         else:
-            OutputHandler.save_html(title, cleaned_html, config, inline=args.html_inline)
+            OutputHandler.save_html(title, cleaned_html, config, inline=html_inline)
 
     elif output_format == "audio":
         if output_path:
@@ -14308,9 +14340,9 @@ Browser Backend:
                 logger.warning(f"Could not get LLM config for translator: {e}")
 
         # archive_url: prioritize archive snapshot (paywall fallback),
-        # then explicit Wayback Machine --archive flag.
+        # then explicit Wayback Machine --archive flag / [Output] archive default.
         archive_url = archive_is_url
-        if not archive_url and args.archive and not args.no_front_matter and output_path != "-":
+        if not archive_url and add_archive and not no_front_matter and output_path != "-":
             archive_url = Fetcher.save_wayback_snapshot(
                 source_url,
                 config=config,
@@ -14334,7 +14366,7 @@ Browser Backend:
                 config,
                 output_path,
                 html_content=html_content,
-                add_front_matter=not args.no_front_matter,
+                add_front_matter=not no_front_matter,
                 translated_title=translated_title if translation_performed else None,
                 translated_description=translated_description if translation_performed else None,
                 source_url=source_url,
