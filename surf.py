@@ -37,7 +37,6 @@ from datetime import datetime
 from dateutil import parser as date_parser  # type: ignore
 from bs4 import BeautifulSoup, UnicodeDammit
 from html import escape, unescape
-import trafilatura
 import re
 import unicodedata
 import signal
@@ -768,6 +767,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 _INTERRUPTED = False
+
+# trafilatura pulls in a sizeable dependency tree (~50 MB RSS). Import it on
+# first use so the long-lived WSGI worker starts lean; it is only needed when
+# content extraction falls back to Trafilatura.
+_trafilatura_module = None
+
+
+def _get_trafilatura():
+    """Return the lazily imported ``trafilatura`` module."""
+    global _trafilatura_module
+    if _trafilatura_module is None:
+        import trafilatura as _trafilatura
+
+        _trafilatura_module = _trafilatura
+    return _trafilatura_module
+
 
 def _handle_sigint(signum, frame):
     """Record Ctrl+C and raise KeyboardInterrupt in the main thread promptly."""
@@ -11291,7 +11306,7 @@ class ContentProcessor:
         # trafilatura-only mode
         if extractor == "trafilatura":
             try:
-                content_html = trafilatura.extract(str(preprocessed_soup), output_format="html", include_images=True)
+                content_html = _get_trafilatura().extract(str(preprocessed_soup), output_format="html", include_images=True)
                 if content_html:
                     img_count = content_html.count("<img")
                     logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
@@ -11328,7 +11343,7 @@ class ContentProcessor:
 
         # Final Fallback: Trafilatura
         try:
-            content_html = trafilatura.extract(str(preprocessed_soup), output_format="html", include_images=True)
+            content_html = _get_trafilatura().extract(str(preprocessed_soup), output_format="html", include_images=True)
             if content_html:
                 img_count = content_html.count("<img")
                 logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
@@ -11844,6 +11859,107 @@ class OcrHandler:
         return block
 
     @staticmethod
+    def _any_engine_installed(engine_chain):
+        """Cheap availability probe that never imports the heavy OCR engines."""
+        import importlib.util
+
+        module_for_engine = {
+            "rapidocr": "rapidocr_onnxruntime",
+            "paddleocr": "paddleocr",
+            "tesseract": "pytesseract",
+        }
+        for engine_name in engine_chain:
+            module_name = module_for_engine.get(engine_name)
+            if not module_name:
+                continue
+            try:
+                if importlib.util.find_spec(module_name) is not None:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _ocr_worker_path():
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "surf_ocr_worker.py")
+
+    @staticmethod
+    def _run_ocr_batch_in_worker(candidates, args, config):
+        """Run OCR for prepared images in a short-lived child process.
+
+        ``candidates`` is a list of ``(img_tag, img_url, prepared_png_bytes)``.
+        Returns ``(results, error)`` with results aligned to the input order.
+        The engines (PaddleOCR/RapidOCR map hundreds of MB) are released when
+        the child exits, so a long-lived web worker never accumulates them.
+        """
+        import base64
+
+        engine_setting = OcrHandler._get_engine_setting(args, config)
+        lang = getattr(args, "ocr_lang", None) or config.get("OCR", "lang", fallback="chi_sim+eng")
+        try:
+            tesseract_cmd = config.get_path("OCR", "tesseract_cmd", fallback="").strip()
+        except Exception:
+            tesseract_cmd = ""
+
+        payload = {
+            "engine": engine_setting,
+            "lang": lang,
+            "tesseract_cmd": tesseract_cmd,
+            "images": [
+                {"url": img_url, "png": base64.b64encode(png).decode("ascii")}
+                for (_img, img_url, png) in candidates
+            ],
+        }
+        timeout = OcrHandler._get_int_config(config, "worker_timeout", 900)
+        try:
+            completed = subprocess.run(
+                [sys.executable, OcrHandler._ocr_worker_path()],
+                input=json.dumps(payload).encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout if timeout and timeout > 0 else None,
+            )
+        except Exception as e:
+            return [], f"could not run worker: {e}"
+        if completed.returncode != 0:
+            stderr_text = _decode_subprocess_output(completed.stderr) or ""
+            return [], f"worker exited {completed.returncode}: {stderr_text.strip()[-400:]}"
+        try:
+            data = json.loads(_decode_subprocess_output(completed.stdout) or "{}")
+        except Exception as e:
+            return [], f"invalid worker output: {e}"
+
+        results = []
+        for entry in data.get("results", []):
+            results.append((entry.get("text") or "", entry.get("engine")))
+        while len(results) < len(candidates):
+            results.append(("", None))
+        return results[: len(candidates)], data.get("error")
+
+    @staticmethod
+    def _run_ocr_batch_in_process(candidates, args, config):
+        """Fallback used only when the isolated worker cannot be started."""
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return [("", None) for _ in candidates]
+
+        runtime = OcrHandler._create_ocr_runtime(args, config)
+        if not runtime.get("available"):
+            return [("", None) for _ in candidates]
+
+        results = []
+        for (_img, img_url, png) in candidates:
+            try:
+                image = Image.open(io.BytesIO(png))
+                image.load()
+                results.append(OcrHandler._run_ocr_with_engines(runtime, image, img_url))
+            except Exception as e:
+                logger.debug("In-process OCR failed for %s: %s", img_url[:120], e)
+                results.append(("", None))
+        return results
+
+    @staticmethod
     def annotate_html_with_ocr(
         html_content,
         source_url,
@@ -11865,8 +11981,9 @@ class OcrHandler:
             logger.warning(f"OCR disabled: missing optional OCR dependencies: {e}")
             return html_content
 
-        runtime = OcrHandler._create_ocr_runtime(args, config)
-        if not runtime["available"]:
+        # Probe availability without importing the heavy engines; the actual
+        # OCR runs in a short-lived child process (see _run_ocr_batch_in_worker).
+        if not OcrHandler._any_engine_installed(OcrHandler._get_engine_chain(args, config)):
             logger.warning(
                 "OCR disabled: no usable OCR engine is available. Install rapidocr-onnxruntime, paddleocr, or configure local tesseract."
             )
@@ -11881,10 +11998,10 @@ class OcrHandler:
         soup = BeautifulSoup(html_content, "html.parser")
         root = soup.find("article") or soup.find("main") or soup.body or soup
         seen_urls = set()
-        processed = 0
+        candidates = []  # (img_tag, img_url, prepared PNG bytes)
 
         for img in root.find_all("img"):
-            if processed >= max_images:
+            if len(candidates) >= max_images:
                 break
             if img.find_next_sibling(class_="surf-ocr"):
                 continue
@@ -11900,7 +12017,7 @@ class OcrHandler:
             seen_urls.add(img_url)
 
             try:
-                logger.info("OCR downloading image %d/%d: %s", processed + 1, max_images, img_url[:120])
+                logger.info("OCR downloading image %d/%d: %s", len(candidates) + 1, max_images, img_url[:120])
                 image_bytes = OcrHandler._download_image(img_url, source_url, req_proxies)
                 image = Image.open(io.BytesIO(image_bytes))
                 image.load()
@@ -11909,23 +12026,31 @@ class OcrHandler:
                     logger.info("OCR skipping image (too small %dx%d): %s", width, height, img_url[:120])
                     continue
                 prepared_image = OcrHandler._prepare_image_for_ocr(image)
-                ocr_text, engine_used = OcrHandler._run_ocr_with_engines(runtime, prepared_image, img_url)
-                if len(ocr_text) < min_text_length:
-                    logger.info(
-                        "OCR produced too little text (%d chars) for image: %s",
-                        len(ocr_text),
-                        img_url[:120],
-                    )
-                    continue
-                logger.info(
-                    "OCR accepted text for image via %s: %s",
-                    engine_used,
-                    img_url[:120],
-                )
-                img.insert_after(OcrHandler._build_ocr_block(soup, ocr_text))
-                processed += 1
+                candidates.append((img, img_url, OcrHandler._image_to_png_bytes(prepared_image)))
             except Exception as e:
                 logger.warning("OCR failed for image %s: %s", img_url[:120], e)
+
+        if not candidates:
+            logger.warning("OCR ran but no downloadable images were found.")
+            return str(soup)
+
+        ocr_results, worker_error = OcrHandler._run_ocr_batch_in_worker(candidates, args, config)
+        if worker_error:
+            logger.warning("OCR worker unavailable (%s); falling back to in-process OCR.", worker_error)
+            ocr_results = OcrHandler._run_ocr_batch_in_process(candidates, args, config)
+
+        processed = 0
+        for (_img, img_url, _png), (ocr_text, engine_used) in zip(candidates, ocr_results):
+            if len(ocr_text) < min_text_length:
+                logger.info(
+                    "OCR produced too little text (%d chars) for image: %s",
+                    len(ocr_text),
+                    img_url[:120],
+                )
+                continue
+            logger.info("OCR accepted text for image via %s: %s", engine_used, img_url[:120])
+            _img.insert_after(OcrHandler._build_ocr_block(soup, ocr_text))
+            processed += 1
 
         if processed:
             logger.info(f"OCR annotated {processed} images")

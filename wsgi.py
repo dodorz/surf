@@ -1,7 +1,7 @@
 """WSGI entry point for production deployment behind nginx.
 
 Usage:
-    gunicorn wsgi:app
+    waitress-serve --listen=127.0.0.1:18473 wsgi:app
 """
 import os
 

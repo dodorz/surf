@@ -146,6 +146,10 @@ min_width = 240
 min_height = 120
 ; Minimum OCR text length to keep
 min_text_length = 8
+; OCR engines run in a short-lived child process so their memory (PaddleOCR
+; alone maps ~190 MB) is not retained by the web worker. Upper bound in seconds
+; for one OCR batch; set 0 to disable the timeout.
+worker_timeout = 900
 
 [publish]
 ; Default publish target
