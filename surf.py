@@ -9132,6 +9132,184 @@ class Fetcher:
         return ""
 
     @staticmethod
+    def _download_podcast_audio(
+        html_content,
+        config,
+        output_path=None,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+    ):
+        """Download the original audio enclosure from a podcast payload.
+
+        ``output_path`` is used as-is when supplied (this is also used by the
+        transcription pipeline).  Without it, a safe Podcast filename is
+        created below the configured ``[Output].audio_dir`` directory.
+        """
+        audio_url = Fetcher._extract_podcast_audio_url(html_content)
+        if not audio_url:
+            raise ValueError("Podcast audio download requires a public audio URL in the episode page")
+
+        payload = _extract_direct_markdown_payload(html_content) or {}
+        payload_soup = payload.get("soup")
+
+        def payload_meta(name):
+            if not payload_soup:
+                return ""
+            tag = payload_soup.find("meta", attrs={"name": name})
+            return (tag.get("content") or "").strip() if tag else ""
+
+        trial_only = payload_meta("surf-audio-trial-only").lower() in {"1", "true", "yes", "on"}
+        trial_url = payload_meta("surf-audio-trial-url")
+        expected_size_text = payload_meta("surf-audio-expected-size")
+        try:
+            expected_size = int(expected_size_text or 0)
+        except ValueError:
+            expected_size = 0
+
+        if payload.get("site_name") == "xiaoyuzhoufm" and trial_only:
+            if trial_url:
+                audio_url = trial_url
+            else:
+                raise ValueError(
+                    "This Xiaoyuzhou episode is paid and not owned by the current account; "
+                    "the page does not expose a playable preview. The enclosure URL is only a silent placeholder."
+                )
+        elif payload.get("site_name") == "xiaoyuzhoufm":
+            next_data_episode = Fetcher._xiaoyuzhoufm_next_data_episode(html_content)
+            if next_data_episode and bool(next_data_episode.get("isPrivateMedia")) and not bool(next_data_episode.get("isOwned")):
+                trial = next_data_episode.get("trial") if isinstance(next_data_episode.get("trial"), dict) else {}
+                next_trial_url = str(trial.get("segment") or "").strip()
+                if next_trial_url:
+                    audio_url = next_trial_url
+                    trial_only = True
+                else:
+                    raise ValueError(
+                        "This Xiaoyuzhou episode is paid and not owned by the current account; "
+                        "the page does not expose a playable preview. The enclosure URL is only a silent placeholder."
+                    )
+
+        if output_path == "-":
+            raise ValueError("Podcast audio cannot be written to stdout; provide a file path with -o/--output")
+
+        def config_value(key, fallback=""):
+            try:
+                return (config.get("Transcription", key, fallback=fallback) or "").strip()
+            except Exception:
+                return fallback
+
+        try:
+            max_audio_mb = int(config_value("max_audio_mb", "2048") or "2048")
+        except (TypeError, ValueError):
+            max_audio_mb = 2048
+        max_bytes = max(1, max_audio_mb) * 1024 * 1024
+        try:
+            audio_timeout = max(30, int(config_value("audio_timeout", "120") or "120"))
+        except (TypeError, ValueError):
+            audio_timeout = 120
+
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        response = None
+        try:
+            response = _requests_get_interruptibly(
+                audio_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
+                proxies=req_proxies,
+                timeout=(15, audio_timeout),
+                stream=True,
+            )
+        except requests.exceptions.RequestException as exc:
+            if not req_proxies:
+                raise
+            logger.warning(
+                "Podcast audio request through the configured proxy failed; retrying directly: %s",
+                exc,
+            )
+            response = _requests_get_interruptibly(
+                audio_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
+                proxies={"http": "", "https": ""},
+                timeout=(15, audio_timeout),
+                stream=True,
+            )
+
+        temporary_path = None
+        try:
+            response.raise_for_status()
+            content_length = int(response.headers.get("Content-Length") or 0)
+            if content_length > max_bytes:
+                raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
+            if expected_size and not trial_only and content_length and content_length < expected_size:
+                raise ValueError(
+                    f"Podcast audio download is incomplete ({content_length} bytes received, "
+                    f"{expected_size} expected)"
+                )
+
+            response_url = getattr(response, "url", None) or audio_url
+            url_suffix = os.path.splitext(urlparse(response_url).path)[1].lower()
+            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            type_suffixes = {
+                "audio/mpeg": ".mp3",
+                "audio/mp3": ".mp3",
+                "audio/mp4": ".m4a",
+                "audio/x-m4a": ".m4a",
+                "audio/aac": ".aac",
+                "audio/ogg": ".ogg",
+                "audio/opus": ".opus",
+                "audio/wav": ".wav",
+                "audio/x-wav": ".wav",
+            }
+            suffix = url_suffix if re.match(r"^\.[a-z0-9]{2,5}$", url_suffix) else type_suffixes.get(content_type, ".audio")
+
+            if output_path:
+                target_path = resolve_user_path(output_path)
+            else:
+                try:
+                    target_dir = config.get_path("Output", "audio_dir", fallback="audio")
+                except Exception:
+                    target_dir = "audio"
+                payload = _extract_direct_markdown_payload(html_content) or {}
+                title = payload.get("title") or "Podcast episode"
+                filename_title = f"[播客][试听] {title}" if trial_only else f"[播客] {title}"
+                safe_title = OutputHandler._safe_filename_title(filename_title, max_len=120)
+                target_path = os.path.join(resolve_user_path(target_dir), f"{safe_title}{suffix}")
+
+            parent = os.path.dirname(target_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            temporary_path = f"{target_path}.part"
+            downloaded = 0
+            with open(temporary_path, "wb") as output_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    _raise_if_interrupted()
+                    if not chunk:
+                        continue
+                    downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
+                    output_file.write(chunk)
+            os.replace(temporary_path, target_path)
+            temporary_path = None
+            if expected_size and not trial_only and downloaded < expected_size:
+                try:
+                    os.remove(target_path)
+                except OSError:
+                    pass
+                raise ValueError(
+                    f"Podcast audio download is incomplete ({downloaded} bytes received, "
+                    f"{expected_size} expected)"
+                )
+            logger.info("Podcast audio saved to %s", target_path)
+            return target_path
+        finally:
+            if response is not None:
+                response.close()
+            if temporary_path:
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
+
+    @staticmethod
     def _format_transcript_timestamp(milliseconds):
         total_seconds = max(0, int(milliseconds or 0) // 1000)
         hours, remainder = divmod(total_seconds, 3600)
@@ -9235,55 +9413,19 @@ class Fetcher:
                 f"Choose one of: {', '.join(sorted(allowed_timestamps_styles))}"
             )
         ffmpeg = config_value("ffmpeg_path", "ffmpeg") or "ffmpeg"
-        max_audio_mb = int(config_value("max_audio_mb", "2048") or "2048")
-        audio_timeout = max(30, int(config_value("audio_timeout", "120") or "120"))
-        audio_request_timeout = (15, audio_timeout)
 
-        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         with tempfile.TemporaryDirectory(prefix="surf-podcast-") as temp_dir:
             suffix = os.path.splitext(urlparse(audio_url).path)[1] or ".audio"
             input_path = os.path.join(temp_dir, f"input{suffix}")
             pcm_path = os.path.join(temp_dir, "audio.f32le")
             logger.info("Downloading podcast audio: %s", audio_url)
-            try:
-                response = _requests_get_interruptibly(
-                    audio_url,
-                    headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
-                    proxies=req_proxies,
-                    timeout=audio_request_timeout,
-                    stream=True,
-                )
-            except requests.exceptions.RequestException as exc:
-                if not req_proxies:
-                    raise
-                logger.warning(
-                    "Podcast audio request through the configured proxy failed; retrying directly: %s",
-                    exc,
-                )
-                response = _requests_get_interruptibly(
-                    audio_url,
-                    headers={"User-Agent": "Mozilla/5.0", "Accept": "audio/*"},
-                    proxies={"http": "", "https": ""},
-                    timeout=audio_request_timeout,
-                    stream=True,
-                )
-            try:
-                response.raise_for_status()
-                content_length = int(response.headers.get("Content-Length") or 0)
-                if content_length and content_length > max_audio_mb * 1024 * 1024:
-                    raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
-                downloaded = 0
-                with open(input_path, "wb") as output_file:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        _raise_if_interrupted()
-                        if not chunk:
-                            continue
-                        downloaded += len(chunk)
-                        if downloaded > max_audio_mb * 1024 * 1024:
-                            raise ValueError(f"Podcast audio exceeds the configured {max_audio_mb} MB limit")
-                        output_file.write(chunk)
-            finally:
-                response.close()
+            Fetcher._download_podcast_audio(
+                html_content,
+                config,
+                output_path=input_path,
+                proxy_mode_override=proxy_mode_override,
+                custom_proxy_override=custom_proxy_override,
+            )
 
             logger.info("Converting podcast audio to 16 kHz mono float32 PCM")
             try:
@@ -9422,6 +9564,11 @@ class Fetcher:
             lines.append(f"**Duration:** {page_info['duration']}")
         if page_info.get("audio_url"):
             lines.append(f"**Audio:** [Play episode]({page_info['audio_url']})")
+        if page_info.get("audio_trial_only"):
+            trial_url = page_info.get("audio_trial_url")
+            trial_duration = page_info.get("audio_trial_duration") or ""
+            if trial_url:
+                lines.append(f"**Audio Type:** Preview ({trial_duration}) [Play preview]({trial_url})")
         if description_markdown:
             lines.append("")
             lines.append("## Show Notes")
@@ -9438,6 +9585,9 @@ class Fetcher:
             "property:article:published_time": page_info.get("published"),
             "keywords": podcast_title,
             "surf-audio-url": page_info.get("audio_url"),
+            "surf-audio-trial-url": page_info.get("audio_trial_url"),
+            "surf-audio-trial-only": "true" if page_info.get("audio_trial_only") else "",
+            "surf-audio-expected-size": page_info.get("audio_expected_size"),
         }
         return _build_direct_markdown_payload(
             markdown_text="\n\n".join(lines).strip() + "\n",
@@ -9591,6 +9741,8 @@ class Fetcher:
         if episode:
             podcast = episode.get("podcast") if isinstance(episode.get("podcast"), dict) else {}
             enclosure = episode.get("enclosure") if isinstance(episode.get("enclosure"), dict) else {}
+            trial = episode.get("trial") if isinstance(episode.get("trial"), dict) else {}
+            media = episode.get("media") if isinstance(episode.get("media"), dict) else {}
             info["episode_id"] = str(episode.get("eid") or info["episode_id"]).strip().lower()
             info["podcast_id"] = str(podcast.get("pid") or episode.get("pid") or "").strip().lower()
             info["episode_title"] = str(episode.get("title") or "").strip()
@@ -9602,6 +9754,12 @@ class Fetcher:
             info["published"] = str(episode.get("pubDate") or "").strip()
             info["duration"] = Fetcher._xiaoyuzhoufm_format_duration(episode.get("duration"))
             info["audio_url"] = str(enclosure.get("url") or "").strip()
+            info["audio_is_private"] = bool(episode.get("isPrivateMedia"))
+            info["audio_is_owned"] = bool(episode.get("isOwned"))
+            info["audio_trial_url"] = str(trial.get("segment") or "").strip()
+            info["audio_trial_duration"] = Fetcher._xiaoyuzhoufm_format_duration(trial.get("to"))
+            info["audio_expected_size"] = int(media.get("size") or 0)
+            info["audio_trial_only"] = info["audio_is_private"] and not info["audio_is_owned"] and bool(info["audio_trial_url"])
 
         # Fall back to Open Graph metadata when __NEXT_DATA__ is unavailable.
         if html_content and not (info["episode_title"] and info["audio_url"] and info["podcast_title"]):
@@ -12126,6 +12284,42 @@ class OutputHandler:
             return html
 
     @staticmethod
+    def _get_podcast_audio_path(result_data, target_dir, custom_title=None):
+        """Return a filename for the original Podcast enclosure."""
+        title = custom_title or result_data.get("title", "Podcast episode")
+        metadata = result_data.get("metadata", {})
+        html_content = metadata.get("html_content", "")
+        source_url = metadata.get("source_url")
+        filename_title = OutputHandler._get_filename_title(
+            title, source_url=source_url, html_content=html_content
+        )
+        payload = _extract_direct_markdown_payload(html_content) or {}
+        payload_soup = payload.get("soup")
+        trial_tag = payload_soup.find("meta", attrs={"name": "surf-audio-trial-only"}) if payload_soup else None
+        if trial_tag and (trial_tag.get("content") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            filename_title = f"[播客][试听] {title}"
+        safe_title = OutputHandler._safe_filename_title(filename_title, max_len=100)
+        audio_url = Fetcher._extract_podcast_audio_url(html_content)
+        suffix = os.path.splitext(urlparse(audio_url).path)[1].lower() if audio_url else ""
+        if not re.match(r"^\.[a-z0-9]{2,5}$", suffix):
+            suffix = ".audio"
+        return os.path.join(resolve_user_path(target_dir), f"{safe_title}{suffix}")
+
+    @staticmethod
+    def _save_podcast_audio(result_data, config, output_path, proxy_mode_override=None, custom_proxy_override=None):
+        """Save the original Podcast enclosure represented by a Web result."""
+        html_content = (result_data.get("metadata") or {}).get("html_content", "")
+        if not html_content:
+            raise ValueError("Podcast audio metadata is missing from the result")
+        return Fetcher._download_podcast_audio(
+            html_content,
+            config,
+            output_path=output_path,
+            proxy_mode_override=proxy_mode_override,
+            custom_proxy_override=custom_proxy_override,
+        )
+
+    @staticmethod
     def _get_filename_title(title, source_url=None, html_content=None):
         """
         Select filename title based on source site rules.
@@ -14352,7 +14546,16 @@ Browser Backend:
             OutputHandler.save_html(title, cleaned_html, config, inline=html_inline)
 
     elif output_format == "audio":
-        if output_path:
+        if site_name in {"pocketcasts", "xiaoyuzhoufm"}:
+            saved_path = Fetcher._download_podcast_audio(
+                html_content,
+                config,
+                output_path=output_path,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+            print(saved_path)
+        elif output_path:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
         else:
             TTSHandler.run_tts(title, md_content, config, speak=args.speak)

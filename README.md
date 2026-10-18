@@ -9,7 +9,7 @@
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
 - **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), NCPSSD, Pocket Casts, and Xiaoyuzhou with reusable saved authentication support.
-- **Podcast Audio Transcription**: With `-w/--transcribe`, Pocket Casts and Xiaoyuzhou episodes can be downloaded and transcribed locally through the optional `transcribe-cpp` backend. Configure a GGUF model under `[Transcription].model_path`; transcripts are plain paragraphs by default and `[HH:MM:SS]` timestamps can be enabled via `--transcript-timestamps segment` or `[Transcription].timestamps`. The Web UI exposes the same option.
+- **Podcast Audio**: Pocket Casts and Xiaoyuzhou episodes can be saved as their original audio enclosure with `-a/--format audio` (the file keeps the source format such as `.m4a`). Use `-w/--transcribe` to additionally transcribe an episode locally through the optional `transcribe-cpp` backend.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
 - **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
 - **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st/episode/...` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL. If the input is copied share text instead of a bare URL (e.g. a Xiaohongshu share message), the first URL is extracted automatically.
@@ -52,7 +52,7 @@ You can paste a Xiaoyuzhou share link directly. Surf parses the embedded page da
 surf "https://www.xiaoyuzhoufm.com/episode/69018660740634ca4785c3b8" -r
 ```
 
-Output matches the Pocket Casts episode format: front matter title uses `Episode Title - Podcast Name`, the default filename adds the `[播客]` prefix, the author is written to front matter `author`, and Show Notes are emitted under `## Show Notes`. Local transcription with `-w/--transcribe` is supported as well.
+Output matches the Pocket Casts episode format: front matter title uses `Episode Title - Podcast Name`, the default filename adds the `[播客]` prefix, the author is written to front matter `author`, and Show Notes are emitted under `## Show Notes`. Use `-a/--format audio` to download the original enclosure (for example, the `.m4a` file) instead of generating TTS; `-o/--output` can choose the exact destination. Local transcription with `-w/--transcribe` is supported as well.
 
 ### Translation Mode
 
@@ -389,11 +389,13 @@ uv run surf.py "https://example.com" --html-inline
 
 ### Text-to-Speech (-a / -s)
 
-Save content as an MP3 audio file:
+For ordinary web pages, `-a/--format audio` still generates an MP3 with text-to-speech. For Pocket Casts and Xiaoyuzhou episode URLs, the same option downloads the original Podcast audio enclosure instead:
 
 ```bash
-uv run surf.py "https://example.com" -a
+uv run surf.py "https://www.xiaoyuzhoufm.com/episode/637761077105b234344c09dc" -a -o ./audio/episode.m4a
 ```
+
+The source extension and audio format are preserved when no explicit output path is supplied. Podcast audio downloads use `[Transcription].max_audio_mb` and `[Transcription].audio_timeout` limits.
 
 Read content aloud (requires local audio output):
 

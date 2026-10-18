@@ -74,6 +74,8 @@ Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取
 - Show Notes 放在 `## Show Notes` 小节下，不会完整复制到 front matter 的 `description`；`Podcast`、`Podcast ID` 和 `Episode ID` 标签不会被翻译。
 - 如果能取得剧集发布日期，则写入 front matter 的 `created`；只有输出实际发生翻译变化时才保留 `translator`。
 - 使用 `-w/--transcribe` 时，会下载 RSS 中的音频地址，转换为 16 kHz 单声道 float32 PCM，并通过本地 `transcribe-cpp` 转写（小宇宙剧集同样支持）。
+- 使用 `-a/--format audio` 访问 Pocket Casts 或小宇宙剧集时，会下载并保留原始音频格式（例如 `.m4a`）；`-o/--output` 指定精确路径，否则使用 `[Output].audio_dir`。普通网页仍保持该选项原有的 TTS 行为。
+- 小宇宙会将未购买剧集标记为付费内容。如果页面公开提供试听，Surf 会下载试听并在文件名中标记 `[试听]`；不会把短的占位 enclosure 当成完整剧集。完整音频需要拥有小宇宙剧集访问权限。
 - 可选后端通过 `uv sync --extra transcribe` 安装；`[Transcription].model_path` 必须指向 GGUF 模型，系统还需要安装 `ffmpeg`。
 - 转写结果以分段时间戳写入 `## Transcript` 小节。转写文本遵循与正文相同的语言模式（命令行/配置/默认值的 `trans` / `raw` / `both`）。Show Notes 与 Transcript 会分别做语言检测和翻译，避免中文说明导致英文转写被整篇跳过。第一版不会自动下载模型，也不启用说话人识别。
 - Web 界面只有在识别到 Pocket Casts 或小宇宙剧集 URL 后才显示 Podcast 转写复选框；勾选后执行与 `-w/--transcribe` 相同的本地转写。

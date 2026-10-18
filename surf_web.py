@@ -945,7 +945,7 @@ HTML_TEMPLATE = """
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="format-audio" name="format" value="audio">
-                                <label for="format-audio">Audio (.mp3)</label>
+                                <label for="format-audio">Audio (TTS / original Podcast)</label>
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="format-publish" name="format" value="publish">
@@ -2483,21 +2483,27 @@ def _run_web_save_job(job_id):
                 title, md_content, config, output_path=output_path
             )
         elif fileType == "audio":
-            md_content = resultData.get("markdown", "")
-            output_path = build_output_path(
-                title, "mp3", targetDir, source_url=source_url, html_content=html_content
-            )
-            if formData:
-                _apply_tts_overrides(
-                    config,
-                    formData.get("tts_voice"),
-                    formData.get("tts_rate"),
-                    formData.get("tts_volume"),
+            if resultData.get("source_site") in {"pocketcasts", "xiaoyuzhoufm"}:
+                output_path = OutputHandler._get_podcast_audio_path(
+                    resultData, targetDir, custom_title=customTitle or None
                 )
-            TTSHandler.run_tts(
-                title, md_content, config, speak=speak, save_path=output_path
-            )
-            save_path = output_path
+                save_path = OutputHandler._save_podcast_audio(resultData, config, output_path)
+            else:
+                md_content = resultData.get("markdown", "")
+                output_path = build_output_path(
+                    title, "mp3", targetDir, source_url=source_url, html_content=html_content
+                )
+                if formData:
+                    _apply_tts_overrides(
+                        config,
+                        formData.get("tts_voice"),
+                        formData.get("tts_rate"),
+                        formData.get("tts_volume"),
+                    )
+                TTSHandler.run_tts(
+                    title, md_content, config, speak=speak, save_path=output_path
+                )
+                save_path = output_path
         else:
             raise ValueError(f"Unsupported file type: {fileType}")
 
@@ -3160,6 +3166,13 @@ def save_file():
             return jsonify({"success": True, "savePath": pdf_path})
 
         elif fileType == "audio":
+            if resultData.get("source_site") in {"pocketcasts", "xiaoyuzhoufm"}:
+                output_path = OutputHandler._get_podcast_audio_path(
+                    resultData, targetDir, custom_title=customTitle or None
+                )
+                audio_path = OutputHandler._save_podcast_audio(resultData, config, output_path)
+                return jsonify({"success": True, "savePath": audio_path})
+
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
                 title, "mp3", targetDir, source_url=source_url, html_content=html_content

@@ -65,6 +65,102 @@ def test_xiaoyuzhoufm_duration_keeps_non_numeric_values():
     assert Fetcher._xiaoyuzhoufm_format_duration(0) == ""
 
 
+def test_xiaoyuzhoufm_audio_downloads_original_enclosure(monkeypatch, tmp_path):
+    class AudioResponse:
+        headers = {"Content-Type": "audio/x-m4a", "Content-Length": "10"}
+        url = "https://media.xyzcdn.net/example/episode.m4a"
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=0):
+            yield b"audio-data"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("surf._requests_get_interruptibly", lambda *args, **kwargs: AudioResponse())
+    monkeypatch.setattr(
+        "surf.Fetcher._get_proxies",
+        lambda config, proxy_mode_override=None, custom_proxy_override=None: (None, None),
+    )
+
+    output_path = tmp_path / "episode.m4a"
+    result = Fetcher._download_podcast_audio(
+        _build_payload_for_download(),
+        configparser.ConfigParser(),
+        output_path=str(output_path),
+    )
+
+    assert result == str(output_path)
+    assert output_path.read_bytes() == b"audio-data"
+    assert not (tmp_path / "episode.m4a.part").exists()
+
+
+def _build_payload_for_download():
+    return surf._build_direct_markdown_payload(
+        "**Audio:** [Play episode](https://media.xyzcdn.net/example/episode.m4a)",
+        "第 12 期播客",
+        EPISODE_URL,
+        "xiaoyuzhoufm",
+        extra_meta={"surf-audio-url": "https://media.xyzcdn.net/example/episode.m4a"},
+    )
+
+
+
+def test_xiaoyuzhoufm_paid_episode_uses_public_preview(monkeypatch, tmp_path):
+    episode = dict(NEXT_DATA_EPISODE)
+    episode.update(
+        {
+            "isPrivateMedia": True,
+            "isOwned": False,
+            "media": {"size": 74004504, "mimeType": "audio/mp4"},
+            "trial": {
+                "segment": "https://media.xyzcdn.net/example/preview.m4a",
+                "to": 180,
+            },
+        }
+    )
+    html = xiaoyuzhou_html(episode)
+    info = Fetcher._xiaoyuzhoufm_page_info(html, EPISODE_URL)
+
+    assert info["audio_trial_only"] is True
+    assert info["audio_trial_url"] == "https://media.xyzcdn.net/example/preview.m4a"
+    assert info["audio_trial_duration"] == "00:03:00"
+
+    class AudioResponse:
+        headers = {"Content-Type": "audio/x-m4a", "Content-Length": "10"}
+        url = "https://media.xyzcdn.net/example/preview.m4a"
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=0):
+            yield b"preview!!!"
+
+        def close(self):
+            return None
+
+    requested = []
+    monkeypatch.setattr(
+        "surf._requests_get_interruptibly",
+        lambda url, **kwargs: (requested.append(url) or AudioResponse()),
+    )
+    monkeypatch.setattr(
+        "surf.Fetcher._get_proxies",
+        lambda config, proxy_mode_override=None, custom_proxy_override=None: (None, None),
+    )
+    payload = Fetcher._build_podcast_episode_payload(
+        info, EPISODE_URL, EPISODE_URL, "xiaoyuzhoufm", "Xiaoyuzhou"
+    )
+    output_path = tmp_path / "preview.m4a"
+    Fetcher._download_podcast_audio(payload, configparser.ConfigParser(), output_path=str(output_path))
+
+    assert requested == ["https://media.xyzcdn.net/example/preview.m4a"]
+    assert output_path.read_bytes() == b"preview!!!"
+
+
+
 def test_xiaoyuzhoufm_handler_falls_back_to_og_meta(monkeypatch):
     html = """
     <html><head>
