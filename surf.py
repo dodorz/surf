@@ -2175,6 +2175,7 @@ class Fetcher:
                     len(decoded_text) < 1000
                     or "<noscript>" in decoded_text
                     or Fetcher._is_cloudflare_challenge(decoded_text)
+                    or Fetcher._is_antibot_challenge_page(decoded_text)
                     or is_error_status
                 )
                 if needs_browser:
@@ -2239,6 +2240,7 @@ class Fetcher:
                             len(decoded_text) < 1000
                             or "<noscript>" in decoded_text
                             or Fetcher._is_cloudflare_challenge(decoded_text)
+                            or Fetcher._is_antibot_challenge_page(decoded_text)
                             or is_error_status
                         )
                         if needs_browser:
@@ -2258,6 +2260,29 @@ class Fetcher:
             browser_result = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
         else:
             browser_result = Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+
+        # Post-browser check: an anti-bot interstitial (Cloudflare, PerimeterX,
+        # DataDome) sometimes survives the first navigation while its challenge
+        # sets clearance cookies.  A fresh navigation in the same browser
+        # session usually reaches the real page, so retry before falling back to
+        # requests/curl-cffi or reporting a paywall.
+        if browser_result and Fetcher._is_antibot_challenge_page(browser_result):
+            import time as _time
+            for _attempt in range(2):
+                _time.sleep(3 + _attempt * 2)
+                logger.warning(
+                    "Browser returned an anti-bot challenge page; retrying navigation (%d/2)...",
+                    _attempt + 1,
+                )
+                retry_result = Fetcher.fetch_with_browser(
+                    url, config, proxy_mode_override, custom_proxy_override
+                )
+                if retry_result and not Fetcher._is_antibot_challenge_page(retry_result):
+                    logger.info("Browser navigation retry reached the real page")
+                    browser_result = retry_result
+                    break
+                if retry_result:
+                    browser_result = retry_result
 
         # Post-browser check: if the browser also returned a bot challenge (e.g.
         # WordPress.com blocks headless Chromium), wait briefly and retry with a
@@ -5263,8 +5288,36 @@ class Fetcher:
             ).strip().lower()
         return "obscura"
 
+    # Hosts whose anti-bot interstitials (PerimeterX/DataDome) do not clear for
+    # a default headless Obscura profile but do clear in stealth mode.
+    _STEALTH_REQUIRED_HOST_SUFFIXES = (
+        "bloomberg.com",
+        "bloomberg.co.jp",
+        "bloomberglinea.com",
+    )
+
     @staticmethod
-    def _build_obscura_backend(config):
+    def _requires_obscura_stealth(url):
+        """Return True for hosts whose anti-bot interstitials need stealth mode.
+
+        Bloomberg serves a PerimeterX "Are you a robot?" page to a default
+        headless Obscura profile.  The same profile in stealth mode receives
+        the real article, so enable stealth for these hosts regardless of the
+        [Browser] obscura_stealth setting.
+        """
+        if not url:
+            return False
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except Exception:
+            return False
+        return any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in Fetcher._STEALTH_REQUIRED_HOST_SUFFIXES
+        )
+
+    @staticmethod
+    def _build_obscura_backend(config, force_stealth=False):
         """Construct an :class:`ObscuraBackend` from the ``[Browser]`` config section."""
         from obscura_backend import ObscuraBackend
 
@@ -5276,7 +5329,7 @@ class Fetcher:
         ).strip()
         stealth = str(
             config.get("Browser", "obscura_stealth", fallback="false")
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        ).strip().lower() in {"1", "true", "yes", "on"} or bool(force_stealth)
         try:
             startup_timeout = float(config.get("Browser", "obscura_startup_timeout", fallback="15"))
         except (TypeError, ValueError):
@@ -5321,7 +5374,8 @@ class Fetcher:
         if pw_proxy is _UNSET:
             _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         if backend == "obscura" and headless:
-            backend_obj = Fetcher._build_obscura_backend(config)
+            force_stealth = Fetcher._requires_obscura_stealth(url)
+            backend_obj = Fetcher._build_obscura_backend(config, force_stealth=force_stealth)
             logger.warning("Using experimental Obscura backend at %s", backend_obj.endpoint)
             with backend_obj.session(proxy=pw_proxy if use_proxy else None) as browser:
                 yield browser
@@ -5350,7 +5404,8 @@ class Fetcher:
     ):
         """Fetch a regular dynamic page through the experimental Obscura backend."""
         _, proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        backend_obj = Fetcher._build_obscura_backend(config)
+        force_stealth = Fetcher._requires_obscura_stealth(url)
+        backend_obj = Fetcher._build_obscura_backend(config, force_stealth=force_stealth)
         logger.warning("Using experimental Obscura backend at %s", backend_obj.endpoint)
         return backend_obj.fetch(url, proxy=proxy)
 
@@ -10239,12 +10294,13 @@ class Fetcher:
     _ANTI_BOT_CAPTCHA_DOMAINS = {
         "captcha-delivery.com", "geo.captcha-delivery.com",
         "challenges.cloudflare.com", "hcaptcha.com", "recaptcha.net",
-        "gstatic.com/recaptcha",
+        "gstatic.com/recaptcha", "captcha.px-cloud.net", "px-captcha",
     }
     _ANTI_BOT_TEXT_PATTERNS = [
         re.compile(r"please\s+enable\s+(js|javascript)\s+and\s+disable", re.IGNORECASE),
         re.compile(r"(verify|confirm)\s+(you|that\s+you)\s+(are|'?re)\s+(a\s+)?human", re.IGNORECASE),
         re.compile(r"checking\s+(if\s+the\s+site\s+connection\s+is\s+secure|your\s+browser)", re.IGNORECASE),
+        re.compile(r"unusual\s+activity\s+from\s+your\s+computer\s+network", re.IGNORECASE),
         # DataDome anti-bot inline config. NOTE: the literal string
         # `data-cfasync="false"` is a harmless, ubiquitous WordPress/Cloudflare
         # attribute and must NOT be treated as a challenge signal (it produces
@@ -10269,6 +10325,11 @@ class Fetcher:
         except Exception:
             title_text = ""
         if "just a moment" in title_text or "请稍候" in title_text:
+            return True
+        # PerimeterX (Bloomberg/WSJ/FT) "Are you a robot?" interstitial
+        if "are you a robot" in title_text:
+            return True
+        if "captcha.px-cloud.net" in lower or "px-captcha" in lower:
             return True
         return False
 
@@ -10305,6 +10366,14 @@ class Fetcher:
             return True
         # Cloudflare Turnstile "Just a moment..." / "请稍候..." challenge
         if "just a moment" in title_text or "请稍候" in title_text:
+            return True
+        # PerimeterX (Bloomberg/WSJ/FT) "Are you a robot?" interstitial
+        if "are you a robot" in title_text:
+            return True
+        if "captcha.px-cloud.net" in lower or "px-captcha" in lower:
+            return True
+        # Text-only interstitials that keep the normal site title
+        if "unusual activity from your computer network" in lower:
             return True
         return False
 
@@ -10542,6 +10611,28 @@ class Fetcher:
         "archive.vn",
         "archive.md",
     )
+    # Paths that look like archive shortcodes but are normal site pages.
+    _ARCHIVE_NON_SNAPSHOT_CODES = {
+        "rss", "alldomains", "latest", "search", "submit", "faq",
+        "about", "blog", "domain", "login", "signin", "signup",
+        "donate", "settings", "account", "timemap", "warc", "premium",
+        "index", "help", "terms", "privacy", "contact", "api",
+    }
+
+    @staticmethod
+    def _archive_snapshot_code(url):
+        """Return the snapshot shortcode in *url*, or None for ordinary pages."""
+        match = re.search(
+            r"archive\.(?:is|ph|today|fo|li|vn|md)/([0-9a-zA-Z]{3,20})/?$",
+            url or "",
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        code = match.group(1)
+        if code.lower() in Fetcher._ARCHIVE_NON_SNAPSHOT_CODES:
+            return None
+        return code
 
     @staticmethod
     def _has_captcha(page):
@@ -10677,7 +10768,7 @@ class Fetcher:
             current_url = page.url
 
             # Did archive.is redirect us directly to a snapshot?
-            if re.search(r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$", current_url, re.IGNORECASE):
+            if Fetcher._archive_snapshot_code(current_url):
                 if "run=1" not in current_url and "search=" not in current_url.lower():
                     snapshot_url = current_url
                     logger.info(f"{archive_domain}: redirected to snapshot: {snapshot_url}")
@@ -10697,15 +10788,7 @@ class Fetcher:
                     # Match snapshot shortcodes: /<alphanum>  (e.g. /WOQ7d)
                     # But NOT the listing /search/run URLs
                     abs_href = urljoin(archive_base_url, href)
-                    m = re.search(
-                        r"archive\.(is|ph|today|fo|li|vn|md)/([0-9a-zA-Z]{3,20})$",
-                        abs_href, re.IGNORECASE,
-                    )
-                    if m:
-                        code = m.group(2)
-                        # Exclude known non-snapshot paths
-                        if code.lower() in {"search", "submit", "faq", "about", "blog", "domain"}:
-                            continue
+                    if Fetcher._archive_snapshot_code(abs_href):
                         # Try to get text/label for this link
                         try:
                             link_text = all_links.nth(i).inner_text().strip()[:200]
@@ -10732,22 +10815,20 @@ class Fetcher:
                     while _time.monotonic() < deadline and not snapshot_url:
                         try:
                             current_url = page.url
-                            if re.search(
-                                r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,}$",
-                                current_url,
-                                re.IGNORECASE,
-                            ) and "run=1" not in current_url and "search=" not in current_url.lower():
+                            if Fetcher._archive_snapshot_code(current_url) and (
+                                "run=1" not in current_url
+                                and "search=" not in current_url.lower()
+                            ):
                                 snapshot_url = current_url
                                 break
                             all_links = page.locator("a[href]")
                             for i in range(min(all_links.count(), 200)):
                                 href = all_links.nth(i).get_attribute("href") or ""
                                 abs_href = urljoin(archive_base_url, href)
-                                if re.search(
-                                    r"archive\.(is|ph|today|fo|li|vn|md)/[0-9a-zA-Z]{3,20}$",
-                                    abs_href,
-                                    re.IGNORECASE,
-                                ) and "run=1" not in abs_href and "search=" not in abs_href.lower():
+                                if Fetcher._archive_snapshot_code(abs_href) and (
+                                    "run=1" not in abs_href
+                                    and "search=" not in abs_href.lower()
+                                ):
                                     snapshot_url = abs_href
                                     break
                         except Exception:

@@ -42,6 +42,12 @@ CLOUDFLARE_HTML = """<html><head><title>Just a moment...</title></head><body>\
 <script data-cfasync="false" src="https://challenges.cloudflare.com/c.js"></script>\
 </body></html>"""
 
+# Bloomberg's PerimeterX "Are you a robot?" interstitial (fresh headless profile).
+BLOOMBERG_PX_HTML = """<html><head><title>Bloomberg - Are you a robot?</title></head><body>\
+<p>We've detected unusual activity from your computer network.</p>\
+<script src="https://captcha.px-cloud.net/PX8FCGYgk4/captcha.js"></script>\
+<div id="px-captcha"></div></body></html>"""
+
 
 def main():
     # 1. Challenge page must be detected.
@@ -69,6 +75,21 @@ def main():
     assert Fetcher._is_cloudflare_challenge(CLOUDFLARE_HTML), \
         "FAIL: Cloudflare interstitial not detected by _is_cloudflare_challenge"
     print("PASS: Cloudflare interstitial still detected")
+
+    # 6. Bloomberg's PerimeterX interstitial must be detected so surf retries
+    #    the navigation instead of treating it as a paywall.
+    assert Fetcher._is_antibot_challenge_page(BLOOMBERG_PX_HTML), \
+        "FAIL: Bloomberg PerimeterX interstitial not detected"
+    assert Fetcher._is_cloudflare_challenge(BLOOMBERG_PX_HTML), \
+        "FAIL: Bloomberg PerimeterX interstitial not treated as a bot challenge"
+    print("PASS: Bloomberg PerimeterX interstitial detected")
+
+    # 7. Archive listing links such as /rss and /alldomains must not be treated
+    #    as snapshot shortcodes.
+    assert Fetcher._archive_snapshot_code("https://archive.ph/rss") is None
+    assert Fetcher._archive_snapshot_code("https://archive.ph/alldomains") is None
+    assert Fetcher._archive_snapshot_code("https://archive.ph/WOQ7d") == "WOQ7d"
+    print("PASS: archive snapshot shortcodes filtered")
 
     print("\nAll anti-bot challenge tests passed!")
 

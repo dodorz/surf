@@ -54,7 +54,11 @@ def _no_real_proxy(monkeypatch):
 
 def test_obscura_used_for_twitter_and_zhihu(monkeypatch):
     fake = _FakeObscura()
-    monkeypatch.setattr(Fetcher, "_build_obscura_backend", staticmethod(lambda config: fake))
+    monkeypatch.setattr(
+        Fetcher,
+        "_build_obscura_backend",
+        staticmethod(lambda config, **kwargs: fake),
+    )
 
     assert Fetcher._fetch_with_obscura_sync("https://x.com/u/status/1", _FakeConfig()) == "OBSCURA-OK"
     assert (
@@ -68,11 +72,42 @@ def test_obscura_used_for_twitter_and_zhihu(monkeypatch):
 
 def test_browser_session_routes_to_obscura(monkeypatch):
     fake = _FakeObscura()
-    monkeypatch.setattr(Fetcher, "_build_obscura_backend", staticmethod(lambda config: fake))
+    monkeypatch.setattr(
+        Fetcher,
+        "_build_obscura_backend",
+        staticmethod(lambda config, **kwargs: fake),
+    )
 
     with Fetcher._browser_session(_FakeConfig(), "https://example.com") as browser:
         assert browser == "BROWSER-SENTINEL"
     assert fake.session_proxy is None
+
+
+def test_bloomberg_requests_obscura_stealth(monkeypatch):
+    # Bloomberg's PerimeterX page clears only in stealth mode.  The site-specific
+    # override must reach Obscura regardless of [Browser] obscura_stealth.
+    captured = {}
+
+    def _build(config, force_stealth=False):
+        captured["force_stealth"] = force_stealth
+        return _FakeObscura()
+
+    monkeypatch.setattr(Fetcher, "_build_obscura_backend", staticmethod(_build))
+
+    Fetcher._fetch_with_obscura_sync(
+        "https://www.bloomberg.com/features/2026-grand-theft-auto-6-making-of/",
+        _FakeConfig(),
+    )
+    assert captured["force_stealth"] is True
+
+    Fetcher._fetch_with_obscura_sync("https://example.com/article", _FakeConfig())
+    assert captured["force_stealth"] is False
+
+
+def test_build_obscura_backend_force_stealth():
+    config = _FakeConfig()
+    assert Fetcher._build_obscura_backend(config).stealth is False
+    assert Fetcher._build_obscura_backend(config, force_stealth=True).stealth is True
 
 
 def test_browser_session_headed_uses_playwright(monkeypatch):
@@ -80,7 +115,7 @@ def test_browser_session_headed_uses_playwright(monkeypatch):
     monkeypatch.setattr(
         Fetcher,
         "_build_obscura_backend",
-        staticmethod(lambda config: (_ for _ in ()).throw(AssertionError("obscura used for headed"))),
+        staticmethod(lambda config, **kwargs: (_ for _ in ()).throw(AssertionError("obscura used for headed"))),
     )
     fake_sync_api = types.ModuleType("playwright.sync_api")
     launched = {}
