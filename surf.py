@@ -2062,6 +2062,30 @@ class Fetcher:
         return None, None
 
     @staticmethod
+    def _fetched_html_needs_browser(decoded_text, is_error_status=False):
+        """Heuristic: does this responses result need a JavaScript browser pass?
+
+        A bare ``<noscript>`` tag is ubiquitous on modern Next.js/SSR pages, so
+        it is only a signal when the visible text is genuinely sparse.
+        """
+        if is_error_status or len(decoded_text) < 1000:
+            return True
+        if Fetcher._is_cloudflare_challenge(decoded_text):
+            return True
+        if Fetcher._is_antibot_challenge_page(decoded_text):
+            return True
+        if "<noscript>" in decoded_text:
+            try:
+                visible_text = BeautifulSoup(decoded_text, "html.parser").get_text(
+                    " ", strip=True
+                )
+            except Exception:
+                visible_text = ""
+            if len(visible_text) < 1000:
+                return True
+        return False
+
+    @staticmethod
     def fetch(
         url,
         config,
@@ -2171,12 +2195,8 @@ class Fetcher:
                 # Check if likely dynamic (heuristic: very short content, explicit noscript,
                 # Cloudflare challenge, or error status like 403)
                 is_error_status = response.status_code >= 400
-                needs_browser = (
-                    len(decoded_text) < 1000
-                    or "<noscript>" in decoded_text
-                    or Fetcher._is_cloudflare_challenge(decoded_text)
-                    or Fetcher._is_antibot_challenge_page(decoded_text)
-                    or is_error_status
+                needs_browser = Fetcher._fetched_html_needs_browser(
+                    decoded_text, is_error_status
                 )
                 if needs_browser:
                     logger.info("Content seems short, requires JS, is a Cloudflare challenge, or returned HTTP %d.", response.status_code)
@@ -2205,9 +2225,9 @@ class Fetcher:
                             curl_text = Fetcher._decode_response_text(curl_resp)
                             curl_is_ok = (
                                 curl_resp.status_code < 400
-                                and len(curl_text) >= 1000
-                                and "<noscript>" not in curl_text
-                                and not Fetcher._is_cloudflare_challenge(curl_text)
+                                and not Fetcher._fetched_html_needs_browser(
+                                    curl_text, curl_resp.status_code >= 400
+                                )
                             )
                             if curl_is_ok:
                                 logger.warning("curl-cffi succeeded (status %d), avoiding browser fallback", curl_resp.status_code)
@@ -2236,12 +2256,8 @@ class Fetcher:
                         response = _requests_get_with_system_trust_interruptibly(url, headers=headers, timeout=10)
                         decoded_text = Fetcher._decode_response_text(response)
                         is_error_status = response.status_code >= 400
-                        needs_browser = (
-                            len(decoded_text) < 1000
-                            or "<noscript>" in decoded_text
-                            or Fetcher._is_cloudflare_challenge(decoded_text)
-                            or Fetcher._is_antibot_challenge_page(decoded_text)
-                            or is_error_status
+                        needs_browser = Fetcher._fetched_html_needs_browser(
+                            decoded_text, is_error_status
                         )
                         if needs_browser:
                             logger.info("Direct retry succeeded but content still seems short, requires JS, is a Cloudflare challenge, or returned HTTP %d. Switching to browser...", response.status_code)
