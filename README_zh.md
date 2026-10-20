@@ -17,7 +17,7 @@
 - **翻译元数据更准确**：只有正文或标题实际被翻译改写时，front matter 才写入 `translator`；单纯语言判断不计入翻译器记录。
 - **Front Matter 单行规范**：`title` 和 `description` 会被压成单行；换行、制表符、不换行空格和连续空白会合并，中文字符之间的空格会被移除，确保 YAML front matter 始终有效。
 - **可选 Wayback 快照**：CLI 使用 `--archive` 或在 Web 勾选对应选项后，会把最终写入 front matter `source` 的 URL 提交到 Internet Archive，并将快照地址写入 `archive` 字段；默认开关由 config.ini 的 `[Output] archive` 控制。
-- **付费墙 Archive 回退**：检测到付费墙文章时，Surf 会依次通过 `archive.is`、`archive.ph`、`archive.today`、`archive.fo`、`archive.li`、`archive.vn` 和 `archive.md` 查询快照。每个域名均会先按已配置代理尝试、再直连尝试，全部失败后会继续按此顺序打开可见浏览器窗口等待人工完成 CAPTCHA。
+- **付费墙 Archive 回退**：检测到付费墙文章时，Surf 会先用普通 HTTP 请求 archive.today 的 `/newest/<url>` 端点，直接 302 跳到最新快照；若 archive.today 没有快照，则通过 Wayback Machine 的 availability API 查询并下载无工具栏的 `id_` 文档。两者都失败后，再依次通过浏览器流程查询 `archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn` 和 `archive.md`，每个域名均先按已配置代理尝试、再直连尝试，全部失败后打开可见浏览器窗口等待人工完成 CAPTCHA。查询快照时会自动去掉跟踪参数和 fragment。若 Readability 从归档页只抓到短摘要，Surf 还会运行 Trafilatura 并保留正文更长的结果。
 - **Web 批量处理**：Web 输入框包含多条 URL 时会逐一抓取并在下方生成独立结果卡，每个网页都有自己的保存按钮；不含 URL 时仍将全文作为单条帖子保存，第一句作为默认标题。
 - **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”；长文（例如 X 的 `/article/...`）会保留文章自身标题。
 - **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。

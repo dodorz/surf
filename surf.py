@@ -10603,9 +10603,11 @@ class Fetcher:
     # archive.is has several interchangeable domains. They do not always
     # have the same DNS, proxy, or browser reachability, so try them in order.
     _ARCHIVE_DOMAINS = (
-        "archive.is",
+        # archive.is often times out from some networks; archive.ph exposes the
+        # same snapshots and its /newest/ endpoint is the most reliable entry.
         "archive.ph",
         "archive.today",
+        "archive.is",
         "archive.fo",
         "archive.li",
         "archive.vn",
@@ -10633,6 +10635,48 @@ class Fetcher:
         if code.lower() in Fetcher._ARCHIVE_NON_SNAPSHOT_CODES:
             return None
         return code
+
+    @staticmethod
+    def _is_archive_snapshot_url(url):
+        """Return True for both shortcode and timestamp/original snapshot URLs."""
+        if not url:
+            return False
+        if Fetcher._archive_snapshot_code(url):
+            return True
+        return bool(
+            re.search(
+                r"archive\.(?:is|ph|today|fo|li|vn|md)/[0-9]{8,14}/https?://",
+                url,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _archive_lookup_variants(url):
+        """Return archive lookup URL variants (tracking params stripped, slash toggled)."""
+        variants = []
+
+        def _add(candidate):
+            if candidate and candidate not in variants:
+                variants.append(candidate)
+
+        _add(url)
+        try:
+            parsed = urlparse(url)
+            no_fragment = urlunparse(parsed._replace(fragment=""))
+            _add(no_fragment)
+            _add(OutputHandler._canonicalize_generic_source_url(no_fragment))
+            bare = parsed._replace(query="", fragment="")
+            _add(urlunparse(bare))
+            path = bare.path or ""
+            last_segment = path.rstrip("/").rsplit("/", 1)[-1]
+            if path.endswith("/") and path != "/":
+                _add(urlunparse(bare._replace(path=path.rstrip("/"))))
+            elif path and not path.endswith("/") and "." not in last_segment:
+                _add(urlunparse(bare._replace(path=path + "/")))
+        except Exception:
+            pass
+        return variants
 
     @staticmethod
     def _has_captcha(page):
@@ -10690,6 +10734,173 @@ class Fetcher:
         return False
 
     @staticmethod
+    def _fetch_archive_newest_via_requests(url, archive_domains, proxies=None):
+        """Fetch the latest snapshot through archive.today's ``/newest/`` redirect.
+
+        Listing pages (``/?run=1&url=...``) are JavaScript-heavy and frequently
+        time out, especially for NYT/Atlantic articles.  ``/newest/<url>``
+        redirects straight to the latest capture and works over plain HTTP, so
+        try it first and reserve the browser workflow for CAPTCHA/JS cases.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        # Shared links often carry tracking parameters that archive.today does
+        # not index.  Try the URL as-is first, then canonical variants.
+        variants = Fetcher._archive_lookup_variants(url)
+        # archive.ph/archive.today are the stable hosts for the /newest/
+        # endpoint.  Leave the flaky aliases to the browser workflow below so a
+        # missing snapshot cannot stall for minutes on read timeouts.
+        preferred = ("archive.ph", "archive.today")
+        fast_domains = [d for d in archive_domains if d in preferred]
+        if not fast_domains:
+            fast_domains = list(archive_domains)
+
+        def _try_domain(candidate_url, archive_domain):
+            newest_url = f"https://{archive_domain}/newest/{quote(candidate_url, safe='')}"
+            logger.info(f"{archive_domain}: trying direct newest snapshot: {newest_url}")
+            try:
+                response = _requests_get_with_system_trust_interruptibly(
+                    newest_url,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=(5, 15),
+                )
+            except Exception as exc:
+                logger.info(f"{archive_domain}: newest snapshot request failed: {exc}")
+                return None
+
+            final_url = response.url or ""
+            if response.status_code != 200 or "/newest/" in final_url:
+                logger.info(
+                    f"{archive_domain}: no snapshot via /newest (HTTP {response.status_code})"
+                )
+                return None
+            if not Fetcher._is_archive_snapshot_url(final_url):
+                logger.info(f"{archive_domain}: /newest did not redirect to a snapshot")
+                return None
+
+            html_content = Fetcher._decode_response_text(response)
+            if not html_content or len(html_content) < 5000:
+                logger.info(f"{archive_domain}: /newest snapshot is too small")
+                return None
+            if Fetcher._is_antibot_challenge_page(html_content):
+                logger.info(f"{archive_domain}: /newest returned an archive challenge page")
+                return None
+
+            text_length = len(
+                BeautifulSoup(html_content, "html.parser").get_text(" ", strip=True)
+            )
+            if text_length < 1200:
+                logger.info(
+                    f"{archive_domain}: /newest snapshot has too little text ({text_length} chars)"
+                )
+                return None
+
+            logger.info(
+                f"{archive_domain}: direct newest snapshot fetched: {final_url} "
+                f"({len(html_content)} bytes, {text_length} text chars)"
+            )
+            return html_content, final_url
+
+        for candidate_url in variants:
+            for archive_domain in fast_domains:
+                result = _try_domain(candidate_url, archive_domain)
+                if result:
+                    return result
+
+        return None, None
+
+    @staticmethod
+    def _fetch_wayback_snapshot_via_requests(url, proxies=None):
+        """Fetch a readable Wayback Machine capture through the availability API.
+
+        Used as a secondary source when archive.today has no capture.  The
+        ``id_`` modifier returns the archived document without the Wayback
+        toolbar, which makes Readability/Trafilatura extraction much cleaner.
+        Returns ``(html_content, snapshot_url)`` or ``(None, None)``.
+        """
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        for candidate_url in Fetcher._archive_lookup_variants(url):
+            try:
+                availability = _requests_get_with_system_trust_interruptibly(
+                    "https://archive.org/wayback/available",
+                    params={"url": candidate_url},
+                    headers={"Accept": "application/json", "User-Agent": headers["User-Agent"]},
+                    proxies=proxies,
+                    timeout=(5, 15),
+                )
+                availability.raise_for_status()
+                closest = ((availability.json() or {}).get("archived_snapshots") or {}).get(
+                    "closest"
+                ) or {}
+            except Exception as exc:
+                logger.info(f"wayback: availability lookup failed: {exc}")
+                continue
+
+            if not closest.get("available") or str(closest.get("status")) != "200":
+                logger.info(
+                    "wayback: no usable snapshot "
+                    f"(status={closest.get('status')}, url={candidate_url})"
+                )
+                continue
+
+            snapshot_url = closest.get("url") or ""
+            if not snapshot_url:
+                continue
+            if snapshot_url.startswith("http://web.archive.org/"):
+                snapshot_url = "https://" + snapshot_url[len("http://"):]
+            raw_url = re.sub(r"/web/([^/]+)/", r"/web/\1id_/", snapshot_url, count=1)
+            logger.info(f"wayback: trying archived document: {raw_url}")
+            try:
+                response = _requests_get_with_system_trust_interruptibly(
+                    raw_url,
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=(5, 30),
+                )
+            except Exception as exc:
+                logger.info(f"wayback: snapshot request failed: {exc}")
+                continue
+            if response.status_code != 200:
+                logger.info(f"wayback: snapshot returned HTTP {response.status_code}")
+                continue
+
+            html_content = Fetcher._decode_response_text(response)
+            if not html_content or len(html_content) < 5000:
+                logger.info("wayback: snapshot is too small")
+                continue
+            if Fetcher._is_antibot_challenge_page(html_content):
+                logger.info("wayback: snapshot is an anti-bot challenge page")
+                continue
+            text_length = len(
+                BeautifulSoup(html_content, "html.parser").get_text(" ", strip=True)
+            )
+            if text_length < 1200:
+                logger.info(f"wayback: snapshot has too little text ({text_length} chars)")
+                continue
+
+            logger.info(
+                f"wayback: snapshot fetched: {snapshot_url} "
+                f"({len(html_content)} bytes, {text_length} text chars)"
+            )
+            return html_content, snapshot_url
+
+        return None, None
+
+    @staticmethod
     def _fetch_archiveis_snapshot(
         url, config, proxy_mode_override=None, custom_proxy_override=None, archive_domains=None
     ):
@@ -10703,16 +10914,36 @@ class Fetcher:
         picks the latest snapshot from the listing page, and returns
         ``(html_content, snapshot_url)`` or ``(None, None)``.
         """
+        archive_domains = tuple(archive_domains or Fetcher._ARCHIVE_DOMAINS)
+        logger.info(f"Trying archive snapshot domains for: {url}")
+
+        req_proxies, pw_proxy = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+
+        # Fast path: /newest/<url> redirects directly to the latest capture and
+        # works without JavaScript. This is substantially faster and more
+        # reliable than scraping the listing page for NYT/Atlantic archives.
+        newest_html, newest_url = Fetcher._fetch_archive_newest_via_requests(
+            url, archive_domains, req_proxies
+        )
+        if newest_html:
+            return newest_html, newest_url
+
+        # Secondary source: the Wayback Machine often has captures that
+        # archive.today lacks (and vice versa).
+        wayback_html, wayback_url = Fetcher._fetch_wayback_snapshot_via_requests(
+            url, req_proxies
+        )
+        if wayback_html:
+            return wayback_html, wayback_url
+
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         except ImportError:
             logger.warning("Playwright is not installed; cannot fetch from archive domains")
             return None, None
 
-        archive_domains = tuple(archive_domains or Fetcher._ARCHIVE_DOMAINS)
-        logger.info(f"Trying archive snapshot domains for: {url}")
-
-        _, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
         browser_args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
@@ -11414,6 +11645,35 @@ class ContentProcessor:
             # Debug: log first 200 chars of rescued HTML
             if rescued_html:
                 logger.info(f"Rescued HTML preview: {rescued_html[:200]}")
+
+            # Readability can lock onto a small teaser on archived/paywalled
+            # pages (e.g. NYT snapshots on archive.today).  When the rescued
+            # result is short, compare it with Trafilatura and keep the longer
+            # article body.
+            if extractor == "auto":
+                rescued_text = BeautifulSoup(rescued_html, "html.parser").get_text(
+                    " ", strip=True
+                )
+                if len(rescued_text) < 5000:
+                    try:
+                        content_html = _get_trafilatura().extract(
+                            str(preprocessed_soup),
+                            output_format="html",
+                            include_images=True,
+                        )
+                        if content_html:
+                            trafilatura_text = BeautifulSoup(
+                                content_html, "html.parser"
+                            ).get_text(" ", strip=True)
+                            if len(trafilatura_text) > len(rescued_text) * 1.25:
+                                logger.info(
+                                    "Trafilatura produced more content than Readability "
+                                    f"({len(trafilatura_text)} vs {len(rescued_text)} chars); "
+                                    "using Trafilatura result"
+                                )
+                                return title, content_html
+                    except Exception as exc:
+                        logger.debug(f"Trafilatura comparison failed: {exc}")
 
             return title, rescued_html
         except Exception as e:
