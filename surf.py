@@ -12980,6 +12980,29 @@ class OutputHandler:
         return metadata
 
     @staticmethod
+    def _normalize_frontmatter_scalar(value):
+        """Flatten a front-matter value into a single clean line.
+
+        HTML titles, meta descriptions, and LLM translations can contain
+        newlines, tabs, non-breaking spaces, or runs of whitespace.  YAML would
+        treat those as broken multi-line scalars, so collapse them to single
+        spaces and trim the result.  Values that become empty are dropped by
+        :meth:`_generate_yaml_frontmatter`.
+        """
+        if value is None:
+            return ""
+        text = str(value).replace("\u00a0", " ")
+        text = text.replace("\u200b", "").replace("\ufeff", "")
+        text = re.sub(r"\s+", " ", text).strip()
+        # Chinese/Japanese text does not use spaces between characters, so drop
+        # the space introduced when a line break fell between two CJK glyphs.
+        cjk = (
+            r"\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff"
+            r"\uf900-\ufaff\uff00-\uffef"
+        )
+        return re.sub(rf"(?<=[{cjk}]) (?=[{cjk}])", "", text)
+
+    @staticmethod
     def _generate_yaml_frontmatter(metadata):
         """
         生成YAML front matter字符串。
@@ -12992,11 +13015,13 @@ class OutputHandler:
         """
         lines = ["---"]
 
-        if metadata.get("title"):
-            lines.append(f"title: {metadata['title']}")
+        title_value = OutputHandler._normalize_frontmatter_scalar(metadata.get("title"))
+        if title_value:
+            lines.append(f"title: {title_value}")
 
-        if metadata.get("description"):
-            lines.append(f"description: {metadata['description']}")
+        description_value = OutputHandler._normalize_frontmatter_scalar(metadata.get("description"))
+        if description_value:
+            lines.append(f"description: {description_value}")
 
         if metadata.get("author"):
             lines.append(f"author: {metadata['author']}")

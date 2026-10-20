@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import types
@@ -170,7 +171,7 @@ def test_markdown_front_matter_includes_meta_description(tmp_path):
     )
 
     text = Path(saved).read_text(encoding="utf-8")
-    assert 'description: "Example summary"' in text
+    assert 'description: Example summary' in text
 
 
 def test_markdown_front_matter_uses_iso_datetime_format_for_created_only(tmp_path):
@@ -190,7 +191,13 @@ def test_markdown_front_matter_uses_iso_datetime_format_for_created_only(tmp_pat
     )
 
     text = Path(saved).read_text(encoding="utf-8")
-    assert "created: 2024-01-02T" in text
+    expected_created = (
+        datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        .astimezone()
+        .replace(tzinfo=None)
+        .isoformat(timespec="seconds")
+    )
+    assert f"created: {expected_created}" in text
     updated_line = text.split("updated: ", 1)[1].splitlines()[0]
     assert updated_line.count("-") == 2
     assert "T" not in updated_line

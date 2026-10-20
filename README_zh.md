@@ -15,6 +15,7 @@
 - **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。若输入不是裸 URL 而是包含 URL 的分享文本（如小红书分享消息），会自动提取其中的第一个 URL。
 - **GitHub Markdown 来源保留**：GitHub 仓库页和不带分支的 Markdown 文件 URL 可以从实际 README/blob 文件抓取内容，但 front matter 的 `source` 会保留用户输入的页面 URL。
 - **翻译元数据更准确**：只有正文或标题实际被翻译改写时，front matter 才写入 `translator`；单纯语言判断不计入翻译器记录。
+- **Front Matter 单行规范**：`title` 和 `description` 会被压成单行；换行、制表符、不换行空格和连续空白会合并，中文字符之间的空格会被移除，确保 YAML front matter 始终有效。
 - **可选 Wayback 快照**：CLI 使用 `--archive` 或在 Web 勾选对应选项后，会把最终写入 front matter `source` 的 URL 提交到 Internet Archive，并将快照地址写入 `archive` 字段；默认开关由 config.ini 的 `[Output] archive` 控制。
 - **付费墙 Archive 回退**：检测到付费墙文章时，Surf 会依次通过 `archive.is`、`archive.ph`、`archive.today`、`archive.fo`、`archive.li`、`archive.vn` 和 `archive.md` 查询快照。每个域名均会先按已配置代理尝试、再直连尝试，全部失败后会继续按此顺序打开可见浏览器窗口等待人工完成 CAPTCHA。
 - **Web 批量处理**：Web 输入框包含多条 URL 时会逐一抓取并在下方生成独立结果卡，每个网页都有自己的保存按钮；不含 URL 时仍将全文作为单条帖子保存，第一句作为默认标题。
