@@ -75,5 +75,80 @@ def test_yaml_frontmatter_removes_spaces_between_cjk_characters():
         }
     )
 
-    assert "title: 为了制作《侠盗猎车手6》，工作室首先必须重建自己。" in frontmatter
+    assert "title: 为了制作《侠盗猎车手6》，工作室首先必须重建自己" in frontmatter
     assert "description: 第一行第二行，第三行" in frontmatter
+
+
+def test_yaml_frontmatter_title_drops_trailing_period():
+    frontmatter = surf.OutputHandler._generate_yaml_frontmatter(
+        {
+            "title": "Example Title.",
+            "description": "Example description.",
+            "created": None,
+            "updated": None,
+            "tags": [],
+            "source": None,
+            "archive": None,
+            "translator": None,
+        }
+    )
+
+    assert "title: Example Title" in frontmatter
+    # The description keeps its own sentence-ending period.
+    assert "description: Example description." in frontmatter
+
+
+def test_yaml_frontmatter_title_keeps_ellipsis():
+    frontmatter = surf.OutputHandler._generate_yaml_frontmatter(
+        {
+            "title": "Wait for it...",
+            "description": None,
+            "created": None,
+            "updated": None,
+            "tags": [],
+            "source": None,
+            "archive": None,
+            "translator": None,
+        }
+    )
+
+    assert "title: Wait for it..." in frontmatter
+
+
+def test_yaml_frontmatter_drops_github_contribute_boilerplate():
+    boilerplate = "Contribute to owner/repo development by creating an account on GitHub."
+    frontmatter = surf.OutputHandler._generate_yaml_frontmatter(
+        {
+            "title": f"owner/repo: A short summary. {boilerplate}",
+            "description": f"A short summary. {boilerplate}",
+            "created": None,
+            "updated": None,
+            "tags": [],
+            "source": None,
+            "archive": None,
+            "translator": None,
+        }
+    )
+
+    assert "GitHub. Contribute" not in frontmatter
+    assert "Contribute to" not in frontmatter
+    assert "title: owner/repo: A short summary" in frontmatter
+    assert "description: A short summary." in frontmatter
+
+
+def test_yaml_frontmatter_drops_github_contribute_only_description():
+    frontmatter = surf.OutputHandler._generate_yaml_frontmatter(
+        {
+            "title": "owner/repo",
+            "description": "Contribute to owner/repo development by creating an account on GitHub.",
+            "created": None,
+            "updated": None,
+            "tags": [],
+            "source": None,
+            "archive": None,
+            "translator": None,
+        }
+    )
+
+    assert "description:" not in frontmatter
+    assert "title: owner/repo" in frontmatter

@@ -13255,6 +13255,33 @@ class OutputHandler:
 
         return metadata
 
+    # GitHub exposes this sentence in both <title> and <meta name="description">
+    # on repository pages; it describes GitHub itself, not the fetched page.
+    _GITHUB_CONTRIBUTE_RE = re.compile(
+        r"Contribute to\s+.*?\s+development by creating an account on GitHub\.?",
+        re.IGNORECASE,
+    )
+    # Only a single trailing full stop is removed, so ellipses survive.
+    _TRAILING_PERIOD_RE = re.compile(r"(?<![.\u3002\uff61\uff0e])\s*[.\u3002\uff61\uff0e]$")
+
+    @staticmethod
+    def _strip_github_contribute_boilerplate(text):
+        """Remove GitHub's auto-generated "Contribute to ... on GitHub" blurb."""
+        if not text:
+            return ""
+        cleaned, removed = OutputHandler._GITHUB_CONTRIBUTE_RE.subn(" ", text)
+        if removed:
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            # Drop separators left dangling by the removal, e.g. "Repo - ".
+            cleaned = re.sub(r"[\s\-\u2013\u2014|:,;]+$", "", cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def _strip_trailing_period(text):
+        """Drop a trailing sentence-ending period from a front-matter title."""
+        stripped = OutputHandler._TRAILING_PERIOD_RE.sub("", text or "")
+        return stripped if stripped.strip() else (text or "")
+
     @staticmethod
     def _normalize_frontmatter_scalar(value):
         """Flatten a front-matter value into a single clean line.
@@ -13292,10 +13319,13 @@ class OutputHandler:
         lines = ["---"]
 
         title_value = OutputHandler._normalize_frontmatter_scalar(metadata.get("title"))
+        title_value = OutputHandler._strip_github_contribute_boilerplate(title_value)
+        title_value = OutputHandler._strip_trailing_period(title_value)
         if title_value:
             lines.append(f"title: {title_value}")
 
         description_value = OutputHandler._normalize_frontmatter_scalar(metadata.get("description"))
+        description_value = OutputHandler._strip_github_contribute_boilerplate(description_value)
         if description_value:
             lines.append(f"description: {description_value}")
 
