@@ -647,6 +647,12 @@ def _process_fetched_content(
     if social_title:
         title = social_title
 
+    # Strip GitHub boilerplate before translation so the LLM never sees (and
+    # never translates) it; a translated copy would not match the cleanup
+    # pattern applied to the final front matter.
+    title = OutputHandler._strip_github_contribute_boilerplate(title)
+    title = OutputHandler._strip_trailing_period(title)
+
     source_site = None
     if direct_markdown_payload:
         source_site = (direct_markdown_payload.get("site_name") or "").strip().lower()
@@ -12484,6 +12490,12 @@ class OutputHandler:
         description_value = description_tag.get("content") or description_tag.get("value")
         if not description_value:
             return None
+        # Strip GitHub's "Contribute to ... on GitHub" blurb here so it is gone
+        # before translation (a translated copy would not match the front
+        # matter cleanup pattern).
+        description_value = OutputHandler._strip_github_contribute_boilerplate(description_value)
+        if not description_value:
+            return None
         return OutputHandler.normalize_markdown_encoding(description_value.strip())
 
     @staticmethod
@@ -13269,12 +13281,16 @@ class OutputHandler:
         """Remove GitHub's auto-generated "Contribute to ... on GitHub" blurb."""
         if not text:
             return ""
-        cleaned, removed = OutputHandler._GITHUB_CONTRIBUTE_RE.subn(" ", text)
+        # Match against a whitespace-collapsed copy so multi-line descriptions
+        # still match; keep the original text untouched when nothing matches.
+        collapsed = re.sub(r"\s+", " ", text)
+        cleaned, removed = OutputHandler._GITHUB_CONTRIBUTE_RE.subn(" ", collapsed)
         if removed:
             cleaned = re.sub(r"\s+", " ", cleaned).strip()
             # Drop separators left dangling by the removal, e.g. "Repo - ".
             cleaned = re.sub(r"[\s\-\u2013\u2014|:,;]+$", "", cleaned).strip()
-        return cleaned
+            return cleaned
+        return text
 
     @staticmethod
     def _strip_trailing_period(text):

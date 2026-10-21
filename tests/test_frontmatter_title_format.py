@@ -152,3 +152,54 @@ def test_yaml_frontmatter_drops_github_contribute_only_description():
 
     assert "description:" not in frontmatter
     assert "title: owner/repo" in frontmatter
+
+
+GITHUB_BOILERPLATE = "Contribute to owner/repo development by creating an account on GitHub."
+
+
+def test_extract_html_meta_description_strips_github_boilerplate():
+    html = (
+        '<html><head><meta name="description" '
+        f'content="Fast tool. {GITHUB_BOILERPLATE}">'
+        "</head><body>x</body></html>"
+    )
+
+    assert surf.OutputHandler._extract_html_meta_description(html) == "Fast tool."
+
+
+def test_github_boilerplate_is_stripped_before_translation(monkeypatch):
+    calls = []
+
+    def fake_translate(text, title=None, **kwargs):
+        calls.append((text, title))
+        # Return changed content so the description translation path also runs.
+        return f"{text} [translated]", title
+
+    monkeypatch.setattr(surf.ContentProcessor, "translate_if_needed", fake_translate)
+
+    html = (
+        "<html><head>"
+        f"<title>owner/repo: Fast tool. {GITHUB_BOILERPLATE}</title>"
+        f'<meta name="description" content="Fast tool. {GITHUB_BOILERPLATE}">'
+        "</head><body><article><p>Body text.</p></article></body></html>"
+    )
+
+    class Config:
+        def get(self, section, key, fallback=None):
+            return fallback
+
+    processed = surf._process_fetched_content(
+        html,
+        "https://github.com/owner/repo",
+        config=Config(),
+        site_name="github",
+        site_config={},
+    )
+
+    assert calls, "translation should have been called"
+    assert all("Contribute to" not in (text or "") for text, _ in calls)
+    assert all("Contribute to" not in (title or "") for _, title in calls)
+    assert processed["original_title"] == "owner/repo: Fast tool"
+    assert processed["original_description"] == "Fast tool."
+    assert "Contribute to" not in processed["translated_title"]
+    assert "Contribute to" not in (processed["translated_description"] or "")
