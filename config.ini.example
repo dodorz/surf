@@ -25,6 +25,19 @@ html_inline = false
 ; CLI -e/--extractor / -R / -T / -U and the Web UI extractor option override this per run.
 extractor = auto
 
+[Search]
+; Keywords -> search engine -> interactive pick -> fetch/convert/save (CLI -S/--search).
+; Engine: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso), duckduckgo, bing, searxng, metaso
+engine = auto
+; Number of search results to retrieve per run (1-20)
+limit = 5
+; Interactive picker size when --search-preview is not given
+preview = 5
+; SearXNG instance base URL; the JSON API must be enabled on that instance
+searxng_url =
+; Metaso API key from https://metaso.cn (open API)
+metaso_api_key =
+
 [LLM]
 ; Default LLM provider name
 provider = LLM1

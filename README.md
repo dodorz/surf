@@ -8,6 +8,7 @@
 
 - **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
 - **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
+- **Keyword Search**: `-S/--search` treats the positional input as search keywords instead of a URL. Surf queries a search engine (`auto` tries DuckDuckGo, then Bing, then a configured SearXNG instance or Metaso; `duckduckgo`/`bing`/`searxng`/`metaso` force one), prints a numbered "title + URL" picker for the first `--search-preview` results, and runs the selected URLs through the normal fetch → convert → translate → save pipeline. `--search-top N` skips the picker for the first N results, `--feel-lucky` takes only the first result, and `--search-merge` writes all selected results as one document. Every file gets a mandatory filename prefix in brackets (`[<prefix>]<title>`): it defaults to the search keywords (truncated to 40 characters) and can be overridden with `--search-prefix`; no search subdirectory is created, and the front matter records `search_query`. Tracking parameters (`utm_*`, `fbclid`, `gclid`, ...) are stripped before fetching and from front matter `source`.
 - **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), NCPSSD, Pocket Casts, and Xiaoyuzhou with reusable saved authentication support.
 - **Podcast Audio**: Pocket Casts and Xiaoyuzhou episodes can be saved as their original audio enclosure with `-a/--format audio` (the file keeps the source format such as `.m4a`). Use `-w/--transcribe` to additionally transcribe an episode locally through the optional `transcribe-cpp` backend.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
@@ -248,6 +249,20 @@ html_inline = false
 ; CLI -e/--extractor / -R / -T / -U and the Web UI extractor option override this per run
 extractor = auto
 
+[Search]
+; Engine for -S/--search: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso),
+; duckduckgo, bing, searxng, metaso. CLI --search-engine overrides this per run
+engine = auto
+; Number of search results to retrieve per run (1-20)
+; CLI --search-limit overrides this per run
+limit = 5
+; Interactive picker size when --search-preview is not given
+preview = 5
+; SearXNG instance base URL; the JSON API must be enabled
+searxng_url =
+; Metaso API key from https://metaso.cn
+metaso_api_key =
+
 [TTS]
 engine = edge-tts
 ; CLI --tts-voice / --tts-rate / --tts-volume and the Web UI TTS options override these per run
@@ -330,6 +345,39 @@ uv run surf.py /tmp/article.html -p
 - `.html`/`.htm` files are processed as-is.
 - `.md` files are read as Markdown content and passed through the standard translation/output pipeline.
 - `.txt` and other files are converted to HTML paragraphs before processing.
+
+### Keyword Search (-S / --search)
+
+Pass search keywords instead of a URL. Surf searches the web, prints a numbered "title + URL" list of the retrieved results, and asks which ones to process. Every selected result goes through the normal fetch → convert → translate → save pipeline and is written as its own file; a failing result is logged and skipped instead of aborting the batch.
+
+```bash
+# Interactive picker (press Enter with no selection to cancel)
+uv run surf.py -S "python asyncio tutorial"
+
+# Skip the picker: save the first 3 results, or only the first result
+uv run surf.py -S "python asyncio tutorial" --search-top 3
+uv run surf.py -S "python asyncio tutorial" --feel-lucky
+
+# Merge all selected results into one document
+uv run surf.py -S "python asyncio tutorial" --search-top 3 --search-merge
+
+# Override the default prefix (default: the search keywords)
+uv run surf.py -S "python asyncio tutorial" --search-prefix "asyncio"
+# -> [asyncio]Async IO in Python.md
+
+# Show fewer entries in the picker and wait 2s between fetches
+uv run surf.py -S "python asyncio tutorial" --search-preview 3 --search-delay 2
+```
+
+- Engine: `--search-engine auto|duckduckgo|bing|searxng|metaso` (default: `[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then a configured SearXNG instance, then Metaso. DeepSeek's web search has no public API, so it is not available as an engine.
+- SearXNG: set `[Search] searxng_url` to a self-hosted instance whose JSON API is enabled.
+- Metaso: set `[Search] metaso_api_key` (Metaso open API).
+- Results: `--search-limit N` (default: `[Search] limit`, 5; capped at 20) controls how many results are retrieved. The picker prints the first 5 by default; `--search-preview N` changes that (config: `[Search] preview`).
+- Selection: enter `1`, `1,3-5`, `1 3 5`, `all`, or an empty line to cancel. Invalid input is re-prompted up to three times.
+- Non-interactive stdin (scripts/CI) processes all retrieved results; use `--search-top N` or `--feel-lucky` to keep batches deterministic.
+- Output: one file per selected result by default. `--search-merge` combines them into a single document (md/html/pdf/audio/publish). No search-specific directory is created; files land in the regular `[Output]` directories. Every filename is `[<prefix>]<title>`: the prefix defaults to the search keywords (truncated to 40 characters) and `--search-prefix` overrides it (trailing separators are normalized; an already bracketed prefix is kept as-is). In search mode `-o/--output` only accepts `-` (stdout).
+- Front matter: each saved file records `search_query`, and tracking parameters (`utm_*`, `fbclid`, `gclid`, `dclid`, `spm`, ...) are stripped from the result URL before fetching and from front matter `source`.
+- All other options (`-l/--lang`, `-p`, `-h`, `-a`, `-e`, proxy flags, `--archive`, etc.) apply to each search result.
 
 ### Proxy Modes (-x / -c / -n)
 

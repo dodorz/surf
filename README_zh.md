@@ -8,6 +8,7 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
+- **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
 - **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙等网站优化处理，支持复用已保存的登录态。
 - **Podcast 音频**：Pocket Casts 和小宇宙剧集可以使用 `-a/--format audio` 保存 RSS/页面中的原始音频文件（保留 `.m4a` 等源格式）；使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
@@ -230,6 +231,20 @@ html_inline = false
 ; CLI -e/--extractor / -R / -T / -U 与 Web 提取选项可单次覆盖
 extractor = auto
 
+[Search]
+; -S/--search 使用的搜索引擎：auto（DuckDuckGo、Bing，然后是已配置的 SearXNG/Metaso）、
+; duckduckgo、bing、searxng、metaso。CLI --search-engine 可单次覆盖
+engine = auto
+; 每次运行获取的搜索结果数量（1-20）
+; CLI --search-limit 可单次覆盖
+limit = 5
+; 未指定 --search-preview 时交互选择列表显示的数量
+preview = 5
+; SearXNG 实例地址；该实例需开启 JSON API
+searxng_url =
+; Metaso（秘塔搜索）开放平台 API Key
+metaso_api_key =
+
 [TTS]
 engine = edge-tts
 ; CLI --tts-voice / --tts-rate / --tts-volume 与 Web TTS 选项可单次覆盖
@@ -312,6 +327,39 @@ surf /tmp/article.html -p
 - `.html`/`.htm` 文件按原样处理。
 - `.md` 文件作为 Markdown 内容读取，经过标准翻译/输出流程处理。
 - `.txt` 和其他文件会先转换为 HTML 段落再处理。
+
+### 关键词搜索 (-S / --search)
+
+位置参数传入搜索关键词而不是 URL。Surf 先搜索网页，打印带编号的「标题 + URL」列表，询问要处理哪些结果；选中的每条结果都会走完整的获取、转换、翻译与保存流程并单独保存。某一条失败时只记录日志并跳过，不会中断整批处理。
+
+```bash
+# 交互选择（直接回车表示取消）
+surf -S "python asyncio 教程"
+
+# 跳过选择：直接保存前 3 条 / 只保存第一条
+surf -S "python asyncio 教程" --search-top 3
+surf -S "python asyncio 教程" --feel-lucky
+
+# 把选中的结果合并成一个文档
+surf -S "python asyncio 教程" --search-top 3 --search-merge
+
+# 覆盖默认前缀（默认使用搜索关键词，仍写入常规 [Output] 目录）
+surf -S "python asyncio 教程" --search-prefix "asyncio"
+# -> [asyncio]Async IO in Python.md
+
+# 选择列表只显示 3 条，并在两次抓取之间等待 2 秒
+surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
+```
+
+- 搜索引擎：`--search-engine auto|duckduckgo|bing|searxng|metaso`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 实例和 Metaso。DeepSeek 的联网搜索没有公开 API，因此未作为可选引擎。
+- SearXNG：在 `[Search] searxng_url` 填入自建实例地址，并在该实例上开启 JSON API。
+- Metaso：在 `[Search] metaso_api_key` 填入秘塔开放平台 API Key。
+- 结果数量：`--search-limit N`（默认取 `[Search] limit`，即 5；上限 20）控制获取多少条结果；选择列表默认显示前 5 条，可用 `--search-preview N` 调整（配置项 `[Search] preview`）。
+- 选择输入：`1`、`1,3-5`、`1 3 5`、`all`，空行表示取消；非法输入最多重试三次。
+- 非交互 stdin（脚本/CI）会处理全部已获取结果；脚本中建议使用 `--search-top N` 或 `--feel-lucky` 保证行为确定。
+- 输出：默认每条结果一个文件；`--search-merge` 合并为一个文档（支持 md/html/pdf/audio/publish）。不会创建搜索专用目录，文件仍写入常规 `[Output]` 目录；文件名固定为 `[<前缀>]<标题>`，前缀默认取搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖（末尾分隔符会被规范化，已带中括号的前缀不会重复包裹）；搜索模式下 `-o/--output` 只接受 `-`（标准输出）。
+- Front matter：每个保存的文件会记录 `search_query`，结果 URL 在抓取前以及写入 front matter `source` 时会去掉 `utm_*`、`fbclid`、`gclid`、`dclid`、`spm` 等跟踪参数。
+- 其它选项（`-l/--lang`、`-p`、`-h`、`-a`、`-e`、代理相关选项、`--archive` 等）都会应用到每一条搜索结果。
 
 ### 输出路径 (-o / -O)
 

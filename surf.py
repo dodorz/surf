@@ -16,6 +16,7 @@ import ssl
 import socket
 import requests  # type: ignore
 import threading
+import time
 
 # Optional curl-cffi import for TLS fingerprint impersonation (Cloudflare bypass)
 try:
@@ -9230,6 +9231,7 @@ class Fetcher:
         output_path=None,
         proxy_mode_override=None,
         custom_proxy_override=None,
+        filename_prefix="",
     ):
         """Download the original audio enclosure from a podcast payload.
 
@@ -11461,6 +11463,309 @@ def _get_handler_for_url(url):
 
     return None, None, None
 
+class SearchHandler:
+    """Turn keywords into search results (``{"title", "url"}``) via a web engine."""
+
+    ENGINES = ("duckduckgo", "bing", "searxng", "metaso")
+    ENGINE_CHOICES = ("auto",) + ENGINES
+    DEFAULT_ENGINE = "auto"
+    DEFAULT_LIMIT = 5
+    DEFAULT_PREVIEW = 5
+    MAX_LIMIT = 20
+    # Search filenames become "[<prefix>]<title>"; the default prefix is the query.
+    MAX_PREFIX_LENGTH = 40
+    _USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+    _HEADERS = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+    }
+    _SEARCH_HOST_SUFFIXES = ("duckduckgo.com", "bing.com", "metaso.cn")
+
+    @staticmethod
+    def _is_result_url(url):
+        if not isinstance(url, str):
+            return False
+        candidate = url.strip()
+        if not candidate.lower().startswith(("http://", "https://")):
+            return False
+        host = (urlparse(candidate).hostname or "").lower()
+        if not host:
+            return False
+        # Drop search-engine navigation/redirect pages rather than fetching them.
+        if any(host == suffix or host.endswith("." + suffix) for suffix in SearchHandler._SEARCH_HOST_SUFFIXES):
+            return False
+        return True
+
+    @staticmethod
+    def _clean_title(title, url):
+        text = re.sub(r"\s+", " ", str(title or "")).strip()
+        return text or url
+
+    @classmethod
+    def _dedupe(cls, results, limit):
+        seen = set()
+        unique = []
+        for item in results:
+            url = (item or {}).get("url") if isinstance(item, dict) else item
+            url = OutputHandler._canonicalize_generic_source_url((url or "").strip())
+            if not cls._is_result_url(url) or url in seen:
+                continue
+            seen.add(url)
+            title = item.get("title") if isinstance(item, dict) else None
+            unique.append({"title": cls._clean_title(title, url), "url": url})
+            if len(unique) >= limit:
+                break
+        return unique
+
+    @staticmethod
+    def _normalize_duckduckgo_href(href):
+        """Unwrap DuckDuckGo's ``//duckduckgo.com/l/?uddg=...`` redirect links."""
+        if not href:
+            return ""
+        value = href.strip()
+        if value.startswith("//"):
+            value = f"https:{value}"
+        parsed = urlparse(value)
+        if (parsed.hostname or "").lower().endswith("duckduckgo.com") and parsed.path.startswith(("/l/", "/lite/")):
+            params = parse_qs(parsed.query)
+            for key in ("uddg", "u"):
+                if params.get(key):
+                    return unquote(params[key][0])
+        return value
+
+    @staticmethod
+    def _normalize_bing_href(href):
+        """Decode Bing's ``/ck/a?u=a1<base64url>`` tracking redirect links."""
+        if not href:
+            return ""
+        value = href.strip()
+        parsed = urlparse(value)
+        if not (parsed.hostname or "").lower().endswith("bing.com") or not parsed.path.startswith("/ck/a"):
+            return value
+        encoded = (parse_qs(parsed.query).get("u") or [""])[0]
+        if encoded.startswith("a1"):
+            encoded = encoded[2:]
+        if not encoded:
+            return value
+        encoded += "=" * (-len(encoded) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8", "replace")
+        except (ValueError, UnicodeError):
+            return value
+        if decoded.lower().startswith(("http://", "https://")):
+            return decoded
+        return value
+
+    @classmethod
+    def _parse_duckduckgo_html(cls, html, limit):
+        soup = BeautifulSoup(html, "html.parser")
+        results = []
+        for anchor in soup.select("div.result:not(.result--ad) a.result__a, a.result-link"):
+            results.append(
+                {
+                    "title": anchor.get_text(" ", strip=True),
+                    "url": cls._normalize_duckduckgo_href(anchor.get("href")),
+                }
+            )
+        return cls._dedupe(results, limit)
+
+    @classmethod
+    def _parse_bing_html(cls, html, limit):
+        soup = BeautifulSoup(html, "html.parser")
+        results = []
+        for anchor in soup.select("li.b_algo h2 a, li.b_algo h3 a"):
+            results.append(
+                {
+                    "title": anchor.get_text(" ", strip=True),
+                    "url": cls._normalize_bing_href(anchor.get("href")),
+                }
+            )
+        return cls._dedupe(results, limit)
+
+    @classmethod
+    def _parse_json_results(cls, payload, limit):
+        """Accept the common ``results``/``webpages``/``data`` JSON layouts."""
+        items = []
+        if isinstance(payload, dict):
+            for key in ("results", "webpages", "data", "items"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    items = value
+                    break
+        elif isinstance(payload, list):
+            items = payload
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url") or item.get("link") or item.get("href")
+            title = item.get("title") or item.get("name")
+            results.append({"title": title, "url": url})
+        return cls._dedupe(results, limit)
+
+    @classmethod
+    def _search_searxng(cls, query, max_results, proxies, config):
+        base_url = ""
+        if config is not None:
+            base_url = (config.get("Search", "searxng_url", fallback="") or "").strip()
+        if not base_url:
+            raise ValueError("searxng requires [Search] searxng_url in config.ini")
+        endpoint = base_url.rstrip("/") + "/search"
+        response = _requests_get_interruptibly(
+            endpoint,
+            params={"q": query, "format": "json", "language": "auto"},
+            headers={**cls._HEADERS, "Accept": "application/json"},
+            proxies=proxies,
+            timeout=20,
+        )
+        response.raise_for_status()
+        return cls._parse_json_results(response.json(), max_results)
+
+    @classmethod
+    def _search_metaso(cls, query, max_results, proxies, config):
+        api_key = ""
+        if config is not None:
+            api_key = (config.get("Search", "metaso_api_key", fallback="") or "").strip()
+        if not api_key:
+            raise ValueError("metaso requires [Search] metaso_api_key in config.ini")
+        endpoint = "https://metaso.cn/api/v1/search"
+        if config is not None:
+            endpoint = (
+                config.get("Search", "metaso_url", fallback="") or endpoint
+            ).strip() or endpoint
+        body = {"q": query, "scope": "webpage", "includeSummary": False, "size": str(max_results)}
+        last_error = None
+        # Metaso accepts either ``Bearer <key>`` or the raw key in Authorization.
+        for auth_value in (f"Bearer {api_key}", api_key):
+            try:
+                response = _requests_post_interruptibly(
+                    endpoint,
+                    json=body,
+                    headers={
+                        **cls._HEADERS,
+                        "Accept": "application/json",
+                        "Authorization": auth_value,
+                    },
+                    proxies=proxies,
+                    timeout=30,
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:
+                last_error = exc
+                continue
+            if isinstance(payload, dict) and payload.get("errCode"):
+                last_error = ValueError(f"Metaso API error {payload.get('errCode')}: {payload.get('errMsg')}")
+                continue
+            results = cls._parse_json_results(payload, max_results)
+            if results:
+                return results
+        if last_error:
+            raise last_error
+        return []
+
+    @classmethod
+    def _auto_engine_order(cls, config):
+        order = ["duckduckgo", "bing"]
+        if config is not None:
+            if (config.get("Search", "searxng_url", fallback="") or "").strip():
+                order.append("searxng")
+            if (config.get("Search", "metaso_api_key", fallback="") or "").strip():
+                order.append("metaso")
+        return order
+
+    @classmethod
+    def search(cls, keywords, engine=None, limit=None, config=None,
+               proxy_mode_override=None, custom_proxy_override=None):
+        """Return ``[{"title", "url"}]`` for *keywords*.
+
+        Results are deduplicated, tracked query parameters are stripped,
+        restricted to http(s) links, and truncated to *limit*. Search requests
+        honor the same proxy settings as page fetches. ``engine="auto"`` tries
+        DuckDuckGo, then Bing, and finally any configured SearXNG/Metaso API.
+        """
+        query = (keywords or "").strip()
+        if not query:
+            raise ValueError("Search keywords must not be empty")
+        engine_name = (engine or cls.DEFAULT_ENGINE).strip().lower()
+        if engine_name not in cls.ENGINE_CHOICES:
+            raise ValueError(
+                f"Unsupported search engine: {engine} (supported: {', '.join(cls.ENGINE_CHOICES)})"
+            )
+        try:
+            max_results = int(limit) if limit is not None else cls.DEFAULT_LIMIT
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid search result limit: {limit}")
+        max_results = max(1, min(max_results, cls.MAX_LIMIT))
+
+        proxies = None
+        if config is not None:
+            proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        if engine_name == "auto":
+            candidates = cls._auto_engine_order(config)
+        else:
+            candidates = (engine_name,)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                results = cls._search_engine(candidate, query, max_results, proxies, config)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(f"Search engine {candidate} failed: {exc}")
+                if engine_name != "auto":
+                    raise
+                continue
+            if results:
+                if engine_name == "auto":
+                    logger.info(f"Search engine {candidate} returned {len(results)} result(s)")
+                return results
+        if engine_name != "auto" and last_error:
+            raise last_error
+        return []
+
+    @classmethod
+    def _search_engine(cls, engine_name, query, max_results, proxies, config):
+        """Query one engine and return parsed results (may be empty)."""
+        if engine_name == "searxng":
+            return cls._search_searxng(query, max_results, proxies, config)
+        if engine_name == "metaso":
+            return cls._search_metaso(query, max_results, proxies, config)
+        if engine_name == "bing":
+            endpoints = [("https://www.bing.com/search", {"q": query, "count": str(max_results)})]
+            parser = cls._parse_bing_html
+        else:
+            endpoints = [
+                ("https://html.duckduckgo.com/html/", {"q": query}),
+                ("https://lite.duckduckgo.com/lite/", {"q": query}),
+            ]
+            parser = cls._parse_duckduckgo_html
+
+        for endpoint, params in endpoints:
+            try:
+                response = _requests_get_interruptibly(
+                    endpoint,
+                    params=params,
+                    headers=cls._HEADERS,
+                    proxies=proxies,
+                    timeout=20,
+                )
+                response.raise_for_status()
+            except Exception as exc:
+                logger.warning(f"Search request failed ({endpoint}): {exc}")
+                continue
+            results = parser(response.content, max_results)
+            if results:
+                return results
+            logger.debug(f"No usable results from {endpoint}, trying next endpoint")
+        return []
+
+
 class ContentProcessor:
     @staticmethod
     def _text_appears_to_match_target_language(text, target_lang):
@@ -12967,6 +13272,39 @@ class OutputHandler:
         }
         return any(path.endswith(ext) for ext in media_exts)
 
+    # Query parameters that only identify a campaign/referrer and never change
+    # the fetched document. They are dropped from front-matter ``source`` URLs
+    # (and from search result URLs before fetching).
+    _TRACKING_QUERY_KEYS = {
+        "fbclid",
+        "gclid",
+        "gclsrc",
+        "dclid",
+        "wbraid",
+        "gbraid",
+        "msclkid",
+        "twclid",
+        "yclid",
+        "igshid",
+        "igsh",
+        "mc_cid",
+        "mc_eid",
+        "mkt_tok",
+        "_hsenc",
+        "_hsmi",
+        "ref_src",
+        "ref_url",
+        "spm",
+        "scm",
+        "spm_id_from",
+        "vd_source",
+    }
+
+    @staticmethod
+    def _is_tracking_query_key(key):
+        lowered = (key or "").lower()
+        return lowered.startswith("utm_") or lowered in OutputHandler._TRACKING_QUERY_KEYS
+
     @staticmethod
     def _canonicalize_generic_source_url(url):
         if not url:
@@ -12976,7 +13314,9 @@ class OutputHandler:
         except Exception:
             return url
         query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-        cleaned_pairs = [(key, value) for key, value in query_pairs if not key.lower().startswith("utm_")]
+        cleaned_pairs = [
+            (key, value) for key, value in query_pairs if not OutputHandler._is_tracking_query_key(key)
+        ]
         cleaned_query = urlencode(cleaned_pairs, doseq=True)
         return urlunparse(parsed._replace(query=cleaned_query))
 
@@ -13362,6 +13702,11 @@ class OutputHandler:
         if metadata.get("source"):
             lines.append(f"source: {metadata['source']}")
 
+        if metadata.get("search_query"):
+            search_query = OutputHandler._normalize_frontmatter_scalar(metadata["search_query"])
+            if search_query:
+                lines.append(f"search_query: {search_query}")
+
         if metadata.get("archive"):
             lines.append(f"archive: {metadata['archive']}")
 
@@ -13386,6 +13731,8 @@ class OutputHandler:
         source_url=None,
         translator=None,
         archive_url=None,
+        search_query=None,
+        filename_prefix="",
     ):
         """
         Save content as Markdown file.
@@ -13403,12 +13750,16 @@ class OutputHandler:
             source_url: Source URL to include in YAML front matter (default: None)
             translator: Translation model name to include in YAML front matter (default: None)
             archive_url: Wayback Machine snapshot URL to include in YAML front matter (default: None)
+            search_query: Search keywords that produced this document (default: None)
+            filename_prefix: Prefix prepended to the generated filename (default: "")
         """
         md_dir = config.get_path("Output", "md_dir", fallback="./notes")
         if not os.path.exists(md_dir):
             os.makedirs(md_dir)
 
         filename_title = OutputHandler._get_filename_title(title, source_url=source_url, html_content=html_content)
+        if filename_prefix:
+            filename_title = f"{filename_prefix}{filename_title}"
 
         # Determine filepath
         if output_path:
@@ -13434,19 +13785,27 @@ class OutputHandler:
         if base_url:
             content = OutputHandler._convert_markdown_urls_to_absolute(content, base_url)
 
-        # Generate YAML front matter if html_content is provided and add_front_matter is True
+        # Generate YAML front matter when we have page metadata or search provenance
         yaml_frontmatter = ""
-        if html_content and add_front_matter:
-            metadata = OutputHandler._extract_metadata(
-                html_content,
-                source_url=source_url,
-                translator=translator,
-                archive_url=archive_url,
-                description_override=translated_description,
-            )
-            # Use translated_title if provided (translation was performed)
-            if translated_title:
-                metadata["title"] = translated_title
+        if add_front_matter and (html_content or search_query):
+            if html_content:
+                metadata = OutputHandler._extract_metadata(
+                    html_content,
+                    source_url=source_url,
+                    translator=translator,
+                    archive_url=archive_url,
+                    description_override=translated_description,
+                )
+                # Use translated_title if provided (translation was performed)
+                if translated_title:
+                    metadata["title"] = translated_title
+            else:
+                metadata = {
+                    "title": title,
+                    "updated": datetime.now().strftime("%Y-%m-%d"),
+                }
+            if search_query:
+                metadata["search_query"] = search_query
             yaml_frontmatter = OutputHandler._generate_yaml_frontmatter(metadata)
 
         # Refuse to create useless empty files when extraction produced nothing
@@ -13487,7 +13846,7 @@ class OutputHandler:
             return False
 
     @staticmethod
-    def generate_pdf(title, md_content, config, output_path=None):
+    def generate_pdf(title, md_content, config, output_path=None, filename_prefix=""):
         logger.info("Generating PDF...")
 
         import markdown  # type: ignore
@@ -13522,7 +13881,7 @@ class OutputHandler:
             if filepath_dir and not os.path.exists(filepath_dir):
                 os.makedirs(filepath_dir)
         else:
-            safe_title = OutputHandler._safe_filename_title(title)
+            safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}")
             pdf_dir = config.get_path("Output", "pdf_dir", fallback=".")
             if not os.path.exists(pdf_dir):
                 os.makedirs(pdf_dir)
@@ -13538,7 +13897,7 @@ class OutputHandler:
         return filepath
 
     @staticmethod
-    def save_html(title, html_content, config, inline=False, output_path=None, base_url=None):
+    def save_html(title, html_content, config, inline=False, output_path=None, base_url=None, filename_prefix=""):
         """
         Save content as HTML file.
 
@@ -13549,13 +13908,14 @@ class OutputHandler:
             inline: If True, inline CSS and JS for standalone HTML
             output_path: Specific output file path (optional)
             base_url: Base URL for converting relative URLs (used when inline=False)
+            filename_prefix: Prefix prepended to the generated filename (default: "")
         """
         html_dir = config.get_path("Output", "html_dir", fallback=".")
         if not os.path.exists(html_dir):
             os.makedirs(html_dir)
 
         # Sanitize filename
-        safe_title = OutputHandler._safe_filename_title(title, max_len=100)
+        safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=100)
 
         if inline:
             html_content = OutputHandler._inline_resources(html_content)
@@ -14406,6 +14766,729 @@ class TTSHandler:
         except Exception as e:
             logger.error(f"TTS operation failed: {e}")
 
+def _build_search_filename_prefix(args, keywords):
+    """Return the mandatory ``[<prefix>]`` search filename prefix.
+
+    ``--search-prefix`` overrides it; otherwise the search keywords are used.
+    Length is capped so long queries do not crowd out the title, and invalid
+    filename characters are removed. Brackets are added here, so passing an
+    already bracketed prefix (``"[kw]"``) does not double-wrap it.
+    """
+    raw = (getattr(args, "search_prefix", None) or "").strip() or (keywords or "").strip()
+    prefix = OutputHandler._safe_filename_title(raw, max_len=SearchHandler.MAX_PREFIX_LENGTH)
+    prefix = prefix.strip().rstrip("-_,;. ")
+    if not prefix:
+        prefix = "search"
+    if prefix.startswith("[") and prefix.endswith("]") and len(prefix) > 2:
+        return prefix
+    return f"[{prefix}]"
+
+
+def _resolve_search_limit(args, config, parser):
+    """Resolve --search-limit, falling back to ``[Search] limit`` then the default."""
+    raw_limit = args.search_limit
+    if raw_limit is None:
+        raw_limit = config.get("Search", "limit", fallback=str(SearchHandler.DEFAULT_LIMIT))
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        parser.error(f"Invalid search limit: {raw_limit!r} (expected a positive integer)")
+    if limit <= 0:
+        parser.error("--search-limit must be a positive integer")
+    return min(limit, SearchHandler.MAX_LIMIT)
+
+
+def _resolve_search_preview(args, config, parser):
+    """Resolve --search-preview (how many results to print for selection)."""
+    raw_preview = args.search_preview
+    if raw_preview is None:
+        raw_preview = config.get(
+            "Search", "preview", fallback=str(SearchHandler.DEFAULT_PREVIEW)
+        )
+    if raw_preview in (None, ""):
+        return SearchHandler.DEFAULT_PREVIEW
+    try:
+        preview = int(raw_preview)
+    except (TypeError, ValueError):
+        parser.error(f"Invalid search preview size: {raw_preview!r} (expected a positive integer)")
+    if preview <= 0:
+        parser.error("--search-preview must be a positive integer")
+    return min(preview, SearchHandler.MAX_LIMIT)
+
+
+def _parse_search_selection(spec, max_index):
+    """Parse ``1,3-5`` style selections into 1-based index lists.
+
+    ``all``/``*`` selects everything; an empty string means "cancel".
+    """
+    value = (spec or "").strip().lower()
+    if value in {"", "q", "quit", "n", "no", "none"}:
+        return []
+    if value in {"all", "*"}:
+        return list(range(1, max_index + 1))
+    indices = []
+    for token in re.split(r"[,\s]+", value):
+        if not token:
+            continue
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", token)
+        if not match:
+            raise ValueError(f"invalid token '{token}'")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start < 1 or end < start or end > max_index:
+            raise ValueError(f"index {token} is outside 1-{max_index}")
+        indices.extend(range(start, end + 1))
+    return list(dict.fromkeys(indices))
+
+
+def _select_search_results(results, keywords, args, config, parser):
+    """Return the search results the user wants to process.
+
+    ``--feel-lucky`` takes the first result, ``--search-top N`` takes the first
+    N, and the default is an interactive picker that prints the first
+    ``--search-preview`` entries as ``title + URL``.
+    """
+    if not results:
+        return []
+    if getattr(args, "feel_lucky", False):
+        return results[:1]
+    top_n = getattr(args, "search_top", None)
+    if top_n is not None:
+        if top_n <= 0:
+            parser.error("--search-top must be a positive integer")
+        if top_n > len(results):
+            logger.warning(f"--search-top {top_n} exceeds the {len(results)} available results; using all of them")
+            return list(results)
+        return results[:top_n]
+
+    preview_limit = _resolve_search_preview(args, config, parser)
+    preview = list(results[:preview_limit])
+    print(f"\nSearch results for '{keywords}':")
+    for index, item in enumerate(preview, 1):
+        print(f"  {index}. {item['title']}")
+        print(f"     {item['url']}")
+    print()
+
+    if not sys.stdin.isatty():
+        logger.info(
+            "stdin is not a TTY; processing all retrieved results "
+            "(use --search-top N or --feel-lucky for scripted runs)"
+        )
+        return list(results)
+
+    for _ in range(3):
+        try:
+            raw_selection = input("Select results (e.g. 1,3-5; 'all'; empty to cancel): ")
+        except EOFError:
+            return []
+        try:
+            indices = _parse_search_selection(raw_selection, len(preview))
+        except ValueError as exc:
+            print(f"Invalid selection: {exc}")
+            continue
+        return [preview[index - 1] for index in indices]
+
+    logger.error("No valid selection after three attempts; nothing to do.")
+    return []
+
+
+def _resolve_output_format(args):
+    if args.format:
+        return args.format
+    if args.h:
+        return "html"
+    if args.p:
+        return "pdf"
+    if args.a:
+        return "audio"
+    if args.P:
+        return "publish"
+    return "md"
+
+
+def _resolve_lang_mode(args):
+    if args.lang:
+        return args.lang
+    if args.r:
+        return "raw"
+    if args.b:
+        return "both"
+    return "trans"
+
+
+def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
+    """Fetch and convert ``args.url``; return a dict ready to be saved.
+
+    Returns ``None`` when the input was handled directly (local image OCR or a
+    NCPSSD original-PDF download), so the caller has nothing left to save.
+    """
+    # Check if url is required but not provided
+    if not args.url:
+        parser.error("URL is required (unless using --login or --clear-auth)")
+
+    # Allow pasting full share text (e.g. Xiaohongshu share messages):
+    # extract the first URL when the input itself is not a URL.
+    if args.url and not args.url.lstrip().lower().startswith(("http://", "https://")):
+        extracted_url = Fetcher._extract_url_from_text(args.url)
+        if extracted_url:
+            logger.info(f"Extracted URL from input text: {extracted_url}")
+            args.url = extracted_url
+
+    # Direct image OCR mode: --ocr with a local image path
+    if _is_local_image_input(args.url):
+        image_path = _resolve_image_path(args.url)
+        if not image_path:
+            parser.error(f"Image file not found: {args.url}")
+        try:
+            ocr_text, engine_used = _ocr_local_image(image_path, args, config)
+        except ValueError as e:
+            logger.error(str(e))
+            sys.exit(1)
+        _configure_stdout_utf8()
+        sys.stdout.write(ocr_text)
+        if not ocr_text.endswith("\n"):
+            sys.stdout.write("\n")
+        return None
+
+    local_file_path = None
+    if _is_local_file_input(args.url):
+        local_file_path = _resolve_file_url_input(args.url)
+        if not local_file_path:
+            parser.error(f"Local file not found: {args.url}")
+        logger.info(f"Detected local file: {local_file_path}")
+    else:
+        args.url = Fetcher._resolve_common_short_url(
+            args.url,
+            config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+
+    output_format = _resolve_output_format(args)
+    lang_mode = _resolve_lang_mode(args)
+
+    fetch_thread = None
+    if args.thread:
+        fetch_thread = False if args.thread == "off" else args.thread
+    elif args.no_thread:
+        fetch_thread = False
+    fetch_thread_author = args.thread_author
+
+    # Check if URL matches special site handlers for default policies
+    handler, site_name, site_config = _get_handler_for_url(args.url)
+    explicit_output_format_selected = bool(args.format or args.h or args.p or args.a or args.P)
+    if site_config:
+        # Apply special site defaults (can be overridden by command line)
+        if site_config.get("default_no_proxy") and proxy_mode is None and not Fetcher._is_windows():
+            logger.info(f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)")
+            proxy_mode = "no"
+
+        if site_config.get("default_no_translate") and lang_mode == "trans":
+            logger.info(f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)")
+            lang_mode = "raw"
+
+        if site_config.get("default_thread") and fetch_thread is None:
+            logger.info(f"{site_name}: Applying default thread expansion policy")
+            fetch_thread = "after"
+
+    # NCPSSD secure article pages default to PDF output (same as implicit `-p`).
+    # This only applies when user did not explicitly choose an output format.
+    if (
+        not explicit_output_format_selected
+        and site_name == "ncpssd"
+        and Fetcher._is_ncpssd_secure_article_url(args.url)
+    ):
+        output_format = "pdf"
+        logger.info("ncpssd: Applying default output format 'pdf' for secure article page")
+
+    output_path = resolve_user_path(args.output) if args.output else None
+    if args.O:
+        output_path = "-"
+
+    # For NCPSSD secure article pages, PDF mode should download the original full-text PDF
+    # by simulating a click on the page's "全文下载" button.
+    if output_format == "pdf" and site_name == "ncpssd" and Fetcher._is_ncpssd_secure_article_url(args.url):
+        downloaded_pdf = Fetcher.download_ncpssd_pdf(
+            args.url,
+            config=config,
+            output_path=output_path,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+        if downloaded_pdf:
+            print(downloaded_pdf)
+            return None
+        logger.warning(
+            "NCPSSD original PDF download was unavailable. Falling back to generated PDF from extracted content."
+        )
+
+    # 1. Fetch
+    _raise_if_interrupted()
+    archive_is_url = None
+    if local_file_path:
+        try:
+            html_content, _ = _read_local_file(local_file_path)
+        except Exception as e:
+            logger.error(f"Failed to read local file: {e}")
+            sys.exit(1)
+    else:
+        try:
+            html_content = Fetcher.fetch(
+                args.url,
+                config=config,
+                use_browser=args.browser,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+                fetch_thread=fetch_thread,
+                fetch_thread_author=fetch_thread_author,
+                twitter_backend=args.twitter_backend,
+                twitter_cli_bin=args.twitter_cli_bin,
+                twitter_browser=args.twitter_browser,
+                twitter_profile=args.twitter_profile,
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch {args.url}: {e}")
+            diagnosis = _diagnose_network_fetch_failure(args.url, e)
+            if diagnosis:
+                logger.error(diagnosis)
+            sys.exit(1)
+
+        if not html_content:
+            if Fetcher._is_twitter_url(args.url):
+                logger.error("Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue).")
+            else:
+                logger.error(f"Failed to fetch usable content from {args.url}.")
+            sys.exit(1)
+
+        if args.transcribe:
+            if site_name not in {"pocketcasts", "xiaoyuzhoufm"}:
+                parser.error("-w/--transcribe currently supports Pocket Casts and Xiaoyuzhou episode URLs only")
+            try:
+                html_content = Fetcher._transcribe_podcast_content(
+                    html_content,
+                    config,
+                    proxy_mode_override=proxy_mode,
+                    custom_proxy_override=custom_proxy,
+                    timestamps_override=args.transcript_timestamps,
+                )
+            except Exception as exc:
+                logger.error(f"Podcast transcription failed: {exc}")
+                sys.exit(1)
+
+        # ── Paywall detection and archive-domain fallback ──
+        paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
+        if paywall_result and paywall_result.get("detected"):
+            logger.warning(
+                f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
+                f"{paywall_result.get('reason', 'unknown')}"
+            )
+            logger.info("Attempting to fetch from archive domains...")
+            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+                args.url,
+                config=config,
+                proxy_mode_override=proxy_mode,
+                custom_proxy_override=custom_proxy,
+            )
+            if archived_html:
+                logger.info("Archive snapshot fetched successfully, using it as content source.")
+                archive_is_url = snapshot_url
+                html_content = archived_html
+            else:
+                logger.error("内容受付费墙控制，未抓取全文")
+                logger.error(f"  原始 URL: {args.url}")
+                logger.error("  提示：程序已轮换多个 archive 域名；也可手动访问 https://archive.is/ 搜索该页面。")
+                sys.exit(1)
+
+    _raise_if_interrupted()
+    try:
+        processed = _process_fetched_content(
+            html_content,
+            args.url,
+            config,
+            site_name=site_name,
+            site_config=site_config,
+            lang_mode=lang_mode,
+            ocr_args=args,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+            llm_provider=args.llm if hasattr(args, "llm") else None,
+            extractor=resolve_extractor(config, args.extractor),
+        )
+    except Exception as e:
+        logger.error(f"Failed to process fetched content: {e}")
+        sys.exit(1)
+
+    return {
+        "url": args.url,
+        "output_format": output_format,
+        "site_name": site_name,
+        "html_content": html_content,
+        "processed": processed,
+        "archive_is_url": archive_is_url,
+        "proxy_mode": proxy_mode,
+        "custom_proxy": custom_proxy,
+    }
+
+
+def _save_single_result(prepared, args, config, filename_prefix="", search_query=None):
+    """Write one prepared result using the selected output format."""
+    output_format = prepared["output_format"]
+    site_name = prepared["site_name"]
+    html_content = prepared["html_content"]
+    processed = prepared["processed"]
+    archive_is_url = prepared["archive_is_url"]
+
+    add_archive = args.archive or _config_bool(config, "Output", "archive")
+    no_front_matter = args.no_front_matter or _config_bool(config, "Output", "no_front_matter")
+    html_inline = args.html_inline or _config_bool(config, "Output", "html_inline")
+
+    output_path = resolve_user_path(args.output) if args.output else None
+    if args.O:
+        output_path = "-"
+
+    source_url = processed["source_url"]
+    title = processed["title"]
+    cleaned_html = processed["cleaned_html"]
+    md_content = processed["markdown"]
+    translated_title = processed["translated_title"]
+    translated_description = processed["translated_description"]
+    translation_performed = processed["translation_performed"]
+
+    # 5. Output
+    # Use the source URL from meta tag if available (for xhslink resolution)
+    if source_url != prepared["url"]:
+        logger.info(f"Using resolved source URL for metadata: {source_url}")
+
+    _raise_if_interrupted()
+    if output_format == "pdf":
+        OutputHandler.generate_pdf(
+            title,
+            md_content,
+            config,
+            output_path,
+            filename_prefix=filename_prefix,
+        )
+
+    elif output_format == "html":
+        OutputHandler.save_html(
+            title,
+            cleaned_html,
+            config,
+            inline=html_inline,
+            output_path=output_path,
+            filename_prefix=filename_prefix,
+        )
+
+    elif output_format == "audio":
+        if site_name in {"pocketcasts", "xiaoyuzhoufm"}:
+            saved_path = Fetcher._download_podcast_audio(
+                html_content,
+                config,
+                output_path=output_path,
+                proxy_mode_override=prepared["proxy_mode"],
+                custom_proxy_override=prepared["custom_proxy"],
+                filename_prefix=filename_prefix,
+            )
+            print(saved_path)
+        else:
+            save_path = output_path
+            if not save_path and (search_query is not None or filename_prefix):
+                audio_dir = config.get_path("Output", "audio_dir", fallback=".")
+                os.makedirs(audio_dir, exist_ok=True)
+                safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=120)
+                save_path = os.path.join(audio_dir, f"{safe_title}.mp3")
+            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=save_path)
+
+    elif output_format == "publish":
+        # Publish to pastebin (md content without YAML front matter)
+        paste_url = PublishHandler.publish_to_pastebin(
+            title,
+            md_content,
+            config,
+            proxy_mode_override=prepared["proxy_mode"],
+            custom_proxy_override=prepared["custom_proxy"],
+        )
+        if paste_url:
+            print(f"\nPublished to: {paste_url}")
+        else:
+            logger.error("Failed to publish content.")
+            sys.exit(1)
+
+    else:  # md (default)
+        title = OutputHandler.normalize_markdown_encoding(title)
+        md_content = OutputHandler.normalize_markdown_encoding(md_content)
+        if translated_title:
+            translated_title = OutputHandler.normalize_markdown_encoding(translated_title)
+
+        # Get translator model name if translation was performed
+        translator = None
+        if translation_performed:
+            try:
+                llm_provider = args.llm if hasattr(args, "llm") else None
+                llm_config = config.get_llm_config(llm_provider)
+                translator = llm_config["model"]
+            except Exception as e:
+                logger.warning(f"Could not get LLM config for translator: {e}")
+
+        # archive_url: prioritize archive snapshot (paywall fallback),
+        # then explicit Wayback Machine --archive flag / [Output] archive default.
+        archive_url = archive_is_url
+        if not archive_url and add_archive and not no_front_matter and output_path != "-":
+            archive_url = Fetcher.save_wayback_snapshot(
+                source_url,
+                config=config,
+                proxy_mode_override=prepared["proxy_mode"],
+                custom_proxy_override=prepared["custom_proxy"],
+            )
+
+        if args.speak:
+            TTSHandler.run_tts(title, md_content, config, speak=True)
+        elif output_path == "-":
+            # Output to stdout
+            _configure_stdout_utf8()
+            sys.stdout.write(f"# {title}\n\n")
+            sys.stdout.write(md_content)
+            if not md_content.endswith("\n"):
+                sys.stdout.write("\n")
+        else:
+            OutputHandler.save_markdown(
+                title,
+                md_content,
+                config,
+                output_path,
+                html_content=html_content,
+                add_front_matter=not no_front_matter,
+                translated_title=translated_title if translation_performed else None,
+                translated_description=translated_description if translation_performed else None,
+                source_url=source_url,
+                translator=translator,
+                archive_url=archive_url,
+                search_query=search_query,
+                filename_prefix=filename_prefix,
+            )
+
+
+def _process_single_url(args, config, parser, proxy_mode, custom_proxy):
+    """Fetch, convert, and save the URL in ``args.url`` using parsed CLI options."""
+    prepared = _prepare_single_url(args, config, parser, proxy_mode, custom_proxy)
+    if prepared is None:
+        return
+    _save_single_result(prepared, args, config)
+
+
+def _strip_leading_markdown_heading(markdown_text, title):
+    text = (markdown_text or "").lstrip("\ufeff")
+    if title:
+        pattern = re.compile(r"^#\s+" + re.escape(str(title)) + r"\s*(?:\r?\n){1,2}")
+        text = pattern.sub("", text, count=1)
+    return text.lstrip("\r\n")
+
+
+def _build_merged_search_document(prepared_results, keywords):
+    """Combine prepared results into one Markdown document plus HTML sections."""
+    title = f"Search results ({len(prepared_results)})"
+    markdown_sections = []
+    html_sections = []
+    source_lines = []
+    for item in prepared_results:
+        processed = item["processed"]
+        item_title = processed.get("title") or "Untitled"
+        body = _strip_leading_markdown_heading(processed.get("markdown") or "", item_title).strip()
+        markdown_sections.append(f"## {item_title}\n\n{body or '_No content_'}")
+        html_sections.append(
+            f"<section><h2>{escape(item_title)}</h2>{processed.get('cleaned_html') or '<p><em>No content.</em></p>'}</section>"
+        )
+        source_url = processed.get("source_url")
+        if source_url:
+            source_lines.append(f"- [{item_title}]({source_url})")
+
+    merged_markdown = "\n\n---\n\n".join(markdown_sections)
+    if source_lines:
+        merged_markdown += "\n\n## Sources\n\n" + "\n".join(source_lines)
+    merged_markdown += "\n"
+    merged_html = (
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        f"<title>{escape(title)}</title></head><body>"
+        + "".join(html_sections)
+        + "</body></html>"
+    )
+    return title, merged_markdown, merged_html
+
+
+def _save_merged_search_results(prepared_results, args, config, keywords, filename_prefix="",
+                                 proxy_mode=None, custom_proxy=None):
+    """Save all prepared search results as one merged document."""
+    output_format = _resolve_output_format(args)
+    title, merged_markdown, merged_html = _build_merged_search_document(prepared_results, keywords)
+
+    add_front_matter = not (args.no_front_matter or _config_bool(config, "Output", "no_front_matter"))
+    html_inline = args.html_inline or _config_bool(config, "Output", "html_inline")
+    output_path = resolve_user_path(args.output) if args.output else None
+    if args.O:
+        output_path = "-"
+
+    if output_format == "html":
+        OutputHandler.save_html(
+            title,
+            merged_html,
+            config,
+            inline=html_inline,
+            output_path=output_path,
+            filename_prefix=filename_prefix,
+        )
+        return
+
+    if output_format == "pdf":
+        OutputHandler.generate_pdf(title, merged_markdown, config, output_path, filename_prefix=filename_prefix)
+        return
+
+    if output_format == "audio":
+        audio_dir = config.get_path("Output", "audio_dir", fallback=".")
+        os.makedirs(audio_dir, exist_ok=True)
+        safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=120)
+        save_path = output_path if output_path and output_path != "-" else os.path.join(audio_dir, f"{safe_title}.mp3")
+        TTSHandler.run_tts(title, merged_markdown, config, speak=args.speak, save_path=save_path)
+        return
+
+    if output_format == "publish":
+        paste_url = PublishHandler.publish_to_pastebin(
+            title,
+            merged_markdown,
+            config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+        if paste_url:
+            print(f"\nPublished to: {paste_url}")
+        else:
+            logger.error("Failed to publish merged content.")
+            sys.exit(1)
+        return
+
+    if output_path == "-":
+        _configure_stdout_utf8()
+        sys.stdout.write(f"# {title}\n\n")
+        sys.stdout.write(merged_markdown)
+        if not merged_markdown.endswith("\n"):
+            sys.stdout.write("\n")
+        return
+
+    OutputHandler.save_markdown(
+        title,
+        merged_markdown,
+        config,
+        add_front_matter=add_front_matter,
+        search_query=keywords,
+        filename_prefix=filename_prefix,
+    )
+
+
+def _run_search_batch(args, config, parser, proxy_mode, custom_proxy):
+    """Search for ``args.url`` keywords and process the selected result URLs.
+
+    Results are selected interactively by default; ``--search-top N`` and
+    ``--feel-lucky`` skip the prompt. A failing result is logged and skipped so
+    one bad page does not abort the whole batch. ``--search-merge`` writes all
+    selected results into one document.
+    """
+    keywords = (args.url or "").strip()
+    if not keywords:
+        parser.error("-S/--search requires keywords as the positional argument")
+
+    engine = (
+        args.search_engine
+        or config.get("Search", "engine", fallback=SearchHandler.DEFAULT_ENGINE)
+        or SearchHandler.DEFAULT_ENGINE
+    ).strip().lower()
+    if engine not in SearchHandler.ENGINE_CHOICES:
+        parser.error(f"Unsupported search engine: {engine} (supported: {', '.join(SearchHandler.ENGINE_CHOICES)})")
+    limit = _resolve_search_limit(args, config, parser)
+
+    if args.output and args.output != "-":
+        parser.error(
+            "-S/--search saves one file per result; use --search-prefix for filenames "
+            "and -o/--output only for '-' (stdout)"
+        )
+
+    filename_prefix = _build_search_filename_prefix(args, keywords)
+    merge_output = bool(getattr(args, "search_merge", False))
+
+    logger.info(f"Searching {engine} for '{keywords}' (limit: {limit})")
+    try:
+        results = SearchHandler.search(
+            keywords,
+            engine=engine,
+            limit=limit,
+            config=config,
+            proxy_mode_override=proxy_mode,
+            custom_proxy_override=custom_proxy,
+        )
+    except Exception as exc:
+        logger.error(f"Search failed: {exc}")
+        sys.exit(1)
+
+    if not results:
+        logger.error(f"No search results found for '{keywords}'")
+        sys.exit(1)
+
+    selected = _select_search_results(results, keywords, args, config, parser)
+    if not selected:
+        logger.info("No search results selected; nothing was saved.")
+        return
+
+    logger.info(f"Processing {len(selected)} selected result(s)")
+    prepared_results = []
+    failures = []
+    delay = max(0.0, float(getattr(args, "search_delay", 0) or 0))
+    for index, result in enumerate(selected, 1):
+        _raise_if_interrupted()
+        args.url = result["url"]
+        logger.info(f"[{index}/{len(selected)}] Processing {result['url']}")
+        try:
+            prepared = _prepare_single_url(args, config, parser, proxy_mode, custom_proxy)
+            if prepared is not None:
+                prepared_results.append(prepared)
+                if not merge_output:
+                    _save_single_result(
+                        prepared,
+                        args,
+                        config,
+                        filename_prefix=filename_prefix,
+                        search_query=keywords,
+                    )
+        except SystemExit as exc:
+            if exc.code:
+                failures.append(result["url"])
+                logger.error(f"[{index}/{len(selected)}] Failed: {result['url']}")
+        except Exception as exc:
+            failures.append(result["url"])
+            logger.error(f"[{index}/{len(selected)}] Failed: {result['url']}: {exc}")
+        if delay and index < len(selected):
+            time.sleep(delay)
+
+    if merge_output and prepared_results:
+        try:
+            _save_merged_search_results(
+                prepared_results,
+                args,
+                config,
+                keywords,
+                filename_prefix=filename_prefix,
+                proxy_mode=proxy_mode,
+                custom_proxy=custom_proxy,
+            )
+        except SystemExit:
+            raise
+        except Exception as exc:
+            logger.error(f"Failed to save merged search results: {exc}")
+            failures.append("<merged output>")
+
+    if failures:
+        logger.warning(f"{len(failures)} of {len(selected)} search results failed")
+    if len(failures) == len(selected):
+        sys.exit(1)
+
+
 def main():
     _install_interrupt_handler()
     parser = argparse.ArgumentParser(
@@ -14437,6 +15520,14 @@ Extractor:
   surf -R https://example.com                    # Shorthand for readability
   surf -e raw https://example.com                # Skip extraction, return original HTML
   surf -U https://example.com                    # Shorthand for raw
+
+Search:
+  surf -S "asyncio tutorial"                    # Search, pick results interactively, then fetch/save
+  surf -S "asyncio tutorial" --search-top 3     # Save the first 3 results without prompting
+  surf -S "asyncio tutorial" --feel-lucky       # Save only the first result
+  surf -S "asyncio tutorial" --search-merge     # Save the selected results as one merged file
+  surf -S "asyncio tutorial" --search-prefix "asyncio-"
+  surf -S "asyncio tutorial" --search-engine bing --search-limit 10
 
 TTS:
   surf -a https://example.com                    # Save as audio
@@ -14508,7 +15599,7 @@ Browser Backend:
     parser.add_argument(
         "url",
         nargs="?",
-        help="URL, local file path, or image path to process (supports http(s)://, file://, OS paths; --ocr with image paths enables direct OCR). Not required for auth-management commands.",
+        help="URL, local file path, image path to process (supports http(s)://, file://, OS paths; --ocr with image paths enables direct OCR), or search keywords when -S/--search is used. Not required for auth-management commands.",
     )
 
     # Output format
@@ -14731,6 +15822,59 @@ Browser Backend:
         action="store_true",
         help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter (default: [Output] archive from config)",
     )
+    # Search
+    parser.add_argument(
+        "-S",
+        "--search",
+        action="store_true",
+        help="Treat the positional input as search keywords: run a web search, then fetch, convert, and save the selected results",
+    )
+    parser.add_argument(
+        "--search-engine",
+        choices=list(SearchHandler.ENGINE_CHOICES),
+        help="Search engine for -S/--search: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso), duckduckgo, bing, searxng, metaso (config: [Search] engine)",
+    )
+    parser.add_argument(
+        "--search-limit",
+        type=int,
+        metavar="N",
+        help=f"Number of search results to retrieve and offer with -S/--search (default: [Search] limit from config, {SearchHandler.DEFAULT_LIMIT}; max {SearchHandler.MAX_LIMIT})",
+    )
+    parser.add_argument(
+        "--search-preview",
+        type=int,
+        metavar="N",
+        help=f"Number of results to print in the interactive picker (default: [Search] preview from config, {SearchHandler.DEFAULT_PREVIEW})",
+    )
+    search_auto_group = parser.add_mutually_exclusive_group()
+    search_auto_group.add_argument(
+        "--search-top",
+        type=int,
+        metavar="N",
+        help="Skip the interactive picker and save the first N results",
+    )
+    search_auto_group.add_argument(
+        "--feel-lucky",
+        action="store_true",
+        help="Skip the interactive picker and save only the first search result",
+    )
+    parser.add_argument(
+        "--search-merge",
+        action="store_true",
+        help="Save all selected search results as one merged document instead of one file per result",
+    )
+    parser.add_argument(
+        "--search-prefix",
+        metavar="PREFIX",
+        help="Prefix for filenames generated by -S/--search (default: the search keywords; truncated to 40 chars). Files are named '[<prefix>]<title>' and no search subdirectory is created",
+    )
+    parser.add_argument(
+        "--search-delay",
+        type=float,
+        metavar="SECONDS",
+        default=None,
+        help="Delay between fetching consecutive search results in seconds (default: 0)",
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--help", action="help", help="Show this help message")
 
@@ -14758,12 +15902,6 @@ Browser Backend:
 
     # Per-run TTS overrides (--tts-voice/--tts-rate/--tts-volume)
     _apply_tts_overrides(config, args.tts_voice, args.tts_rate, args.tts_volume)
-
-    # Config-backed defaults; CLI flags can only force them on.
-    extractor = resolve_extractor(config, args.extractor)
-    add_archive = args.archive or _config_bool(config, "Output", "archive")
-    no_front_matter = args.no_front_matter or _config_bool(config, "Output", "no_front_matter")
-    html_inline = args.html_inline or _config_bool(config, "Output", "html_inline")
 
     # Handle --clear-auth
     if args.clear_auth:
@@ -14843,341 +15981,30 @@ Browser Backend:
         )
         sys.exit(0 if success else 1)
 
-    # Check if url is required but not provided
-    if not args.url:
-        parser.error("URL is required (unless using --login or --clear-auth)")
-
-    # Allow pasting full share text (e.g. Xiaohongshu share messages):
-    # extract the first URL when the input itself is not a URL.
-    if args.url and not args.url.lstrip().lower().startswith(("http://", "https://")):
-        extracted_url = Fetcher._extract_url_from_text(args.url)
-        if extracted_url:
-            logger.info(f"Extracted URL from input text: {extracted_url}")
-            args.url = extracted_url
-
-    # Direct image OCR mode: --ocr with a local image path
-    if _is_local_image_input(args.url):
-        image_path = _resolve_image_path(args.url)
-        if not image_path:
-            parser.error(f"Image file not found: {args.url}")
-        try:
-            ocr_text, engine_used = _ocr_local_image(image_path, args, config)
-        except ValueError as e:
-            logger.error(str(e))
-            sys.exit(1)
-        _configure_stdout_utf8()
-        sys.stdout.write(ocr_text)
-        if not ocr_text.endswith("\n"):
-            sys.stdout.write("\n")
+    # -S/--search: treat the positional input as keywords, then process every
+    # selected result URL through the normal fetch/convert/save pipeline.
+    search_only_options = {
+        "--search-engine": args.search_engine,
+        "--search-limit": args.search_limit,
+        "--search-preview": args.search_preview,
+        "--search-top": args.search_top,
+        "--feel-lucky": args.feel_lucky,
+        "--search-merge": args.search_merge,
+        "--search-prefix": args.search_prefix,
+        "--search-delay": args.search_delay,
+    }
+    if not args.search:
+        used = [
+            name
+            for name, value in search_only_options.items()
+            if value is not None and value is not False and value != ""
+        ]
+        if used:
+            parser.error(f"{', '.join(used)} requires -S/--search")
+        _process_single_url(args, config, parser, proxy_mode, custom_proxy)
         return
 
-    local_file_path = None
-    if _is_local_file_input(args.url):
-        local_file_path = _resolve_file_url_input(args.url)
-        if not local_file_path:
-            parser.error(f"Local file not found: {args.url}")
-        logger.info(f"Detected local file: {local_file_path}")
-    else:
-        args.url = Fetcher._resolve_common_short_url(
-            args.url,
-            config,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-        )
-
-    # Determine final format
-    output_format = "md"  # default
-    if args.format:
-        output_format = args.format
-    elif args.h:
-        output_format = "html"
-    elif args.p:
-        output_format = "pdf"
-    elif args.a:
-        output_format = "audio"
-    elif args.P:
-        output_format = "publish"
-
-    # Determine final language mode
-    lang_mode = "trans"  # default
-    if args.lang:
-        lang_mode = args.lang
-    elif args.r:
-        lang_mode = "raw"
-    elif args.b:
-        lang_mode = "both"
-
-    # Determine proxy mode override
-    # None means implicit resolution (env -> INI -> WinHTTP).
-
-    fetch_thread = None
-    if args.thread:
-        fetch_thread = False if args.thread == "off" else args.thread
-    elif args.no_thread:
-        fetch_thread = False
-    fetch_thread_author = args.thread_author
-
-    # Check if URL matches special site handlers for default policies
-    handler, site_name, site_config = _get_handler_for_url(args.url)
-    explicit_output_format_selected = bool(args.format or args.h or args.p or args.a or args.P)
-    if site_config:
-        # Apply special site defaults (can be overridden by command line)
-        if site_config.get("default_no_proxy") and proxy_mode is None and not Fetcher._is_windows():
-            logger.info(f"{site_name}: Applying default 'no proxy' policy (can be overridden with -x)")
-            proxy_mode = "no"
-
-        if site_config.get("default_no_translate") and lang_mode == "trans":
-            logger.info(f"{site_name}: Applying default 'no translate' policy (can be overridden with -l)")
-            lang_mode = "raw"
-
-        if site_config.get("default_thread") and fetch_thread is None:
-            logger.info(f"{site_name}: Applying default thread expansion policy")
-            fetch_thread = "after"
-
-    # NCPSSD secure article pages default to PDF output (same as implicit `-p`).
-    # This only applies when user did not explicitly choose an output format.
-    if (
-        not explicit_output_format_selected
-        and site_name == "ncpssd"
-        and Fetcher._is_ncpssd_secure_article_url(args.url)
-    ):
-        output_format = "pdf"
-        logger.info("ncpssd: Applying default output format 'pdf' for secure article page")
-
-    # Determine output path
-    output_path = resolve_user_path(args.output) if args.output else None
-    if args.O:
-        output_path = "-"
-
-    # For NCPSSD secure article pages, PDF mode should download the original full-text PDF
-    # by simulating a click on the page's "全文下载" button.
-    if output_format == "pdf" and site_name == "ncpssd" and Fetcher._is_ncpssd_secure_article_url(args.url):
-        downloaded_pdf = Fetcher.download_ncpssd_pdf(
-            args.url,
-            config=config,
-            output_path=output_path,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-        )
-        if downloaded_pdf:
-            print(downloaded_pdf)
-            return
-        logger.warning(
-            "NCPSSD original PDF download was unavailable. Falling back to generated PDF from extracted content."
-        )
-
-    # 1. Fetch
-    _raise_if_interrupted()
-    archive_is_url = None
-    if local_file_path:
-        try:
-            html_content, _ = _read_local_file(local_file_path)
-        except Exception as e:
-            logger.error(f"Failed to read local file: {e}")
-            sys.exit(1)
-    else:
-        try:
-            html_content = Fetcher.fetch(
-                args.url,
-                config=config,
-                use_browser=args.browser,
-                proxy_mode_override=proxy_mode,
-                custom_proxy_override=custom_proxy,
-                fetch_thread=fetch_thread,
-                fetch_thread_author=fetch_thread_author,
-                twitter_backend=args.twitter_backend,
-                twitter_cli_bin=args.twitter_cli_bin,
-                twitter_browser=args.twitter_browser,
-                twitter_profile=args.twitter_profile,
-            )
-        except Exception as e:
-            logger.error(f"Failed to fetch {args.url}: {e}")
-            diagnosis = _diagnose_network_fetch_failure(args.url, e)
-            if diagnosis:
-                logger.error(diagnosis)
-            sys.exit(1)
-
-        if not html_content:
-            if Fetcher._is_twitter_url(args.url):
-                logger.error("Failed to fetch usable Twitter/X content (likely login wall or proxy/session issue).")
-            else:
-                logger.error(f"Failed to fetch usable content from {args.url}.")
-            sys.exit(1)
-
-        if args.transcribe:
-            if site_name not in {"pocketcasts", "xiaoyuzhoufm"}:
-                parser.error("-w/--transcribe currently supports Pocket Casts and Xiaoyuzhou episode URLs only")
-            try:
-                html_content = Fetcher._transcribe_podcast_content(
-                    html_content,
-                    config,
-                    proxy_mode_override=proxy_mode,
-                    custom_proxy_override=custom_proxy,
-                    timestamps_override=args.transcript_timestamps,
-                )
-            except Exception as exc:
-                logger.error(f"Podcast transcription failed: {exc}")
-                sys.exit(1)
-
-        # ── Paywall detection and archive-domain fallback ──
-        paywall_result = Fetcher._detect_paywall(html_content, url=args.url)
-        if paywall_result and paywall_result.get("detected"):
-            logger.warning(
-                f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
-                f"{paywall_result.get('reason', 'unknown')}"
-            )
-            logger.info("Attempting to fetch from archive domains...")
-            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
-                args.url,
-                config=config,
-                proxy_mode_override=proxy_mode,
-                custom_proxy_override=custom_proxy,
-            )
-            if archived_html:
-                logger.info("Archive snapshot fetched successfully, using it as content source.")
-                archive_is_url = snapshot_url
-                html_content = archived_html
-            else:
-                logger.error("内容受付费墙控制，未抓取全文")
-                logger.error(f"  原始 URL: {args.url}")
-                logger.error("  提示：程序已轮换多个 archive 域名；也可手动访问 https://archive.is/ 搜索该页面。")
-                sys.exit(1)
-
-    _raise_if_interrupted()
-    try:
-        processed = _process_fetched_content(
-            html_content,
-            args.url,
-            config,
-            site_name=site_name,
-            site_config=site_config,
-            lang_mode=lang_mode,
-            ocr_args=args,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-            llm_provider=args.llm if hasattr(args, "llm") else None,
-            extractor=extractor,
-        )
-    except Exception as e:
-        logger.error(f"Failed to process fetched content: {e}")
-        sys.exit(1)
-
-    source_url = processed["source_url"]
-    content_base_url = processed["content_base_url"]
-    title = processed["title"]
-    cleaned_html = processed["cleaned_html"]
-    md_content = processed["markdown"]
-    original_md = processed["raw_markdown"]
-    original_title = processed["original_title"]
-    translated_title = processed["translated_title"]
-    translated_description = processed["translated_description"]
-    translation_performed = processed["translation_performed"]
-
-    # 5. Output
-    # Use the source URL from meta tag if available (for xhslink resolution)
-    if source_url != args.url:
-        logger.info(f"Using resolved source URL for metadata: {source_url}")
-
-    # Handle output based on format
-    _raise_if_interrupted()
-    if output_format == "pdf":
-        if output_path:
-            OutputHandler.generate_pdf(title, md_content, config, output_path)
-        else:
-            OutputHandler.generate_pdf(title, md_content, config)
-
-    elif output_format == "html":
-        if output_path:
-            OutputHandler.save_html(
-                title,
-                cleaned_html,
-                config,
-                inline=html_inline,
-                output_path=output_path,
-            )
-        else:
-            OutputHandler.save_html(title, cleaned_html, config, inline=html_inline)
-
-    elif output_format == "audio":
-        if site_name in {"pocketcasts", "xiaoyuzhoufm"}:
-            saved_path = Fetcher._download_podcast_audio(
-                html_content,
-                config,
-                output_path=output_path,
-                proxy_mode_override=proxy_mode,
-                custom_proxy_override=custom_proxy,
-            )
-            print(saved_path)
-        elif output_path:
-            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=output_path)
-        else:
-            TTSHandler.run_tts(title, md_content, config, speak=args.speak)
-
-    elif output_format == "publish":
-        # Publish to pastebin (md content without YAML front matter)
-        paste_url = PublishHandler.publish_to_pastebin(
-            title,
-            md_content,
-            config,
-            proxy_mode_override=proxy_mode,
-            custom_proxy_override=custom_proxy,
-        )
-        if paste_url:
-            print(f"\nPublished to: {paste_url}")
-        else:
-            logger.error("Failed to publish content.")
-            sys.exit(1)
-
-    else:  # md (default)
-        title = OutputHandler.normalize_markdown_encoding(title)
-        md_content = OutputHandler.normalize_markdown_encoding(md_content)
-        if translated_title:
-            translated_title = OutputHandler.normalize_markdown_encoding(translated_title)
-
-        # Get translator model name if translation was performed
-        translator = None
-        if translation_performed:
-            try:
-                llm_provider = args.llm if hasattr(args, "llm") else None
-                llm_config = config.get_llm_config(llm_provider)
-                translator = llm_config["model"]
-            except Exception as e:
-                logger.warning(f"Could not get LLM config for translator: {e}")
-
-        # archive_url: prioritize archive snapshot (paywall fallback),
-        # then explicit Wayback Machine --archive flag / [Output] archive default.
-        archive_url = archive_is_url
-        if not archive_url and add_archive and not no_front_matter and output_path != "-":
-            archive_url = Fetcher.save_wayback_snapshot(
-                source_url,
-                config=config,
-                proxy_mode_override=proxy_mode,
-                custom_proxy_override=custom_proxy,
-            )
-
-        if args.speak:
-            TTSHandler.run_tts(title, md_content, config, speak=True)
-        elif output_path == "-":
-            # Output to stdout
-            _configure_stdout_utf8()
-            sys.stdout.write(f"# {title}\n\n")
-            sys.stdout.write(md_content)
-            if not md_content.endswith("\n"):
-                sys.stdout.write("\n")
-        else:
-            OutputHandler.save_markdown(
-                title,
-                md_content,
-                config,
-                output_path,
-                html_content=html_content,
-                add_front_matter=not no_front_matter,
-                translated_title=translated_title if translation_performed else None,
-                translated_description=translated_description if translation_performed else None,
-                source_url=source_url,
-                translator=translator,
-                archive_url=archive_url,
-            )
+    _run_search_batch(args, config, parser, proxy_mode, custom_proxy)
 
 def run_cli():
     """Run the CLI entrypoint with consistent Ctrl+C exit behavior."""
