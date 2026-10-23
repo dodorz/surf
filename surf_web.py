@@ -84,6 +84,7 @@ from surf import (
     _get_version,
     logger,
     _process_fetched_content,
+    _save_failed_url_note,
     _translate_markdown_document,
     build_search_filename_prefix,
     resolve_extractor,
@@ -3386,6 +3387,17 @@ def _process_web_request(data, translate_sync=False):
         },
     }
     return result, lang_mode, translation_pending
+def _record_web_failure(data):
+    """Persist a URL that failed to fetch/convert so it can be retried later."""
+    failed_url = extract_url_from_text(data.get("url"))
+    if not failed_url:
+        return
+    try:
+        _save_failed_url_note(failed_url, get_config())
+    except Exception as exc:
+        logger.warning("Could not save failed URL note for %s: %s", failed_url, exc)
+
+
 @app.route("/api/process", methods=["POST"])
 def process_url():
     """Process a URL or free-form text post and return the result."""
@@ -3403,9 +3415,11 @@ def process_url():
         return jsonify(result)
 
     except ValueError as e:
+        _record_web_failure(data)
         return jsonify({"success": False, "error": str(e)})
     except Exception as e:
         logger.error(f"Processing failed: {e}")
+        _record_web_failure(data)
         return jsonify({"success": False, "error": str(e)})
 @app.route("/download/<filename>")
 def download_file(filename):

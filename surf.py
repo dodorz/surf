@@ -14789,6 +14789,71 @@ def _build_search_filename_prefix(args, keywords):
     return build_search_filename_prefix(getattr(args, "search_prefix", None), keywords)
 
 
+FAILED_URL_FILENAME_PREFIX = "获取失败_"
+
+
+def _is_web_url(value):
+    return isinstance(value, str) and value.strip().lower().startswith(("http://", "https://"))
+
+
+def _failed_url_filename_stem(url, title=None):
+    """Pick a readable filename stem for a failed URL note."""
+    candidates = []
+    title_text = str(title or "").strip()
+    if title_text and title_text != url:
+        candidates.append(title_text)
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").removeprefix("www.")
+        path = parsed.path.strip("/").replace("/", "_")
+        candidates.append(f"{host}_{path}" if path else host)
+    except Exception:
+        pass
+    candidates.append(url)
+    for raw in candidates:
+        stem = OutputHandler._safe_filename_title(raw, max_len=100).strip().rstrip(". ")
+        if stem and stem != "Untitled":
+            return stem
+    return "url"
+
+
+def _save_failed_url_note(url, config, title=None):
+    """Save the failed URL itself to ``[Output] md_dir`` for later retry.
+
+    The filename is ``获取失败_<title>.md``; the file body contains only the URL.
+    Returns the written path, or ``None`` when the note could not be written.
+    """
+    if not _is_web_url(url):
+        return None
+    try:
+        md_dir = config.get_path("Output", "md_dir", fallback="./notes")
+    except Exception:
+        md_dir = "./notes"
+    try:
+        os.makedirs(md_dir, exist_ok=True)
+        stem = _failed_url_filename_stem(url, title=title)
+        filepath = os.path.join(md_dir, f"{FAILED_URL_FILENAME_PREFIX}{stem}.md")
+        # Do not clobber an unrelated failure note that happens to share a title.
+        suffix = 2
+        while os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as existing_file:
+                    existing_text = existing_file.read().strip()
+            except OSError:
+                existing_text = None
+            if existing_text == url.strip():
+                break
+            filepath = os.path.join(md_dir, f"{FAILED_URL_FILENAME_PREFIX}{stem}_{suffix}.md")
+            suffix += 1
+        with open(filepath, "w", encoding="utf-8") as output_file:
+            output_file.write(url.strip() + "\n")
+        logger.info(f"Saved failed URL to {filepath}")
+        return filepath
+    except Exception as exc:
+        logger.warning(f"Could not save failed URL note for {url}: {exc}")
+        return None
+
+
 def _resolve_search_limit(args, config, parser):
     """Resolve --search-limit, falling back to ``[Search] limit`` then the default."""
     raw_limit = args.search_limit
@@ -15275,10 +15340,26 @@ def _save_single_result(prepared, args, config, filename_prefix="", search_query
 
 def _process_single_url(args, config, parser, proxy_mode, custom_proxy):
     """Fetch, convert, and save the URL in ``args.url`` using parsed CLI options."""
-    prepared = _prepare_single_url(args, config, parser, proxy_mode, custom_proxy)
+    try:
+        prepared = _prepare_single_url(args, config, parser, proxy_mode, custom_proxy)
+    except SystemExit as exc:
+        if exc.code not in (0, None, 2):
+            _save_failed_url_note(args.url, config)
+        raise
+    except Exception:
+        _save_failed_url_note(args.url, config)
+        raise
     if prepared is None:
         return
-    _save_single_result(prepared, args, config)
+    try:
+        _save_single_result(prepared, args, config)
+    except SystemExit as exc:
+        if exc.code not in (0, None, 2):
+            _save_failed_url_note(args.url, config)
+        raise
+    except Exception:
+        _save_failed_url_note(args.url, config)
+        raise
 
 
 def _strip_leading_markdown_heading(markdown_text, title):
@@ -15464,9 +15545,12 @@ def _run_search_batch(args, config, parser, proxy_mode, custom_proxy):
         except SystemExit as exc:
             if exc.code:
                 failures.append(result["url"])
+                if exc.code != 2:
+                    _save_failed_url_note(result["url"], config, title=result.get("title"))
                 logger.error(f"[{index}/{len(selected)}] Failed: {result['url']}")
         except Exception as exc:
             failures.append(result["url"])
+            _save_failed_url_note(result["url"], config, title=result.get("title"))
             logger.error(f"[{index}/{len(selected)}] Failed: {result['url']}: {exc}")
         if delay and index < len(selected):
             time.sleep(delay)
@@ -15486,7 +15570,12 @@ def _run_search_batch(args, config, parser, proxy_mode, custom_proxy):
             raise
         except Exception as exc:
             logger.error(f"Failed to save merged search results: {exc}")
-            failures.append("<merged output>")
+            for prepared in prepared_results:
+                failed_url = prepared.get("url") or ""
+                prepared_title = (prepared.get("processed") or {}).get("title")
+                _save_failed_url_note(failed_url, config, title=prepared_title)
+                if failed_url:
+                    failures.append(failed_url)
 
     if failures:
         logger.warning(f"{len(failures)} of {len(selected)} search results failed")

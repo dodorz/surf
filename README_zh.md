@@ -8,6 +8,7 @@
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
 - **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
+- **失败 URL 记录**：CLI 或 Web UI 获取/转换/保存网页 URL（包括搜索结果）失败时，会把该 URL 本身写入 `[Output] md_dir`，文件名为 `获取失败_<标题>.md`（没有标题时用域名/路径生成），方便之后重试。不会覆盖同名的无关文件；同一 URL 的已有记录会复用。
 - **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
 - **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙等网站优化处理，支持复用已保存的登录态。
 - **Podcast 音频**：Pocket Casts 和小宇宙剧集可以使用 `-a/--format audio` 保存 RSS/页面中的原始音频文件（保留 `.m4a` 等源格式）；使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写。
@@ -127,7 +128,7 @@ Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
 - Podcast 音频转写（`-w/--transcribe`）：识别到 Pocket Casts 或小宇宙剧集 URL 后才显示“转写 Podcast 音频（-w）”入口
 - 宽松 URL / 文本输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接；如果没有 URL，则会把这段文字直接当作帖子保存，并以第一句作为标题
 - 输入区额外提供“开始获取”和“全文保存”模式；开启“全文保存”后，即使文本里带有 URL，也会保留整段文本原样进入结果卡片
-- 关键词搜索模式（`-S/--search`）：勾选“关键词搜索 (-S)”后输入关键词，并选择搜索引擎 / 结果数量 / 文件名前缀。Surf 会获取搜索结果并以「标题 + URL」的可勾选列表预览；获取选中的结果后生成常规预览卡片，逐条保存和“合并保存全部结果”与普通网页结果完全一致。搜索保存的文件会写入 `search_query` front matter，并使用 `[前缀]文件名`
+- 关键词搜索模式（`-S/--search`）：勾选“关键词搜索 (-S)”后输入关键词，并选择搜索引擎 / 结果数量 / 文件名前缀。Surf 会获取搜索结果并以「标题 + URL」的可勾选列表预览；获取选中的结果后生成常规预览卡片，逐条保存和“合并保存全部结果”与普通网页结果完全一致。搜索保存的文件会写入 `search_query` front matter，并使用 `[前缀]文件名`；抓取或转换失败的 URL 会把 URL 本身写入 `[Output] md_dir` 的 `获取失败_<标题>.md`
 - “直接保存”会根据当前 URL/文本、输出格式和其他选项获取内容并加入后台保存队列，不生成预览卡片；成功提示会显示被加入队列的 URL，并在提示下方展示保存队列列表，实时跟踪每个后台保存任务（排队中 / 保存中 / 已完成 / 失败）；队列列表在连续入队时保持显示，只有当队列中的所有任务都结束后才会自动隐藏
 - 每个结果卡在预览区下方都会直接显示“保存文件夹”“文件标题”两个可编辑输入框，并预填默认值；点击保存按钮后会直接写入，不再额外弹框确认
 - 当一次提交生成多张结果卡时，Surf Web 还会额外显示一张“合并保存”结果卡，可将所有成功结果合并导出为一个 Markdown / HTML / PDF / Audio 文件
@@ -360,6 +361,7 @@ surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
 - 非交互 stdin（脚本/CI）会处理全部已获取结果；脚本中建议使用 `--search-top N` 或 `--feel-lucky` 保证行为确定。
 - 输出：默认每条结果一个文件；`--search-merge` 合并为一个文档（支持 md/html/pdf/audio/publish）。不会创建搜索专用目录，文件仍写入常规 `[Output]` 目录；文件名固定为 `[<前缀>]<标题>`，前缀默认取搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖（末尾分隔符会被规范化，已带中括号的前缀不会重复包裹）；搜索模式下 `-o/--output` 只接受 `-`（标准输出）。
 - Front matter：每个保存的文件会记录 `search_query`，结果 URL 在抓取前以及写入 front matter `source` 时会去掉 `utm_*`、`fbclid`、`gclid`、`dclid`、`spm` 等跟踪参数。
+- 获取/保存失败的搜索结果会在 `[Output] md_dir` 中生成 `获取失败_<标题>.md`，内容就是失败的 URL，方便之后重试。
 - 其它选项（`-l/--lang`、`-p`、`-h`、`-a`、`-e`、代理相关选项、`--archive` 等）都会应用到每一条搜索结果。
 
 ### 输出路径 (-o / -O)

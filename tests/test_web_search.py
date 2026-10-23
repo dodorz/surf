@@ -5,6 +5,20 @@ import pytest
 import surf_web
 
 
+class _FakeConfig:
+    def __init__(self, values=None):
+        self.values = dict(values or {})
+
+    def get(self, section, key, fallback=None):
+        return self.values.get((section, key), fallback)
+
+    def set(self, section, key, value):
+        self.values[(section, key)] = value
+
+    def get_path(self, section, key, fallback=None):
+        return self.values.get((section, key), fallback)
+
+
 @pytest.fixture()
 def client():
     surf_web.app.config.update(TESTING=True)
@@ -289,3 +303,61 @@ def test_async_save_worker_inherits_search_provenance_from_cached_result(tmp_pat
     assert job["savePath"] == str(saved)
     text = saved.read_text(encoding="utf-8")
     assert "search_query: demo keywords" in text
+
+
+def test_web_search_failure_writes_failed_url_note(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig({("Output", "md_dir"): str(tmp_path)}))
+
+    def failing_process(data, translate_sync=False):
+        raise ValueError("fetch failed")
+
+    monkeypatch.setattr(surf_web, "_process_web_request", failing_process)
+
+    response = client.post(
+        "/api/process",
+        json={
+            "url": "https://example.com/fail",
+            "lang": "raw",
+            "search_query": "demo keywords",
+        },
+    )
+    payload = response.get_json()
+
+    assert payload["success"] is False
+    saved = tmp_path / "获取失败_example.com_fail.md"
+    assert saved.read_text(encoding="utf-8") == "https://example.com/fail\n"
+
+
+def test_web_non_search_failure_writes_failed_url_note(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig({("Output", "md_dir"): str(tmp_path)}))
+
+    def failing_process(data, translate_sync=False):
+        raise ValueError("fetch failed")
+
+    monkeypatch.setattr(surf_web, "_process_web_request", failing_process)
+
+    response = client.post(
+        "/api/process",
+        json={"url": "https://example.com/fail", "lang": "raw"},
+    )
+
+    assert response.get_json()["success"] is False
+    saved = tmp_path / "获取失败_example.com_fail.md"
+    assert saved.read_text(encoding="utf-8") == "https://example.com/fail\n"
+
+
+def test_web_text_post_failure_does_not_write_note(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig({("Output", "md_dir"): str(tmp_path)}))
+
+    def failing_process(data, translate_sync=False):
+        raise ValueError("processing failed")
+
+    monkeypatch.setattr(surf_web, "_process_web_request", failing_process)
+
+    response = client.post(
+        "/api/process",
+        json={"url": "just a plain text post", "lang": "raw"},
+    )
+
+    assert response.get_json()["success"] is False
+    assert list(tmp_path.glob("*.md")) == []
