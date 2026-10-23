@@ -16,6 +16,9 @@ class _FakeConfig:
             return self.custom_proxy
         return fallback
 
+    def has_section(self, section):
+        return False
+
 
 def _make_args(**overrides):
     defaults = {

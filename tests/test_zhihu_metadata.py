@@ -57,8 +57,8 @@ def test_extract_metadata_reads_zhihu_meta_fields():
     )
 
     assert metadata["author"] == "Alice"
-    assert metadata["created"] == "2026-06-05T10:20"
-    assert metadata["updated"] == "2026-06-05T12:34"
+    assert metadata["created"] == "2026-06-05T10:20:30"
+    assert metadata["updated"] == "2026-06-05T12:34:56"
 
 
 def test_build_zhihu_html_filters_zhida_search_links():

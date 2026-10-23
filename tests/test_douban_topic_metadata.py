@@ -24,7 +24,7 @@ def test_douban_topic_extracts_author_and_created_metadata():
     )
 
     assert metadata["author"] == "Example Author"
-    assert metadata["created"] == "2026-06-05T14:23"
+    assert metadata["created"] == "2026-06-05T14:23:00"
 
 
 def test_douban_topic_extracts_real_world_author_class_selector():
@@ -51,7 +51,7 @@ def test_douban_topic_extracts_real_world_author_class_selector():
     )
 
     assert metadata["author"] == "gee"
-    assert metadata["created"] == "2026-04-22T19:48"
+    assert metadata["created"] == "2026-04-22T19:48:13"
 
 
 def test_douban_source_strips_tracking_query_params():

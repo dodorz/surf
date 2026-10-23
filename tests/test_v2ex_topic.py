@@ -1,4 +1,5 @@
 import surf
+from dateutil import parser as date_parser
 
 
 V2EX_HTML = """
@@ -81,6 +82,10 @@ def test_v2ex_source_url_drops_reply_fragment_for_front_matter():
     assert metadata["source"] == "https://v2ex.com/t/123"
 
 
+def _local_iso(value):
+    return date_parser.parse(value).astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
 def test_v2ex_metadata_moves_leading_fields_into_front_matter():
     html = surf._build_direct_markdown_payload(
         "Author: TuTouPower\nNode: 程序员\nPublished: 2026-05-27 09:04:11 +08:00\nSource: https://v2ex.com/t/1215784#reply106\n\nBody",
@@ -93,7 +98,7 @@ def test_v2ex_metadata_moves_leading_fields_into_front_matter():
 
     assert metadata["author"] == "TuTouPower"
     assert metadata["tags"] == ["程序员"]
-    assert metadata["created"] == "2026-05-27T09:04"
+    assert metadata["created"] == _local_iso("2026-05-27 09:04:11 +08:00")
     assert metadata["source"] == "https://v2ex.com/t/1215784"
 
 
@@ -145,7 +150,7 @@ def test_v2ex_html_page_metadata_moves_into_front_matter():
 
     assert metadata["author"] == "alice"
     assert metadata["tags"] == ["Test Node"]
-    assert metadata["created"] == "2026-04-24T18:51"
+    assert metadata["created"] == _local_iso("2026-04-24 18:51:29 +08:00")
     assert metadata["source"] == "https://v2ex.com/t/1"
 
 def test_thread_extraction_supports_range_and_author_scope():

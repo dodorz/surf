@@ -26,6 +26,9 @@ class _FakeConfig:
     def get_path(self, section, key, fallback=None):
         return fallback or "."
 
+    def has_section(self, section):
+        return False
+
     def _get_available_llm_providers(self):
         return []
 
@@ -140,7 +143,7 @@ def test_processed_markdown_strips_leading_blank_lines(monkeypatch):
     monkeypatch.setattr(
         surf_web.ContentProcessor,
         "extract_content",
-        lambda html: ("Example", "<article><p>Hello.</p></article>"),
+        lambda html, extractor=None: ("Example", "<article><p>Hello.</p></article>"),
     )
     monkeypatch.setattr(
         surf_web.ContentProcessor,
@@ -648,6 +651,7 @@ def test_web_process_uses_shared_post_fetch_pipeline(monkeypatch):
             "raw_markdown": "Processed body",
             "original_title": "Processed",
             "translated_title": None,
+            "translated_description": None,
             "translation_performed": False,
             "source_url": request_url,
             "content_base_url": request_url,
