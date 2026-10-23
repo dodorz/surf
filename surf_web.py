@@ -73,6 +73,7 @@ from surf import (
     OcrHandler,
     OutputHandler,
     PublishHandler,
+    SearchHandler,
     TTSHandler,
     _apply_browser_backend_override,
     _apply_tts_overrides,
@@ -84,6 +85,7 @@ from surf import (
     logger,
     _process_fetched_content,
     _translate_markdown_document,
+    build_search_filename_prefix,
     resolve_extractor,
     resolve_user_path,
 )
@@ -364,6 +366,78 @@ HTML_TEMPLATE = """
             font-size: 1.15em;
             font-weight: 700;
             color: #3047b0;
+        }
+
+        .search-preview-card {
+            border: 2px solid #c7d2fe;
+            background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
+        }
+
+        .search-preview-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .search-preview-actions .btn {
+            padding: 8px 16px;
+            font-size: 14px;
+        }
+
+        .search-result-count {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .search-result-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 460px;
+            overflow-y: auto;
+            margin-top: 12px;
+        }
+
+        .search-result-item {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            padding: 10px 12px;
+            border: 1px solid #e1e5e9;
+            border-radius: 8px;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        .search-result-item:hover {
+            border-color: #667eea;
+            background: #f6f8ff;
+        }
+
+        .search-result-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            flex: 0 0 auto;
+            margin-top: 3px;
+        }
+
+        .search-result-text {
+            min-width: 0;
+        }
+
+        .search-result-title {
+            display: block;
+            font-weight: 600;
+            color: #333;
+            word-break: break-word;
+        }
+
+        .search-result-url {
+            display: block;
+            color: #667eea;
+            font-size: 0.85em;
+            word-break: break-all;
         }
         
         .result-header {
@@ -692,7 +766,7 @@ HTML_TEMPLATE = """
         <div class="card">
             <form id="surfForm">
                 <div class="form-group">
-                    <label for="url">URL 地址或纯文本</label>
+                    <label for="url" id="urlLabel">URL 地址或纯文本</label>
                     <textarea id="url" name="url" class="url-input" rows="4"
                               placeholder="粘贴链接，或直接输入一段没有 URL 的文字"></textarea>
                     <div class="input-toolbar">
@@ -700,15 +774,42 @@ HTML_TEMPLATE = """
                             <input type="checkbox" id="saveFullText" name="save_full_text">
                             <label for="saveFullText">全文保存</label>
                         </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="searchMode" name="search_mode">
+                            <label for="searchMode">关键词搜索 (-S)</label>
+                        </div>
                         <div class="input-actions">
                             <button type="submit" class="btn btn-primary" id="submitBtn">开始获取</button>
                             <button type="button" class="btn btn-secondary" id="directSaveBtn">直接保存</button>
                         </div>
                     </div>
-                    <div class="field-hint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
-                    <div class="field-hint">勾选“全文保存”后，即使文本里包含 URL，也会整段作为正文保存，不再提取链接抓取网页。</div>
+                    <div class="field-hint" id="urlHint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
+                    <div class="field-hint" id="saveFullTextHint">勾选“全文保存”后，即使文本里包含 URL，也会整段作为正文保存，不再提取链接抓取网页。</div>
                 </div>
-                
+
+                <div class="options-grid" id="searchOptionsGroup" style="display: none;">
+                    <div class="form-group">
+                        <label for="searchEngine">搜索引擎</label>
+                        <select id="searchEngine" name="search_engine">
+                            {% for option in search_engine_options %}
+                            <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="searchLimit">结果数量</label>
+                        <input type="number" id="searchLimit" name="search_limit" min="1" max="20" value="{{ default_search_limit }}">
+                    </div>
+                    <div class="form-group">
+                        <label for="searchPrefix">文件名前缀</label>
+                        <input type="text" id="searchPrefix" name="search_prefix" placeholder="留空 = 使用搜索关键词">
+                        <div class="field-hint">保存文件名为 [前缀]标题.扩展名。</div>
+                    </div>
+                    <div class="form-group wide">
+                        <div class="field-hint">搜索后先显示「标题 + URL」勾选列表；获取选中的结果会生成常规结果卡，之后可逐条保存或用“合并保存全部结果”合并保存。“直接保存”会保存本次搜索返回的全部结果。</div>
+                    </div>
+                </div>
+
                 <div class="section-title">获取内容</div>
                 <div class="options-grid">
                     <div class="form-group">
@@ -1018,6 +1119,8 @@ HTML_TEMPLATE = """
         let siteDefaultsRequestId = 0;
         let siteDefaultsTimer = null;
         const urlInput = document.getElementById('url');
+        const searchModeCheckbox = document.getElementById('searchMode');
+        const saveFullTextCheckbox = document.getElementById('saveFullText');
 
         function getCheckedRadioValue(name) {
             const checked = document.querySelector(`input[name="${name}"]:checked`);
@@ -1052,7 +1155,7 @@ HTML_TEMPLATE = """
         proxyModeProgrammaticUpdate = false;
 
         async function refreshProxyDefault(force = false) {
-            if (!force && proxyModeTouched) {
+            if (!force && (proxyModeTouched || isSearchMode())) {
                 return;
             }
             try {
@@ -1078,6 +1181,9 @@ HTML_TEMPLATE = """
         refreshProxyDefault(true);
 
         async function refreshSiteDefaults(force = false) {
+            if (isSearchMode()) {
+                return;
+            }
             const requestId = ++siteDefaultsRequestId;
             try {
                 const url = (urlInput?.value || '').trim();
@@ -1321,13 +1427,15 @@ HTML_TEMPLATE = """
                 metadata: {
                     title,
                     html_content: metadataHtml,
-                    add_front_matter: false,
+                    add_front_matter: !!results[0]?.metadata?.search_query,
                     translated_title: null,
                     source_url: null,
                     archive_url: null,
                     translator: null,
                     html_inline: false,
                     combined_sources: sourceLines,
+                    search_query: results[0]?.metadata?.search_query || null,
+                    search_prefix: results[0]?.metadata?.search_prefix || '',
                 },
             };
         }
@@ -1452,6 +1560,7 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 ${source ? `<div class="field-hint result-source"></div>` : ''}
+                ${result?.metadata?.search_prefix ? `<div class="field-hint">保存文件名前缀：${escapeHtml(result.metadata.search_prefix)}</div>` : ''}
                 ${result.translation_pending ? '<div class="field-hint">翻译处理中，先显示原文结果。</div>' : ''}
                 <div class="tabs">
                     <button class="tab active" data-tab="markdown">Markdown</button>
@@ -1515,27 +1624,256 @@ HTML_TEMPLATE = """
             container.appendChild(card);
         }
 
+        function updateSearchModeControls() {
+            const enabled = !!searchModeCheckbox?.checked;
+            const group = document.getElementById('searchOptionsGroup');
+            if (group) {
+                group.style.display = enabled ? 'grid' : 'none';
+            }
+            const label = document.getElementById('urlLabel');
+            if (label) {
+                label.textContent = enabled ? '搜索关键词' : 'URL 地址或纯文本';
+            }
+            if (urlInput) {
+                urlInput.placeholder = enabled
+                    ? '输入搜索关键词，例如：python asyncio tutorial'
+                    : '粘贴链接，或直接输入一段没有 URL 的文字';
+            }
+            if (saveFullTextCheckbox) {
+                if (enabled) {
+                    saveFullTextCheckbox.checked = false;
+                }
+                saveFullTextCheckbox.disabled = enabled;
+            }
+            const urlHint = document.getElementById('urlHint');
+            if (urlHint) {
+                urlHint.style.display = enabled ? 'none' : 'block';
+            }
+            const saveFullTextHint = document.getElementById('saveFullTextHint');
+            if (saveFullTextHint) {
+                saveFullTextHint.style.display = enabled ? 'none' : 'block';
+            }
+        }
+
+        if (searchModeCheckbox) {
+            searchModeCheckbox.addEventListener('change', updateSearchModeControls);
+            updateSearchModeControls();
+        }
+
+        function isSearchMode() {
+            return !!searchModeCheckbox?.checked;
+        }
+
+        async function requestSearch(keywords, data) {
+            const payload = {
+                keywords,
+                search_engine: data.search_engine || '',
+                search_limit: data.search_limit || '',
+                search_prefix: data.search_prefix || '',
+                proxy: data.proxy || 'no',
+                custom_proxy: data.custom_proxy || '',
+            };
+            const response = await fetch(API_BASE + '/api/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const result = await parseJsonResponse(response);
+            if (!result.success) {
+                throw new Error(result.error || '搜索失败');
+            }
+            return result;
+        }
+
+        function renderSearchPreviewCard(searchData) {
+            const container = document.getElementById('resultsContainer');
+            container.querySelectorAll('.search-preview-card').forEach((el) => el.remove());
+            const card = document.createElement('div');
+            card.className = 'card result-card show search-preview-card';
+            card.dataset.keywords = searchData.keywords || '';
+            card.dataset.prefix = searchData.prefix || '';
+            card.innerHTML = `
+                <div class="result-header">
+                    <h2 class="result-title"></h2>
+                    <div class="search-preview-actions">
+                        <label class="checkbox-group" style="margin: 0;">
+                            <input type="checkbox" class="search-select-all" checked>
+                            <span>全选</span>
+                        </label>
+                        <span class="search-result-count"></span>
+                        <button type="button" class="btn btn-primary search-fetch-btn">获取选中</button>
+                    </div>
+                </div>
+                <div class="field-hint">勾选要获取的搜索结果。获取后会生成常规结果卡，可逐条保存，也可用“合并保存全部结果”合并保存。保存文件名前缀：${escapeHtml(searchData.prefix || '')}</div>
+                <div class="search-result-list"></div>
+            `;
+            card.querySelector('.result-title').textContent =
+                `搜索结果：${searchData.keywords}（${searchData.results.length} 条，${searchData.engine}）`;
+            card.querySelector('.search-result-list').innerHTML = '';
+            const list = card.querySelector('.search-result-list');
+            searchData.results.forEach((item, index) => {
+                const row = document.createElement('label');
+                row.className = 'search-result-item';
+                row.innerHTML = `
+                    <input type="checkbox" class="search-result-checkbox" data-index="${index}" checked>
+                    <span class="search-result-text">
+                        <span class="search-result-title"></span>
+                        <span class="search-result-url"></span>
+                    </span>
+                `;
+                row.querySelector('.search-result-title').textContent = item.title || item.url;
+                row.querySelector('.search-result-url').textContent = item.url;
+                list.appendChild(row);
+            });
+
+            const updateCount = () => {
+                const boxes = Array.from(card.querySelectorAll('.search-result-checkbox'));
+                const checked = boxes.filter((box) => box.checked).length;
+                card.querySelector('.search-result-count').textContent = `已选 ${checked}/${boxes.length}`;
+                const selectAll = card.querySelector('.search-select-all');
+                selectAll.checked = checked === boxes.length;
+                selectAll.indeterminate = checked > 0 && checked < boxes.length;
+                card.querySelector('.search-fetch-btn').disabled = checked === 0;
+            };
+            card.querySelectorAll('.search-result-checkbox').forEach((box) => {
+                box.addEventListener('change', updateCount);
+            });
+            card.querySelector('.search-select-all').addEventListener('change', function() {
+                card.querySelectorAll('.search-result-checkbox').forEach((box) => {
+                    box.checked = this.checked;
+                });
+                updateCount();
+            });
+            card.querySelector('.search-fetch-btn').addEventListener('click', () => {
+                processSearchSelection(card, searchData);
+            });
+            updateCount();
+            container.appendChild(card);
+            return card;
+        }
+
+        function getSearchSelectionUrls(card, searchData) {
+            return Array.from(card.querySelectorAll('.search-result-checkbox'))
+                .filter((box) => box.checked)
+                .map((box) => searchData.results[Number(box.dataset.index)].url);
+        }
+
+        async function processSearchSelection(card, searchData) {
+            const urls = getSearchSelectionUrls(card, searchData);
+            if (!urls.length) {
+                return;
+            }
+            const fetchBtn = card.querySelector('.search-fetch-btn');
+            const submitBtn = document.getElementById('submitBtn');
+            fetchBtn.disabled = true;
+            fetchBtn.innerHTML = '<span class="spinner"></span>获取中...';
+            submitBtn.disabled = true;
+            currentResults = [];
+            const container = document.getElementById('resultsContainer');
+            container.querySelectorAll('.result-card:not(.search-preview-card)').forEach((el) => el.remove());
+            const data = getCurrentFormData('');
+            data.search_mode = false;
+            data.search_query = searchData.keywords;
+            data.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
+            data.save_full_text = false;
+            try {
+                const successCount = await processInputList(urls, data);
+                showStatus(
+                    successCount ? 'success' : 'error',
+                    `获取完成：成功 ${successCount}/${urls.length}`
+                );
+            } catch (error) {
+                showStatus('error', '获取失败: ' + error.message);
+            } finally {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = '获取选中';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '开始获取';
+            }
+        }
+
+        async function processInputList(inputs, data) {
+            let successCount = 0;
+            for (let i = 0; i < inputs.length; i += 1) {
+                const input = inputs[i];
+                showStatus('processing', `正在处理 ${i + 1}/${inputs.length}: ${input}`);
+                const itemData = { ...data, url: input };
+                const response = await fetch(API_BASE + '/api/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(itemData)
+                });
+
+                const result = await parseJsonResponse(response);
+                if (result.success) {
+                    result.input_url = input;
+                    currentResults.push(result);
+                    window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
+                    if (data.save_full_text) {
+                        showStatus('processing', '全文保存模式，正在直接保存...');
+                        const fileType = getCheckedRadioValue('format') || 'md';
+                        const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
+                        const autoTitle = (result.defaultSaveTitle || '').trim();
+                        const saveBody = {
+                            fileType,
+                            saveDir,
+                            customTitle: autoTitle,
+                            data: result,
+                            formData: data,
+                            speak: false
+                        };
+                        try {
+                            const saveResp = await fetch(API_BASE + '/api/save-async', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(saveBody)
+                            });
+                            const saveResult = await parseJsonResponse(saveResp);
+                            if (saveResult.success && saveResult.job_id) {
+                                showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
+                                notifySaveJobState(saveResult.job_id, 'pending');
+                                pollSaveJob(saveResult.job_id);
+                            } else {
+                                showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
+                            }
+                        } catch (saveErr) {
+                            showStatus('error', '全文保存请求失败: ' + saveErr.message);
+                        }
+                    } else {
+                        const card = renderResultCard(result, i, inputs.length);
+                        if (result.translation_pending && result.translation_job_id) {
+                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
+                        }
+                    }
+                    successCount += 1;
+                } else {
+                    renderErrorCard(input, result.error, i, inputs.length);
+                }
+            }
+            refreshAggregateCard();
+            return successCount;
+        }
+
         // Form submission
         document.getElementById('surfForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            
+
             const submitBtn = document.getElementById('submitBtn');
-            const statusDiv = document.getElementById('status') || createStatusDiv();
             const resultsContainer = document.getElementById('resultsContainer');
-            
+
             submitBtn.disabled = true;
             submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
             currentResults = [];
             resultsContainer.innerHTML = '';
-            
-            showStatus('processing', '正在获取网页内容...');
-            
+
             const formData = new FormData(this);
             const data = Object.fromEntries(formData.entries());
             if (!data.proxy) {
                 data.proxy = getCheckedRadioValue('proxy') || 'no';
             }
-             
+
             // Convert checkboxes to booleans
             data.browser = data.browser === 'on';
             data.podcast_transcribe = data.podcast_transcribe === 'on';
@@ -1544,82 +1882,36 @@ HTML_TEMPLATE = """
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
             data.save_full_text = data.save_full_text === 'on';
+            data.search_mode = data.search_mode === 'on';
             const rawInput = (data.url || '').trim();
-            const inputs = data.save_full_text
-                ? (rawInput ? [rawInput] : [])
-                : (() => {
-                    const urls = extractUrlsFromInput(rawInput);
-                    return urls.length ? urls : (rawInput ? [rawInput] : []);
-                })();
 
-            if (!inputs.length) {
-                showStatus('error', '请输入 URL 或文本');
-                submitBtn.disabled = false;
-                submitBtn.textContent = '开始获取';
-                return;
-            }
-            
             try {
-                let successCount = 0;
-                for (let i = 0; i < inputs.length; i += 1) {
-                    const input = inputs[i];
-                    showStatus('processing', `正在处理 ${i + 1}/${inputs.length}: ${input}`);
-                    const itemData = { ...data, url: input };
-                    const response = await fetch(API_BASE + '/api/process', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify(itemData)
-                    });
-
-                    const result = await parseJsonResponse(response);
-                    if (result.success) {
-                        result.input_url = input;
-                        currentResults.push(result);
-                        window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
-                        if (data.save_full_text) {
-                            showStatus('processing', '全文保存模式，正在直接保存...');
-                            const fileType = getCheckedRadioValue('format') || 'md';
-                            const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
-                            const autoTitle = (result.defaultSaveTitle || '').trim();
-                            const saveBody = {
-                                fileType,
-                                saveDir,
-                                customTitle: autoTitle,
-                                data: result,
-                                formData: data,
-                                speak: false
-                            };
-                            try {
-                                const saveResp = await fetch(API_BASE + '/api/save-async', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify(saveBody)
-                                });
-                                const saveResult = await parseJsonResponse(saveResp);
-                                if (saveResult.success && saveResult.job_id) {
-                                    showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
-                                    notifySaveJobState(saveResult.job_id, 'pending');
-                                    pollSaveJob(saveResult.job_id);
-                                } else {
-                                    showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
-                                }
-                            } catch (saveErr) {
-                                showStatus('error', '全文保存请求失败: ' + saveErr.message);
-                            }
-                        } else {
-                            const card = renderResultCard(result, i, inputs.length);
-                            if (result.translation_pending && result.translation_job_id) {
-                                pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
-                            }
-                        }
-                        successCount += 1;
-                    } else {
-                        renderErrorCard(input, result.error, i, inputs.length);
+                if (data.search_mode) {
+                    if (!rawInput) {
+                        showStatus('error', '请输入搜索关键词');
+                        return;
                     }
+                    showStatus('processing', `正在搜索: ${rawInput}`);
+                    const searchData = await requestSearch(rawInput, data);
+                    renderSearchPreviewCard(searchData);
+                    showStatus('success', `找到 ${searchData.results.length} 条结果，请勾选后点击“获取选中”。`);
+                    return;
                 }
-                refreshAggregateCard();
+
+                const inputs = data.save_full_text
+                    ? (rawInput ? [rawInput] : [])
+                    : (() => {
+                        const urls = extractUrlsFromInput(rawInput);
+                        return urls.length ? urls : (rawInput ? [rawInput] : []);
+                    })();
+
+                if (!inputs.length) {
+                    showStatus('error', '请输入 URL 或文本');
+                    return;
+                }
+
+                showStatus('processing', '正在获取网页内容...');
+                const successCount = await processInputList(inputs, data);
                 showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
             } catch (error) {
                 showStatus('error', '请求失败: ' + error.message);
@@ -1629,59 +1921,81 @@ HTML_TEMPLATE = """
             }
         });
 
+        async function queueDirectSaves(inputs, formData) {
+            const fileType = getCheckedRadioValue('format') || 'md';
+            const queuedJobs = [];
+            for (let i = 0; i < inputs.length; i += 1) {
+                const input = inputs[i];
+                showStatus('processing', `正在获取并保存 ${i + 1}/${inputs.length}: ${input}`);
+                const itemFormData = { ...formData, url: input };
+                const response = await fetch(API_BASE + '/api/save-async', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileType,
+                        saveDir: '',
+                        customTitle: '',
+                        data: {},
+                        formData: itemFormData,
+                        speak: false,
+                    }),
+                });
+                const result = await parseJsonResponse(response);
+                if (!result.success || !result.job_id) {
+                    throw new Error(result.error || '保存提交失败');
+                }
+                queuedJobs.push({ jobId: result.job_id, url: input });
+                pollSaveJob(result.job_id);
+            }
+            if (!queuedJobs.length) {
+                throw new Error('没有可保存的内容');
+            }
+            let message;
+            if (queuedJobs.length === 1) {
+                message = `已将 1 个${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
+            } else {
+                const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
+                message = `已将 ${queuedJobs.length} 个${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px; text-align: left;">${urlList}</ul>`;
+            }
+            showStatus('success', message);
+            queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
+            return queuedJobs;
+        }
+
         async function directSave() {
             const directSaveBtn = document.getElementById('directSaveBtn');
             const rawInput = (urlInput?.value || '').trim();
             const formData = getCurrentFormData('');
-            const inputs = formData.save_full_text
+            let inputs = formData.save_full_text
                 ? (rawInput ? [rawInput] : [])
                 : (() => {
                     const urls = extractUrlsFromInput(rawInput);
                     return urls.length ? urls : (rawInput ? [rawInput] : []);
                 })();
 
-            if (!inputs.length) {
-                showStatus('error', '请输入 URL 或文本');
-                return;
-            }
-
             directSaveBtn.disabled = true;
-            showStatus('processing', '正在获取并保存...');
             try {
-                const fileType = getCheckedRadioValue('format') || 'md';
-                const queuedJobs = [];
-                for (let i = 0; i < inputs.length; i += 1) {
-                    const input = inputs[i];
-                    showStatus('processing', `正在获取并保存 ${i + 1}/${inputs.length}: ${input}`);
-                    const itemFormData = { ...formData, url: input };
-                    const response = await fetch(API_BASE + '/api/save-async', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            fileType,
-                            saveDir: '',
-                            customTitle: '',
-                            data: {},
-                            formData: itemFormData,
-                            speak: false,
-                        }),
-                    });
-                    const result = await parseJsonResponse(response);
-                    if (!result.success || !result.job_id) {
-                        throw new Error(result.error || '保存提交失败');
+                if (formData.search_mode) {
+                    if (!rawInput) {
+                        showStatus('error', '请输入搜索关键词');
+                        return;
                     }
-                    queuedJobs.push({ jobId: result.job_id, url: input });
-                    pollSaveJob(result.job_id);
+                    showStatus('processing', `正在搜索: ${rawInput}`);
+                    const searchData = await requestSearch(rawInput, formData);
+                    inputs = searchData.results.map((item) => item.url);
+                    formData.search_mode = false;
+                    formData.save_full_text = false;
+                    formData.search_query = searchData.keywords;
+                    formData.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
+                    if (!inputs.length) {
+                        throw new Error('没有可保存的搜索结果');
+                    }
+                } else if (!inputs.length) {
+                    showStatus('error', '请输入 URL 或文本');
+                    return;
                 }
-                let message;
-                if (queuedJobs.length === 1) {
-                    message = `已将 1 个${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
-                } else {
-                    const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
-                    message = `已将 ${queuedJobs.length} 个${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px; text-align: left;">${urlList}</ul>`;
-                }
-                showStatus('success', message);
-                queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
+                showStatus('processing', '正在获取并保存...');
+                await queueDirectSaves(inputs, formData);
             } catch (error) {
                 showStatus('error', '直接保存失败: ' + error.message);
             } finally {
@@ -1925,6 +2239,7 @@ HTML_TEMPLATE = """
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
             data.save_full_text = data.save_full_text === 'on';
+            data.search_mode = data.search_mode === 'on';
             return data;
         }
 
@@ -1947,6 +2262,10 @@ HTML_TEMPLATE = """
                 formData: formData,
                 speak
             };
+            if (container.classList.contains('aggregate-card')) {
+                body.combine_all = true;
+                body.results = currentResults;
+            }
 
             try {
                 showStatus('processing', '正在提交后台保存...');
@@ -2167,6 +2486,34 @@ def get_web_ui_context(config):
     default_no_front_matter = _config_bool(config, "Output", "no_front_matter")
     default_archive = _config_bool(config, "Output", "archive")
 
+    default_search_engine = (
+        config.get("Search", "engine", fallback=SearchHandler.DEFAULT_ENGINE) or ""
+    ).strip().lower()
+    if default_search_engine not in SearchHandler.ENGINE_CHOICES:
+        default_search_engine = SearchHandler.DEFAULT_ENGINE
+    try:
+        default_search_limit = int(
+            config.get("Search", "limit", fallback=str(SearchHandler.DEFAULT_LIMIT))
+        )
+    except (TypeError, ValueError):
+        default_search_limit = SearchHandler.DEFAULT_LIMIT
+    default_search_limit = max(1, min(default_search_limit, SearchHandler.MAX_LIMIT))
+    search_engine_labels = {
+        "auto": "自动（DuckDuckGo → Bing → SearXNG/Metaso）",
+        "duckduckgo": "DuckDuckGo",
+        "bing": "Bing",
+        "searxng": "SearXNG（需配置实例）",
+        "metaso": "Metaso（需配置 API Key）",
+    }
+    search_engine_options = [
+        {
+            "value": engine,
+            "label": search_engine_labels.get(engine, engine),
+            "selected": engine == default_search_engine,
+        }
+        for engine in SearchHandler.ENGINE_CHOICES
+    ]
+
     default_tts_voice = (config.get("TTS", "voice", fallback="zh-CN-XiaoxiaoNeural") or "").strip()
     if not default_tts_voice:
         default_tts_voice = "zh-CN-XiaoxiaoNeural"
@@ -2199,6 +2546,9 @@ def get_web_ui_context(config):
         "default_html_inline": default_html_inline,
         "default_no_front_matter": default_no_front_matter,
         "default_archive": default_archive,
+        "default_search_engine": default_search_engine,
+        "default_search_limit": default_search_limit,
+        "search_engine_options": search_engine_options,
         "default_tts_voice": default_tts_voice,
         "default_tts_rate": default_tts_rate,
         "default_tts_volume": default_tts_volume,
@@ -2206,10 +2556,13 @@ def get_web_ui_context(config):
     }
 
 
-def build_output_path(title, extension, target_dir, source_url=None, html_content=None):
+def build_output_path(title, extension, target_dir, source_url=None, html_content=None,
+                      filename_prefix=""):
     filename_title = OutputHandler._get_filename_title(
         title, source_url=source_url, html_content=html_content
     )
+    if filename_prefix:
+        filename_title = f"{filename_prefix}{filename_title}"
     safe_title = OutputHandler._safe_filename_title(filename_title, max_len=100)
     return os.path.join(
         resolve_user_path(target_dir),
@@ -2395,7 +2748,40 @@ def _run_web_save_job(job_id):
             "Save worker resolving: tid=%s formData=%s dataPending=%s dataTid=%s",
             bool(translation_job_id), bool(formData), bool(cached_pending), bool(cached_tjid),
         )
-        if formData:
+        cached_metadata = (data.get("data") or {}).get("metadata") or {}
+        if formData and cached_metadata.get("search_query") and not formData.get("search_query"):
+            formData = {
+                **formData,
+                "search_query": cached_metadata.get("search_query"),
+                "search_prefix": formData.get("search_prefix")
+                or cached_metadata.get("search_prefix")
+                or "",
+            }
+
+        if data.get("combine_all"):
+            source_results = data.get("results") or []
+            logger.warning("Save worker: combining %s results", len(source_results))
+            if formData:
+                processed_results = []
+                for item in source_results:
+                    source_input = (item.get("input_url") or "").strip()
+                    if not source_input:
+                        continue
+                    item_metadata = item.get("metadata") or {}
+                    item_form = {
+                        **formData,
+                        "url": source_input,
+                        "search_query": item_metadata.get("search_query") or formData.get("search_query") or "",
+                        "search_prefix": formData.get("search_prefix") or item_metadata.get("search_prefix") or "",
+                    }
+                    processed_item, _lang_mode, _translation_pending = _process_web_request(
+                        item_form, translate_sync=True
+                    )
+                    processed_results.append(processed_item)
+                resultData = build_combined_result_payload(processed_results) or {}
+            else:
+                resultData = build_combined_result_payload(source_results) or {}
+        elif formData:
             logger.warning("Save worker: re-processing with formData (lang=%s)", formData.get("lang"))
             result, _lang_mode, _translation_pending = _process_web_request(formData, translate_sync=True)
             resultData = result
@@ -2430,6 +2816,8 @@ def _run_web_save_job(job_id):
         metadata = resultData.get("metadata", {})
         html_content = metadata.get("html_content", "")
         source_url = metadata.get("source_url")
+        search_query = metadata.get("search_query")
+        search_prefix = metadata.get("search_prefix") or ""
 
         if fileType == "publish":
             md_content = resultData.get("markdown", "")
@@ -2447,7 +2835,8 @@ def _run_web_save_job(job_id):
         elif fileType == "md":
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
-                title, "md", targetDir, source_url=source_url, html_content=html_content
+                title, "md", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             save_path = OutputHandler.save_markdown(
                 title,
@@ -2461,11 +2850,13 @@ def _run_web_save_job(job_id):
                 source_url=metadata.get("source_url"),
                 translator=metadata.get("translator"),
                 archive_url=metadata.get("archive_url"),
+                search_query=search_query,
             )
         elif fileType == "html":
             cleaned_html = resultData.get("html", "")
             output_path = build_output_path(
-                title, "html", targetDir, source_url=source_url, html_content=html_content
+                title, "html", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             save_path = OutputHandler.save_html(
                 title,
@@ -2477,7 +2868,8 @@ def _run_web_save_job(job_id):
         elif fileType == "pdf":
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
-                title, "pdf", targetDir, source_url=source_url, html_content=html_content
+                title, "pdf", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             save_path = OutputHandler.generate_pdf(
                 title, md_content, config, output_path=output_path
@@ -2491,7 +2883,8 @@ def _run_web_save_job(job_id):
             else:
                 md_content = resultData.get("markdown", "")
                 output_path = build_output_path(
-                    title, "mp3", targetDir, source_url=source_url, html_content=html_content
+                    title, "mp3", targetDir, source_url=source_url, html_content=html_content,
+                    filename_prefix=search_prefix,
                 )
                 if formData:
                     _apply_tts_overrides(
@@ -2568,6 +2961,10 @@ def build_combined_result_payload(results):
     if not valid_results:
         return None
 
+    first_metadata = valid_results[0].get("metadata") or {}
+    search_query = first_metadata.get("search_query")
+    search_prefix = first_metadata.get("search_prefix") or ""
+
     title = f"Surf Collection ({len(valid_results)} items)"
     markdown_sections = []
     raw_sections = []
@@ -2603,13 +3000,15 @@ def build_combined_result_payload(results):
         "metadata": {
             "title": title,
             "html_content": html_content,
-            "add_front_matter": False,
+            "add_front_matter": bool(search_query),
             "translated_title": None,
             "source_url": None,
             "archive_url": None,
             "translator": None,
             "html_inline": False,
             "combined_sources": combined_sources,
+            "search_query": search_query,
+            "search_prefix": search_prefix,
         },
     }
 
@@ -2692,6 +3091,67 @@ def site_defaults():
     return jsonify({"success": True, **defaults})
 
 
+@app.route("/api/search", methods=["POST"])
+def search_keywords():
+    """Resolve keywords to search results for the Web UI picker."""
+    data = request.get_json(silent=True) or {}
+    config = get_config()
+    keywords = (data.get("keywords") or data.get("url") or "").strip()
+    if not keywords:
+        return jsonify({"success": False, "error": "请输入搜索关键词"})
+
+    engine = (
+        data.get("search_engine")
+        or config.get("Search", "engine", fallback=SearchHandler.DEFAULT_ENGINE)
+        or SearchHandler.DEFAULT_ENGINE
+    ).strip().lower()
+    if engine not in SearchHandler.ENGINE_CHOICES:
+        engine = SearchHandler.DEFAULT_ENGINE
+
+    try:
+        limit = int(
+            data.get("search_limit")
+            or config.get("Search", "limit", fallback=str(SearchHandler.DEFAULT_LIMIT))
+        )
+    except (TypeError, ValueError):
+        limit = SearchHandler.DEFAULT_LIMIT
+    limit = max(1, min(limit, SearchHandler.MAX_LIMIT))
+
+    proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
+    proxy_override = get_web_proxy_override(proxy_mode)
+    custom_proxy = (data.get("custom_proxy") or "").strip() or None
+    if proxy_mode == "custom" and not custom_proxy:
+        return jsonify({"success": False, "error": "custom 代理模式需要填写自定义代理地址"})
+
+    try:
+        results = SearchHandler.search(
+            keywords,
+            engine=engine,
+            limit=limit,
+            config=config,
+            proxy_mode_override=proxy_override,
+            custom_proxy_override=custom_proxy,
+        )
+    except Exception as exc:
+        logger.error("Web search failed: %s", exc)
+        return jsonify({"success": False, "error": str(exc)})
+
+    if not results:
+        return jsonify({"success": False, "error": f"没有找到与“{keywords}”相关的搜索结果"})
+
+    prefix = build_search_filename_prefix(data.get("search_prefix"), keywords)
+    return jsonify(
+        {
+            "success": True,
+            "keywords": keywords,
+            "engine": engine,
+            "limit": limit,
+            "prefix": prefix,
+            "results": results,
+        }
+    )
+
+
 @app.route("/api/translation-jobs/<job_id>", methods=["GET"])
 def translation_job_status(job_id):
     """Fetch the current status of an async translation job."""
@@ -2730,6 +3190,13 @@ def _process_web_request(data, translate_sync=False):
     is_text_post = bool(raw_text and not url)
 
     config = get_config()
+
+    search_query = (data.get("search_query") or "").strip() or None
+    search_prefix = (
+        build_search_filename_prefix(data.get("search_prefix"), search_query)
+        if search_query
+        else ""
+    )
 
     # Per-request headless browser backend override (Web UI radio).
     _apply_browser_backend_override(config, data.get("browser_backend"))
@@ -2914,6 +3381,8 @@ def _process_web_request(data, translate_sync=False):
             "archive_url": archive_url,
             "translator": None,
             "html_inline": html_inline,
+            "search_query": search_query,
+            "search_prefix": search_prefix,
         },
     }
     return result, lang_mode, translation_pending
@@ -3099,6 +3568,8 @@ def save_file():
         metadata = resultData.get("metadata", {})
         html_content = metadata.get("html_content", "")
         source_url = metadata.get("source_url")
+        search_query = metadata.get("search_query")
+        search_prefix = metadata.get("search_prefix") or ""
 
         if fileType == "publish":
             md_content = resultData.get("markdown", "")
@@ -3124,7 +3595,8 @@ def save_file():
         if fileType == "md":
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
-                title, "md", targetDir, source_url=source_url, html_content=html_content
+                title, "md", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             md_path = OutputHandler.save_markdown(
                 title,
@@ -3138,13 +3610,15 @@ def save_file():
                 source_url=metadata.get("source_url"),
                 translator=metadata.get("translator"),
                 archive_url=metadata.get("archive_url"),
+                search_query=search_query,
             )
             return jsonify({"success": True, "savePath": md_path})
 
         elif fileType == "html":
             cleaned_html = resultData.get("html", "")
             output_path = build_output_path(
-                title, "html", targetDir, source_url=source_url, html_content=html_content
+                title, "html", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             html_path = OutputHandler.save_html(
                 title,
@@ -3158,7 +3632,8 @@ def save_file():
         elif fileType == "pdf":
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
-                title, "pdf", targetDir, source_url=source_url, html_content=html_content
+                title, "pdf", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             pdf_path = OutputHandler.generate_pdf(
                 title, md_content, config, output_path=output_path
@@ -3175,7 +3650,8 @@ def save_file():
 
             md_content = resultData.get("markdown", "")
             output_path = build_output_path(
-                title, "mp3", targetDir, source_url=source_url, html_content=html_content
+                title, "mp3", targetDir, source_url=source_url, html_content=html_content,
+                filename_prefix=search_prefix,
             )
             form_data = data.get("formData") or {}
             _apply_tts_overrides(

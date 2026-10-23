@@ -14766,15 +14766,15 @@ class TTSHandler:
         except Exception as e:
             logger.error(f"TTS operation failed: {e}")
 
-def _build_search_filename_prefix(args, keywords):
+def build_search_filename_prefix(prefix_value, keywords):
     """Return the mandatory ``[<prefix>]`` search filename prefix.
 
-    ``--search-prefix`` overrides it; otherwise the search keywords are used.
-    Length is capped so long queries do not crowd out the title, and invalid
-    filename characters are removed. Brackets are added here, so passing an
-    already bracketed prefix (``"[kw]"``) does not double-wrap it.
+    An explicit prefix overrides the search keywords. Length is capped so long
+    queries do not crowd out the title, and invalid filename characters are
+    removed. Brackets are added here, so an already bracketed prefix
+    (``"[kw]"``) does not get double-wrapped.
     """
-    raw = (getattr(args, "search_prefix", None) or "").strip() or (keywords or "").strip()
+    raw = (prefix_value or "").strip() or (keywords or "").strip()
     prefix = OutputHandler._safe_filename_title(raw, max_len=SearchHandler.MAX_PREFIX_LENGTH)
     prefix = prefix.strip().rstrip("-_,;. ")
     if not prefix:
@@ -14782,6 +14782,11 @@ def _build_search_filename_prefix(args, keywords):
     if prefix.startswith("[") and prefix.endswith("]") and len(prefix) > 2:
         return prefix
     return f"[{prefix}]"
+
+
+def _build_search_filename_prefix(args, keywords):
+    """CLI wrapper around :func:`build_search_filename_prefix`."""
+    return build_search_filename_prefix(getattr(args, "search_prefix", None), keywords)
 
 
 def _resolve_search_limit(args, config, parser):
