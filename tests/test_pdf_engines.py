@@ -80,17 +80,11 @@ def _record_engines(monkeypatch, results):
 
 
 def test_pdf_engine_chain_defaults_to_auto_chain():
-    assert OutputHandler._pdf_engine_chain(_Config(".")) == ["playwright", "chrome", "weasyprint"]
-    assert OutputHandler._pdf_engine_chain(_Config(".", "auto")) == [
-        "playwright",
-        "chrome",
-        "weasyprint",
-    ]
-    assert OutputHandler._pdf_engine_chain(_Config(".", "")) == [
-        "playwright",
-        "chrome",
-        "weasyprint",
-    ]
+    default_chain = list(OutputHandler._DEFAULT_PDF_ENGINE_CHAIN)
+    assert OutputHandler._pdf_engine_chain(_Config(".")) == default_chain
+    assert OutputHandler._pdf_engine_chain(_Config(".", "auto")) == default_chain
+    assert OutputHandler._pdf_engine_chain(_Config(".", "")) == default_chain
+    assert default_chain == ["playwright", "chrome", "weasyprint", "typst", "pandoc"]
 
 
 def test_pdf_engine_chain_parses_explicit_values():
@@ -104,11 +98,8 @@ def test_pdf_engine_chain_parses_explicit_values():
 
 
 def test_pdf_engine_chain_ignores_unknown_names():
-    assert OutputHandler._pdf_engine_chain(_Config(".", "prince")) == [
-        "playwright",
-        "chrome",
-        "weasyprint",
-    ]
+    default_chain = list(OutputHandler._DEFAULT_PDF_ENGINE_CHAIN)
+    assert OutputHandler._pdf_engine_chain(_Config(".", "prince")) == default_chain
     assert OutputHandler._pdf_engine_chain(_Config(".", "weasyprint,prince")) == ["weasyprint"]
 
 
@@ -116,11 +107,9 @@ def test_pdf_engine_chain_without_output_section():
     class _NoSections:
         pass
 
-    assert OutputHandler._pdf_engine_chain(_NoSections()) == [
-        "playwright",
-        "chrome",
-        "weasyprint",
-    ]
+    assert OutputHandler._pdf_engine_chain(_NoSections()) == list(
+        OutputHandler._DEFAULT_PDF_ENGINE_CHAIN
+    )
 
 
 # ------------------------------------------------------------ engine dispatch

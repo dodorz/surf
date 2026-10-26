@@ -25,7 +25,7 @@
 - **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。
 - **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
-- **多格式输出**：支持 Markdown、PDF、HTML 和音频。PDF 可用 Playwright 浏览器、本机 Chrome/Chromium 命令行或 WeasyPrint 渲染（可完全不需要浏览器），由 `[Output] pdf_engine` 指定引擎链。
+- **多格式输出**：支持 Markdown、PDF、HTML 和音频。PDF 可用 Playwright 浏览器、本机 Chrome/Chromium 命令行、WeasyPrint、Typst 或 pandoc 渲染（可完全不需要浏览器），由 `[Output] pdf_engine` 指定引擎链。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读；语音、语速、音量可通过 `--tts-voice` / `--tts-rate` / `--tts-volume`（CLI）或 Web TTS 选项单次覆盖。
@@ -243,7 +243,7 @@ md_dir = ./notes
 target_language = zh-cn
 ; PDF 文件保存目录 (默认: 当前目录)
 pdf_dir = .
-; PDF 引擎链，按顺序尝试: auto | playwright | chrome | weasyprint（可用逗号组合）
+; PDF 引擎链，按顺序尝试: auto | playwright | chrome | weasyprint | typst | pandoc（可用逗号组合）
 pdf_engine = auto
 ; 音频文件保存目录 (默认: 当前目录)
 audio_dir = .
@@ -409,12 +409,19 @@ surf -p "https://example.com" -o ~/Note/out.pdf  # Windows: 保存到 %USERPROFI
 - **playwright**：最可靠，使用已安装的浏览器（需要可选 extra `browser`）。
 - **chrome**：本机 `google-chrome`/`chromium`/Edge 的 `--headless=new --print-to-pdf`。无 Python 依赖；自动探测，或用 `[Browser] chrome_executable` / 环境变量 `SURF_CHROME_EXECUTABLE` 指定。
 - **weasyprint**：纯 Python 的 HTML/CSS 渲染器（需要可选 extra `pdf`：`uv sync --extra pdf`），完全不需要浏览器；渲染前会通过配置的代理下载远程图片并以 data URI 内嵌。依赖系统 Pango/libgdk-pixbuf 库（Linux：`apt install libpango-1.0-0 libpangoft2-1.0-0`；macOS：`brew install pango libffi`；Windows：GTK3 运行时）。
+- **typst**：Surf 把 Markdown 生成的 HTML 转换成 Typst 标记，再调用 `typst` 二进制。不需要浏览器，也不需要额外 Python 包；远程图片会先下载到临时目录。中文通过内置字体回退列表渲染，只要系统装了任一 CJK 字体即可（可用 `[Output] typst_fonts` 追加字体目录）。
+- **pandoc**：把 HTML 交给 `pandoc`，由它驱动已安装的 PDF 引擎（自动探测：`typst`、`weasyprint`、`xelatex`、`lualatex`、`tectonic`、`pdflatex`）。可用 `[Output] pandoc_pdf_engine` 指定引擎，用 `[Output] pandoc_args` 追加参数，例如 `-V CJKmainfont="Noto Serif CJK SC"`。
 
 ```ini
 [Output]
-; auto = playwright, chrome, weasyprint
-; 也可显式指定单个或按顺序指定多个，例如 weasyprint,chrome
+; auto = playwright, chrome, weasyprint, typst, pandoc
+; 也可显式指定单个或按顺序指定多个，例如 typst,weasyprint
 pdf_engine = auto
+typst_executable = typst        ; 环境变量: SURF_TYPST_EXECUTABLE
+typst_fonts =                   ; 追加字体目录（逗号或 ':' 分隔）
+pandoc_executable = pandoc      ; 环境变量: SURF_PANDOC_EXECUTABLE
+pandoc_pdf_engine =             ; 留空 = 自动探测
+pandoc_args =                   ; 例如 --toc -V CJKmainfont="Noto Serif CJK SC"
 ```
 
 PDF 正文现在能正确渲染 Markdown 表格（`| a | b |`）与围栏代码块。

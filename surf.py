@@ -13,6 +13,8 @@ import subprocess
 import tempfile
 import io
 import locale
+import mimetypes
+import shlex
 import ssl
 import socket
 import requests  # type: ignore
@@ -13995,7 +13997,7 @@ class OutputHandler:
     # PDF engines: the browser-based ones have the highest fidelity, the
     # WeasyPrint one needs no browser at all (pip extra `pdf`).  A chain is
     # tried in order; the first engine that writes a non-empty file wins.
-    _DEFAULT_PDF_ENGINE_CHAIN = ("playwright", "chrome", "weasyprint")
+    _DEFAULT_PDF_ENGINE_CHAIN = ("playwright", "chrome", "weasyprint", "typst", "pandoc")
     _PDF_ENGINE_ALIASES = {
         "playwright": "playwright",
         "chrome": "chrome",
@@ -14003,6 +14005,8 @@ class OutputHandler:
         "chrome-cli": "chrome",
         "weasyprint": "weasyprint",
         "weasy": "weasyprint",
+        "typst": "typst",
+        "pandoc": "pandoc",
     }
 
     # Markdown extensions used for the PDF body.  Without them tables and
@@ -14063,7 +14067,19 @@ class OutputHandler:
         def _weasyprint(full_html, md_content, filepath, config):
             return OutputHandler._generate_with_weasyprint(full_html, filepath, config)
 
-        return {"playwright": _playwright, "chrome": _chrome, "weasyprint": _weasyprint}
+        def _typst(full_html, md_content, filepath, config):
+            return OutputHandler._generate_with_typst(full_html, filepath, config)
+
+        def _pandoc(full_html, md_content, filepath, config):
+            return OutputHandler._generate_with_pandoc(full_html, filepath, config)
+
+        return {
+            "playwright": _playwright,
+            "chrome": _chrome,
+            "weasyprint": _weasyprint,
+            "typst": _typst,
+            "pandoc": _pandoc,
+        }
 
     @staticmethod
     def _inline_remote_images(full_html, config):
@@ -14164,6 +14180,481 @@ class OutputHandler:
             logger.warning("WeasyPrint PDF failed: %s", e)
             return False
         return os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
+    # ---------------------------------------------------------------- tools
+
+    @staticmethod
+    def _output_option(config, key, fallback=""):
+        """Read a string from the ``[Output]`` section, tolerating fake configs."""
+        has_section = getattr(config, "has_section", lambda _name: False)
+        if has_section("Output"):
+            value = config.get("Output", key, fallback=fallback)
+            return (value or fallback or "").strip()
+        return fallback
+
+    @staticmethod
+    def _resolve_tool(config, config_key, env_var, default):
+        """Resolve an external binary from env, config or PATH."""
+        candidates = []
+        env_override = os.environ.get(env_var, "").strip()
+        if env_override:
+            candidates.append(env_override)
+        config_value = OutputHandler._output_option(config, config_key)
+        if config_value:
+            candidates.append(config_value)
+
+        for candidate in candidates:
+            resolved = resolve_user_path(candidate)
+            if os.path.isfile(resolved):
+                return resolved
+            found = shutil.which(resolved)
+            if found:
+                return found
+            logger.warning("Configured %s not found: %s", config_key, candidate)
+        return shutil.which(default)
+
+    # ----------------------------------------------------------------- typst
+
+    # Typst falls back through the list per glyph, so any installed CJK family
+    # (Linux/macOS/Windows) renders Chinese text without extra configuration.
+    _TYPST_FONTS = (
+        "Libertinus Serif",
+        "New Computer Modern",
+        "Noto Sans CJK SC",
+        "Noto Serif CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "SimSun",
+    )
+
+    _TYPST_ESCAPES = {
+        "\\": "\\\\",
+        "#": "\\#",
+        "$": "\\$",
+        "*": "\\*",
+        "_": "\\_",
+        "`": "\\`",
+        "<": "\\<",
+        ">": "\\>",
+        "@": "\\@",
+        "~": "\\~",
+        "[": "\\[",
+        "]": "\\]",
+    }
+
+    @staticmethod
+    def _typst_escape(text):
+        return "".join(OutputHandler._TYPST_ESCAPES.get(char, char) for char in text)
+
+    @staticmethod
+    def _typst_inline_code(text):
+        if "`" in text or "\n" in text:
+            escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+            return f'#raw("{escaped}")'
+        return "`" + text + "`"
+
+    @staticmethod
+    def _typst_image(node):
+        src = (node.get("src") or "").strip()
+        if not src or src.lower().startswith("data:"):
+            return ""
+        return f'#image("{src.replace(chr(34), chr(92) + chr(34))}", width: 100%)'
+
+    @staticmethod
+    def _typst_inline(node):
+        parts = []
+        for child in getattr(node, "children", []):
+            name = getattr(child, "name", None)
+            if name is None:
+                parts.append(OutputHandler._typst_escape(str(child)))
+                continue
+            inner = OutputHandler._typst_inline(child)
+            if name in {"strong", "b"}:
+                parts.append(f"*{inner}*")
+            elif name in {"em", "i"}:
+                parts.append(f"_{inner}_")
+            elif name in {"code", "tt", "kbd", "samp"}:
+                parts.append(OutputHandler._typst_inline_code(child.get_text()))
+            elif name == "a":
+                href = (child.get("href") or "").strip()
+                parts.append(f'#link("{href}")[{inner}]' if href else inner)
+            elif name == "img":
+                parts.append(OutputHandler._typst_image(child))
+            elif name == "br":
+                parts.append(" \\ ")
+            else:
+                parts.append(inner)
+        return "".join(parts)
+
+    @staticmethod
+    def _typst_list(node, depth=0):
+        ordered = node.name == "ol"
+        marker = "+" if ordered else "-"
+        indent = "  " * depth
+        lines = []
+        for item in node.find_all("li", recursive=False):
+            inline_parts = []
+            nested = []
+            for child in item.children:
+                name = getattr(child, "name", None)
+                if name in {"ul", "ol"}:
+                    nested.append(OutputHandler._typst_list(child, depth + 1))
+                elif name is None:
+                    inline_parts.append(OutputHandler._typst_escape(str(child).strip()))
+                elif name == "p":
+                    inline_parts.append(OutputHandler._typst_inline(child))
+                else:
+                    inline_parts.append(OutputHandler._typst_inline(child))
+            content = " ".join(part for part in inline_parts if part).strip()
+            lines.append(f"{indent}{marker} {content}".rstrip())
+            lines.extend(nested)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _typst_table(table):
+        header_rows = []
+        body_rows = []
+        for row in table.find_all("tr"):
+            cells = row.find_all(["th", "td"], recursive=False)
+            if not cells:
+                continue
+            rendered = []
+            for cell in cells:
+                parts = []
+                for child in cell.children:
+                    if getattr(child, "name", None) is None:
+                        parts.append(OutputHandler._typst_escape(str(child)))
+                    else:
+                        parts.append(OutputHandler._typst_inline(child))
+                rendered.append("".join(parts).strip())
+            # Markdown emits <th> cells for the header row, which Typst should
+            # repeat on every page via table.header().
+            if all(cell.name == "th" for cell in cells):
+                header_rows.append(rendered)
+            else:
+                body_rows.append(rendered)
+        if not header_rows and not body_rows:
+            return ""
+
+        columns = max(len(row) for row in header_rows + body_rows)
+        lines = ["#table(", f"  columns: {columns},", "  stroke: 0.5pt + luma(180),", "  inset: 6pt,"]
+        if header_rows:
+            header_cells = [
+                cell
+                for row in header_rows
+                for cell in row + [""] * (columns - len(row))
+            ]
+            lines.append("  table.header(" + ", ".join("[" + cell + "]" for cell in header_cells) + "),")
+        for row in body_rows:
+            padded = row + [""] * (columns - len(row))
+            lines.append("  " + ", ".join("[" + cell + "]" for cell in padded) + ",")
+        lines.append(")")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _typst_blocks(node):
+        blocks = []
+        for child in getattr(node, "children", []):
+            name = getattr(child, "name", None)
+            if name is None:
+                text = str(child).strip()
+                if text:
+                    blocks.append(OutputHandler._typst_escape(text))
+                continue
+            if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                blocks.append("=" * int(name[1]) + " " + OutputHandler._typst_inline(child))
+            elif name == "p":
+                block = OutputHandler._typst_inline(child)
+                if block.strip():
+                    blocks.append(block)
+            elif name in {"ul", "ol"}:
+                rendered = OutputHandler._typst_list(child)
+                if rendered.strip():
+                    blocks.append(rendered)
+            elif name == "blockquote":
+                inner = "\n\n".join(OutputHandler._typst_blocks(child))
+                if inner.strip():
+                    # Mirror the HTML template's left-bordered, muted quote.
+                    blocks.append(
+                        "#block(\n"
+                        "  inset: (left: 0.8em, top: 0.25em, bottom: 0.25em),\n"
+                        "  stroke: (left: 2pt + luma(190)),\n"
+                        "  width: 100%,\n"
+                        f")[#text(fill: luma(85))[{inner}]]"
+                    )
+            elif name == "pre":
+                code = child.find("code")
+                language = ""
+                if code is not None:
+                    for css_class in code.get("class") or []:
+                        if css_class.startswith("language-"):
+                            language = css_class.split("-", 1)[1]
+                text = (code if code is not None else child).get_text().rstrip("\n")
+                blocks.append("```" + language + "\n" + text + "\n```")
+            elif name == "table":
+                rendered = OutputHandler._typst_table(child)
+                if rendered:
+                    blocks.append(rendered)
+            elif name == "img":
+                rendered = OutputHandler._typst_image(child)
+                if rendered:
+                    blocks.append(rendered)
+            elif name == "hr":
+                blocks.append("#line(length: 100%, stroke: 0.5pt + luma(150))")
+            elif name in {"div", "section", "article", "main", "body", "figure", "details"}:
+                nested = OutputHandler._typst_blocks(child)
+                if nested:
+                    blocks.append("\n\n".join(nested))
+            else:
+                inline = OutputHandler._typst_inline(child)
+                if inline.strip():
+                    blocks.append(inline)
+        return blocks
+
+    @staticmethod
+    def _html_to_typst(full_html):
+        """Convert the PDF HTML document into Typst markup.
+
+        Only the constructs produced by ``markdown`` for Surf's own template are
+        supported; anything unknown falls back to its inline (escaped) text.
+        """
+        soup = BeautifulSoup(full_html, "html.parser")
+        body = soup.body or soup
+        fonts = ", ".join('"' + name + '"' for name in OutputHandler._TYPST_FONTS)
+        preamble = "\n".join(
+            (
+                '#set page(paper: "a4", margin: (x: 2cm, y: 2cm))',
+                f"#set text(font: ({fonts}), size: 11pt)",
+                "#set par(leading: 0.85em)",
+                '#show link: set text(fill: rgb("#1a5fb4"))',
+                '#show table.cell.where(y: 0): set text(weight: "bold")',
+            )
+        )
+        blocks = OutputHandler._typst_blocks(body)
+        return preamble + "\n\n" + "\n\n".join(blocks) + "\n"
+
+    @staticmethod
+    def _typst_font_paths(config):
+        raw = OutputHandler._output_option(config, "typst_fonts")
+        if not raw:
+            return []
+        directories = []
+        for part in re.split(r"[," + re.escape(os.pathsep) + r"]", raw):
+            part = part.strip()
+            if not part:
+                continue
+            resolved = resolve_user_path(part)
+            if os.path.isdir(resolved):
+                directories.append(resolved)
+            else:
+                logger.warning("typst font directory not found: %s", part)
+        return directories
+
+    @staticmethod
+    def _download_remote_images(full_html, config, directory, prefix="image"):
+        """Download remote ``<img>`` sources into *directory*, rewriting ``src``.
+
+        Typst and pandoc resolve images from the filesystem, so this mirrors
+        :meth:`_inline_remote_images` but writes files instead of data URIs.
+        """
+        if "<img" not in full_html:
+            return full_html, 0
+        try:
+            soup = BeautifulSoup(full_html, "html.parser")
+        except Exception:
+            return full_html, 0
+
+        remote_images = [
+            img
+            for img in soup.find_all("img")
+            if (img.get("src") or "").strip().lower().startswith(("http://", "https://"))
+        ]
+        if not remote_images:
+            return full_html, 0
+
+        try:
+            req_proxies, _ = Fetcher._get_proxies(config)
+        except Exception:
+            req_proxies = {}
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+        }
+        total = 0
+        saved = 0
+        for index, img in enumerate(remote_images, start=1):
+            if total >= OutputHandler._PDF_INLINE_IMAGE_LIMIT:
+                logger.warning("PDF: image download budget exhausted; leaving the rest as remote URLs")
+                break
+            url = img["src"].strip()
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    proxies=req_proxies,
+                    timeout=OutputHandler._PDF_INLINE_IMAGE_TIMEOUT,
+                )
+                response.raise_for_status()
+                content = response.content
+            except Exception as e:
+                logger.debug("PDF: could not download image %s: %s", url, e)
+                continue
+            if not content or total + len(content) > OutputHandler._PDF_INLINE_IMAGE_LIMIT:
+                logger.debug("PDF: skipping oversized image %s", url)
+                continue
+            mime = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            extension = mimetypes.guess_extension(mime) if mime else None
+            if not extension:
+                extension = ".png"
+            filename = f"{prefix}-{index}{extension}"
+            try:
+                with open(os.path.join(directory, filename), "wb") as handle:
+                    handle.write(content)
+            except OSError as e:
+                logger.debug("PDF: could not store image %s: %s", url, e)
+                continue
+            img["src"] = filename
+            total += len(content)
+            saved += 1
+
+        if not saved:
+            return full_html, 0
+        logger.info("PDF: downloaded %d remote image(s) for the renderer", saved)
+        return str(soup), saved
+
+    @staticmethod
+    def _generate_with_typst(full_html, filepath, config):
+        """Render a PDF with the Typst binary (Markdown-derived HTML -> Typst)."""
+        binary = OutputHandler._resolve_tool(
+            config, "typst_executable", "SURF_TYPST_EXECUTABLE", "typst"
+        )
+        if not binary:
+            logger.debug("typst binary not found; skipping the typst PDF engine")
+            return False
+
+        output_pdf = os.path.abspath(filepath)
+        directory = os.path.dirname(output_pdf)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="surf-typst-") as temp_dir:
+                html, saved = OutputHandler._download_remote_images(full_html, config, temp_dir)
+                if saved:
+                    logger.debug("typst: %d remote image(s) stored locally", saved)
+                source_path = os.path.join(temp_dir, "document.typ")
+                with open(source_path, "w", encoding="utf-8") as handle:
+                    handle.write(OutputHandler._html_to_typst(html))
+                compiled = os.path.join(temp_dir, "document.pdf")
+                command = [binary, "compile", "--root", temp_dir, source_path, compiled]
+                for font_dir in OutputHandler._typst_font_paths(config):
+                    command.extend(["--font-path", font_dir])
+                result = subprocess.run(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                    logger.warning("typst PDF failed: %s", detail[-1] if detail else "unknown error")
+                    return False
+                if not os.path.exists(compiled) or os.path.getsize(compiled) == 0:
+                    logger.warning("typst did not produce a PDF")
+                    return False
+                shutil.copyfile(compiled, output_pdf)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("typst PDF failed: %s", e)
+            return False
+        return os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0
+
+    # ---------------------------------------------------------------- pandoc
+
+    # Pandoc is a converter, not a renderer: pick the first PDF engine it can
+    # drive.  typst and weasyprint keep the browser out of the picture.
+    _PANDOC_PDF_ENGINES = ("typst", "weasyprint", "xelatex", "lualatex", "tectonic", "pdflatex")
+
+    @staticmethod
+    def _generate_with_pandoc(full_html, filepath, config):
+        """Render a PDF with pandoc driving an installed PDF engine."""
+        binary = OutputHandler._resolve_tool(
+            config, "pandoc_executable", "SURF_PANDOC_EXECUTABLE", "pandoc"
+        )
+        if not binary:
+            logger.debug("pandoc binary not found; skipping the pandoc PDF engine")
+            return False
+
+        pdf_engine = OutputHandler._output_option(config, "pandoc_pdf_engine")
+        if not pdf_engine:
+            for candidate in OutputHandler._PANDOC_PDF_ENGINES:
+                if shutil.which(candidate):
+                    pdf_engine = candidate
+                    break
+        if not pdf_engine:
+            logger.warning(
+                "pandoc is installed but none of its PDF engines (%s) was found; "
+                "set [Output] pandoc_pdf_engine",
+                ", ".join(OutputHandler._PANDOC_PDF_ENGINES),
+            )
+            return False
+
+        extra_args = []
+        raw_args = OutputHandler._output_option(config, "pandoc_args")
+        if raw_args:
+            try:
+                extra_args = shlex.split(raw_args)
+            except ValueError as e:
+                logger.warning("Could not parse [Output] pandoc_args (%s); ignoring them", e)
+
+        output_pdf = os.path.abspath(filepath)
+        directory = os.path.dirname(output_pdf)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="surf-pandoc-") as temp_dir:
+                html, saved = OutputHandler._download_remote_images(full_html, config, temp_dir)
+                if saved:
+                    logger.debug("pandoc: %d remote image(s) stored locally", saved)
+                html_path = os.path.join(temp_dir, "document.html")
+                with open(html_path, "w", encoding="utf-8") as handle:
+                    handle.write(html)
+                compiled = os.path.join(temp_dir, "document.pdf")
+                command = [
+                    binary,
+                    "--from=html",
+                    "--to=pdf",
+                    f"--pdf-engine={pdf_engine}",
+                    f"--resource-path={temp_dir}",
+                    "--output",
+                    compiled,
+                ]
+                # User arguments come last so they can override the engine.
+                command.extend(extra_args)
+                command.append(html_path)
+                result = subprocess.run(
+                    command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                    logger.warning(
+                        "pandoc PDF failed (%s): %s",
+                        pdf_engine,
+                        detail[-1] if detail else "unknown error",
+                    )
+                    return False
+                if not os.path.exists(compiled) or os.path.getsize(compiled) == 0:
+                    logger.warning("pandoc did not produce a PDF")
+                    return False
+                shutil.copyfile(compiled, output_pdf)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("pandoc PDF failed: %s", e)
+            return False
+        return os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0
 
     @staticmethod
     def generate_pdf(title, md_content, config, output_path=None, filename_prefix=""):

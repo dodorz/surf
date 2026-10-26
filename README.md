@@ -73,7 +73,7 @@ surf "https://example.com" -b
 surf "https://example.com" -r
 ```
 
-- **PDF Generation**: Generate PDF files with a Playwright browser, a local Chrome/Chromium CLI, or WeasyPrint — no browser required at all. `[Output] pdf_engine` picks the engine chain.
+- **PDF Generation**: Generate PDF files with a Playwright browser, a local Chrome/Chromium CLI, WeasyPrint, Typst or pandoc — no browser required at all. `[Output] pdf_engine` picks the engine chain.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
@@ -260,7 +260,7 @@ md_dir = ./notes
 target_language = zh-cn
 ; Directory to save PDF files (default: current directory)
 pdf_dir = .
-; PDF engine chain, tried in order: auto | playwright | chrome | weasyprint (comma separated)
+; PDF engine chain, tried in order: auto | playwright | chrome | weasyprint | typst | pandoc (comma separated)
 pdf_engine = auto
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
@@ -446,12 +446,19 @@ Generate a PDF file. PDFs are rendered from the Markdown-derived HTML, so they d
 - **playwright**: Highly reliable, uses the installed browser (needs the optional `browser` extra).
 - **chrome**: `google-chrome`, `chromium`, or Edge rendered through `--headless=new --print-to-pdf`. No Python dependency; auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
 - **weasyprint**: Pure-Python HTML/CSS renderer (needs the optional `pdf` extra: `uv sync --extra pdf`). No browser at all; remote images are downloaded through the configured proxy and embedded before rendering. Requires the system Pango/libgdk-pixbuf libraries (Linux: `apt install libpango-1.0-0 libpangoft2-1.0-0`; macOS: `brew install pango libffi`; Windows: GTK3 runtime).
+- **typst**: Surf converts the Markdown-derived HTML into Typst markup and runs the `typst` binary. Needs no browser and no Python package; remote images are downloaded to a temporary directory first. CJK text renders through a built-in font fallback list, so any installed CJK font works (add font directories with `[Output] typst_fonts`).
+- **pandoc**: hands the HTML to `pandoc`, which drives an installed PDF engine (auto-detected: `typst`, `weasyprint`, `xelatex`, `lualatex`, `tectonic`, `pdflatex`). Use `[Output] pandoc_pdf_engine` to force one and `[Output] pandoc_args` for extra flags such as `-V CJKmainfont="Noto Serif CJK SC"`.
 
 ```ini
 [Output]
-; auto = playwright, chrome, weasyprint
-; or pick/order engines explicitly, e.g. weasyprint,chrome
+; auto = playwright, chrome, weasyprint, typst, pandoc
+; or pick/order engines explicitly, e.g. typst,weasyprint
 pdf_engine = auto
+typst_executable = typst        ; env: SURF_TYPST_EXECUTABLE
+typst_fonts =                   ; extra font directories (comma/':' separated)
+pandoc_executable = pandoc      ; env: SURF_PANDOC_EXECUTABLE
+pandoc_pdf_engine =             ; empty = auto-detect
+pandoc_args =                   ; e.g. --toc -V CJKmainfont="Noto Serif CJK SC"
 ```
 
 ```bash
