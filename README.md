@@ -73,7 +73,7 @@ surf "https://example.com" -b
 surf "https://example.com" -r
 ```
 
-- **PDF Generation**: Generate PDF files using Playwright, or a local Chrome/Chromium CLI when the optional Playwright extra is not installed.
+- **PDF Generation**: Generate PDF files with a Playwright browser, a local Chrome/Chromium CLI, or WeasyPrint — no browser required at all. `[Output] pdf_engine` picks the engine chain.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
@@ -114,7 +114,7 @@ We recommend using `uv` for a clean environment.
     - headed interactive login (`--login`),
     - the special-site page handlers that automate a real page (archive.today, WeChat, Weibo/Threads, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Zhihu),
     - the NCPSSD full-text PDF download,
-    - the Playwright PDF engine.
+    - the Playwright PDF engine (PDFs can also be rendered by a local Chrome/Chromium CLI or by WeasyPrint, see `uv sync --extra pdf`).
 
     Everything else works without the extra: `requests`/`curl-cffi` fetching, dynamic pages through Obscura, and PDF export via a local `google-chrome`/`chromium`/Edge binary when one is installed. Features that need Playwright now log an actionable message (naming the extra to install) instead of a bare `ModuleNotFoundError`.
 
@@ -125,8 +125,14 @@ We recommend using `uv` for a clean environment.
     obscura_fetch = auto
     ; Chrome/Chromium used by the Playwright-free PDF path (empty = auto-detect)
     chrome_executable =
+
+    [Output]
+    ; PDF engine chain, tried in order until one succeeds
+    pdf_engine = auto
     ```
     `SURF_CHROME_EXECUTABLE` overrides `chrome_executable`.
+
+    For PDF output with neither a browser nor Chrome installed, `uv sync --extra pdf` adds WeasyPrint (pure Python, needs the system Pango libraries). See [Generate PDF (-p)](#generate-pdf--p).
     Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. The generic headless fetch speaks the raw Chrome DevTools Protocol (`[Browser] obscura_fetch = auto|native|playwright`), so it needs no Playwright: `auto` (default) uses raw CDP and falls back to the Playwright client if the protocol path fails, `native` never falls back, and `playwright` restores the legacy client. Requests are coordinated across the web server's threads; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Bloomberg-family hosts automatically force Obscura stealth mode (even when `obscura_stealth = false`) because their PerimeterX "Are you a robot?" interstitial does not clear for a default headless profile; if a browser navigation still returns an anti-bot challenge, Surf retries it before falling back to the archive/paywall path. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Headed interactive login, the special-site page handlers, the NCPSSD full-text PDF download and the Playwright PDF engine are the only features that need the optional Playwright extra (`uv sync --extra browser`). To use the Playwright client for every headless fetch too, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; waitress applies no hard request timeout, so slow browser/archive flows can finish without being killed. On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback. For a single run, `-B/--browser-backend {auto,obscura,playwright}` overrides `[Browser] backend` from the config file (`auto`, the default, follows the config); the Web UI exposes the same "浏览器后端" option.
 
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
@@ -254,6 +260,8 @@ md_dir = ./notes
 target_language = zh-cn
 ; Directory to save PDF files (default: current directory)
 pdf_dir = .
+; PDF engine chain, tried in order: auto | playwright | chrome | weasyprint (comma separated)
+pdf_engine = auto
 ; Directory to save Audio files (default: current directory)
 audio_dir = .
 ; Directory to save HTML files (default: current directory)
@@ -433,15 +441,25 @@ uv run surf.py "https://example.com" -n
 
 ### Generate PDF (-p)
 
-Generate a PDF file. The Playwright engine is tried first, and a local Chrome/Chromium CLI is used when Playwright is unavailable or fails:
+Generate a PDF file. PDFs are rendered from the Markdown-derived HTML, so they do not need a browser: several engines are supported and tried in order.
 
 - **playwright**: Highly reliable, uses the installed browser (needs the optional `browser` extra).
-- **local chrome/chromium**: `google-chrome`, `chromium`, or Edge rendered through `--headless=new --print-to-pdf`. No Python dependency; auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
+- **chrome**: `google-chrome`, `chromium`, or Edge rendered through `--headless=new --print-to-pdf`. No Python dependency; auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
+- **weasyprint**: Pure-Python HTML/CSS renderer (needs the optional `pdf` extra: `uv sync --extra pdf`). No browser at all; remote images are downloaded through the configured proxy and embedded before rendering. Requires the system Pango/libgdk-pixbuf libraries (Linux: `apt install libpango-1.0-0 libpangoft2-1.0-0`; macOS: `brew install pango libffi`; Windows: GTK3 runtime).
+
+```ini
+[Output]
+; auto = playwright, chrome, weasyprint
+; or pick/order engines explicitly, e.g. weasyprint,chrome
+pdf_engine = auto
+```
 
 ```bash
 uv run surf.py "https://example.com" -p
 uv run surf.py "https://example.com" -p -o ~/Note/example.pdf
 ```
+
+CommonMark tables (`| a | b |`) and fenced code blocks are rendered properly in the PDF body.
 
 ### Save HTML (--html / --html-inline)
 

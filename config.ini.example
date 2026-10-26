@@ -6,6 +6,14 @@ target_language = zh-cn
 md_dir = ./notes
 ; Directory to save PDF files (default: current directory)
 pdf_dir = ./pdf
+; PDF rendering engine chain, tried in order until one produces a PDF.
+; auto = playwright, chrome, weasyprint
+; Values: auto, playwright, chrome (chromium), weasyprint; combine with commas
+;   e.g. pdf_engine = weasyprint,chrome
+; playwright needs `uv sync --extra browser` + `uv run playwright install chromium`;
+; chrome uses a local Chrome/Chromium/Edge binary (see [Browser] chrome_executable);
+; weasyprint needs `uv sync --extra pdf` and needs no browser at all.
+pdf_engine = auto
 ; Directory to save Audio files (default: current directory)
 audio_dir = ./auido
 ; Directory to save HTML files (default: current directory)

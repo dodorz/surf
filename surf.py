@@ -44,7 +44,7 @@ import unicodedata
 import signal
 from array import array
 from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlunparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 # Sentinel so callers can explicitly pass "no proxy" (None) to _browser_session.
 _UNSET = object()
@@ -13992,24 +13992,205 @@ class OutputHandler:
                 )
         return False
 
+    # PDF engines: the browser-based ones have the highest fidelity, the
+    # WeasyPrint one needs no browser at all (pip extra `pdf`).  A chain is
+    # tried in order; the first engine that writes a non-empty file wins.
+    _DEFAULT_PDF_ENGINE_CHAIN = ("playwright", "chrome", "weasyprint")
+    _PDF_ENGINE_ALIASES = {
+        "playwright": "playwright",
+        "chrome": "chrome",
+        "chromium": "chrome",
+        "chrome-cli": "chrome",
+        "weasyprint": "weasyprint",
+        "weasy": "weasyprint",
+    }
+
+    # Markdown extensions used for the PDF body.  Without them tables and
+    # fenced code blocks collapse into plain paragraphs.
+    _PDF_MARKDOWN_EXTENSIONS = ("tables", "fenced_code", "sane_lists")
+
+    # Guard rails for inlining remote images before a browser-less render.
+    _PDF_INLINE_IMAGE_LIMIT = 64 * 1024 * 1024
+    _PDF_INLINE_IMAGE_TIMEOUT = 15
+
+    @staticmethod
+    def _playwright_available():
+        """Whether the optional Playwright dependency can be imported."""
+        try:
+            import playwright  # noqa: F401
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _pdf_engine_chain(config):
+        """Resolve ``[Output] pdf_engine`` into an ordered list of engine names.
+
+        ``auto`` (default) expands to the built-in chain.  An explicit value may
+        be one engine or a comma/space separated chain, e.g.
+        ``weasyprint,chrome``.
+        """
+        raw = ""
+        has_section = getattr(config, "has_section", lambda _name: False)
+        if has_section("Output"):
+            raw = (config.get("Output", "pdf_engine", fallback="auto") or "auto").strip().lower()
+
+        if not raw or raw == "auto":
+            return list(OutputHandler._DEFAULT_PDF_ENGINE_CHAIN)
+
+        chain = []
+        for part in re.split(r"[,\s]+", raw):
+            if not part:
+                continue
+            engine = OutputHandler._PDF_ENGINE_ALIASES.get(part)
+            if not engine:
+                logger.warning("Unknown [Output] pdf_engine value %r; ignoring it", part)
+                continue
+            if engine not in chain:
+                chain.append(engine)
+        return chain or list(OutputHandler._DEFAULT_PDF_ENGINE_CHAIN)
+
+    @staticmethod
+    def _pdf_renderers():
+        """Return ``{engine: callable(full_html, md_content, filepath, config)}``."""
+
+        def _playwright(full_html, md_content, filepath, config):
+            return OutputHandler._generate_with_playwright(full_html, filepath, config)
+
+        def _chrome(full_html, md_content, filepath, config):
+            return OutputHandler._generate_with_headless_chrome(full_html, filepath, config)
+
+        def _weasyprint(full_html, md_content, filepath, config):
+            return OutputHandler._generate_with_weasyprint(full_html, filepath, config)
+
+        return {"playwright": _playwright, "chrome": _chrome, "weasyprint": _weasyprint}
+
+    @staticmethod
+    def _inline_remote_images(full_html, config):
+        """Rewrite remote ``<img src>`` URLs to data URIs.
+
+        Browser-less renderers (WeasyPrint) do not know about Surf's proxy
+        settings, so images are downloaded here with the configured proxy and
+        embedded directly.  Failures leave the original URL in place.
+        """
+        if "<img" not in full_html:
+            return full_html
+
+        try:
+            soup = BeautifulSoup(full_html, "html.parser")
+        except Exception:
+            return full_html
+
+        remote_images = [
+            img
+            for img in soup.find_all("img")
+            if (img.get("src") or "").strip().lower().startswith(("http://", "https://"))
+        ]
+        if not remote_images:
+            return full_html
+
+        try:
+            req_proxies, _ = Fetcher._get_proxies(config)
+        except Exception:
+            req_proxies = {}
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+        }
+        total = 0
+        inlined = 0
+        for img in remote_images:
+            if total >= OutputHandler._PDF_INLINE_IMAGE_LIMIT:
+                logger.warning("PDF: image inlining budget exhausted; leaving the rest as remote URLs")
+                break
+            url = img["src"].strip()
+            try:
+                response = requests.get(
+                    url,
+                    headers=headers,
+                    proxies=req_proxies,
+                    timeout=OutputHandler._PDF_INLINE_IMAGE_TIMEOUT,
+                )
+                response.raise_for_status()
+                content = response.content
+            except Exception as e:
+                logger.debug("PDF: could not inline image %s: %s", url, e)
+                continue
+            if not content or total + len(content) > OutputHandler._PDF_INLINE_IMAGE_LIMIT:
+                logger.debug("PDF: skipping oversized image %s", url)
+                continue
+            mime = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if not mime.startswith("image/"):
+                mime = "image/png"
+            img["src"] = f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
+            total += len(content)
+            inlined += 1
+
+        if not inlined:
+            return full_html
+        logger.info("PDF: inlined %d remote image(s) for browser-less rendering", inlined)
+        return str(soup)
+
+    @staticmethod
+    def _generate_with_weasyprint(full_html, filepath, config):
+        """Render a PDF with WeasyPrint (pip extra ``pdf``, no browser needed)."""
+        # WeasyPrint prints a multi-line banner to stdout/stderr when its system
+        # libraries are missing; keep Surf's own output clean and report the
+        # reason ourselves.
+        noise = io.StringIO()
+        try:
+            with redirect_stdout(noise), redirect_stderr(noise):
+                import weasyprint  # type: ignore
+        except ImportError:
+            logger.debug("WeasyPrint is not installed; skipping the WeasyPrint PDF engine")
+            return False
+        except Exception as e:  # missing system libraries (Pango/cairo)
+            reason = (str(e).splitlines() or [type(e).__name__])[0].strip()
+            logger.warning(
+                "WeasyPrint is unusable (%s); install libpango/libgdk-pixbuf or pick another "
+                "[Output] pdf_engine",
+                reason,
+            )
+            return False
+
+        try:
+            html = OutputHandler._inline_remote_images(full_html, config)
+            weasyprint.HTML(string=html, base_url=os.getcwd()).write_pdf(filepath)
+        except Exception as e:
+            logger.warning("WeasyPrint PDF failed: %s", e)
+            return False
+        return os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
     @staticmethod
     def generate_pdf(title, md_content, config, output_path=None, filename_prefix=""):
         logger.info("Generating PDF...")
 
         import markdown  # type: ignore
 
-        html_body = markdown.markdown(md_content)
+        html_body = markdown.markdown(
+            md_content, extensions=list(OutputHandler._PDF_MARKDOWN_EXTENSIONS)
+        )
         full_html = f"""
         <html>
         <head>
             <meta charset="utf-8">
             <title>{title}</title>
             <style>
+                @page {{ size: A4; margin: 16mm; }}
                 body {{ font-family: sans-serif; line-height: 1.6; padding: 2em; }}
                 h1, h2, h3 {{ color: #333; }}
-                pre {{ background: #f4f4f4; padding: 1em; overflow-x: auto; }}
+                pre {{ background: #f4f4f4; padding: 1em; white-space: pre-wrap; word-break: break-word; }}
                 code {{ font-family: monospace; }}
                 img {{ max-width: 100%; }}
+                table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+                th, td {{ border: 1px solid #ccc; padding: 0.4em 0.6em; }}
+                th {{ background: #f4f4f4; }}
+                blockquote {{ border-left: 3px solid #ddd; margin-left: 0; padding-left: 1em; color: #555; }}
+                a {{ color: #1a5fb4; text-decoration: none; }}
             </style>
         </head>
         <body>
@@ -14034,18 +14215,35 @@ class OutputHandler:
                 os.makedirs(pdf_dir)
             filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
 
-        success = OutputHandler._generate_with_playwright(full_html, filepath, config)
-        if not success:
-            logger.info("Playwright PDF unavailable; trying a local Chrome/Chromium CLI")
-            success = OutputHandler._generate_with_headless_chrome(full_html, filepath, config)
+        chain = OutputHandler._pdf_engine_chain(config)
+        renderers = OutputHandler._pdf_renderers()
+        success = False
+        used_engine = None
+        for engine in chain:
+            renderer = renderers.get(engine)
+            if renderer is None:  # pragma: no cover - guarded by the alias table
+                continue
+            if engine == "playwright" and not OutputHandler._playwright_available():
+                logger.debug("Playwright PDF engine unavailable; skipping it")
+                continue
+            if renderer(full_html, md_content, filepath, config):
+                success = True
+                used_engine = engine
+                break
+            if len(chain) > 1:
+                logger.info("%s PDF engine did not produce a PDF; trying the next engine", engine)
 
         if success:
             logger.info(f"PDF saved to {filepath}")
+            if used_engine:
+                logger.info("PDF engine: %s", used_engine)
         else:
             logger.error(
-                "Failed to generate PDF. Install the optional Playwright extra "
-                "(`uv sync --extra browser` + `uv run playwright install chromium`) or a "
-                "local Chrome/Chromium build ([Browser] chrome_executable / SURF_CHROME_EXECUTABLE)."
+                "Failed to generate PDF. Configure [Output] pdf_engine (playwright, chrome, "
+                "weasyprint) and make sure one of them is usable: the optional Playwright "
+                "extra (`uv sync --extra browser` + `uv run playwright install chromium`), a "
+                "local Chrome/Chromium build ([Browser] chrome_executable / "
+                "SURF_CHROME_EXECUTABLE), or the optional WeasyPrint extra (`uv sync --extra pdf`)."
             )
 
         return filepath

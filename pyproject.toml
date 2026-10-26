@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "1.2.1.253"
+version = "1.2.1.254"
 description = "A powerful Python CLI tool that converts web pages into clean Markdown or PDF files"
 readme = "README.md"
 license = {text = "MIT"}
@@ -62,6 +62,13 @@ dependencies = [
 # client and can render PDFs with a local Chrome/Chromium CLI.
 browser = [
     "playwright",
+]
+
+# Optional browser-less PDF rendering: `[Output] pdf_engine = weasyprint`
+# renders Markdown-derived HTML without any browser. Needs the system
+# Pango/libgdk-pixbuf libraries (see the WeasyPrint installation notes).
+pdf = [
+    "weasyprint",
 ]
 
 transcribe = [
