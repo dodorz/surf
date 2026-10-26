@@ -118,6 +118,8 @@ def test_browser_session_headed_uses_playwright(monkeypatch):
         staticmethod(lambda config, **kwargs: (_ for _ in ()).throw(AssertionError("obscura used for headed"))),
     )
     fake_sync_api = types.ModuleType("playwright.sync_api")
+    fake_parent_api = types.ModuleType("playwright")
+    fake_parent_api.sync_api = fake_sync_api
     launched = {}
 
     class _Browser:
@@ -140,6 +142,10 @@ def test_browser_session_headed_uses_playwright(monkeypatch):
             return False
 
     fake_sync_api.sync_playwright = lambda: _CM()
+    # Playwright is an optional dependency: register the parent package too so
+    # this test works on installs without the "browser" extra.
+    fake_sync_api.TimeoutError = TimeoutError
+    monkeypatch.setitem(sys.modules, "playwright", fake_parent_api)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_sync_api)
 
     with Fetcher._browser_session(_FakeConfig(), "https://example.com", headless=False):

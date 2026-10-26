@@ -869,7 +869,7 @@ HTML_TEMPLATE = """
                                 <label for="browser-backend-playwright">Playwright</label>
                             </div>
                         </div>
-                        <div class="field-hint">仅影响无头浏览器抓取；对应 CLI 的 `-B/--browser-backend`。有头登录 / PDF / 知乎兜底始终使用 Playwright。</div>
+                        <div class="field-hint">仅影响无头浏览器抓取；对应 CLI 的 `-B/--browser-backend`。有头登录 / 知乎兜底 / 特殊站点页面自动化需要可选的 Playwright extra（`uv sync --extra browser`）；PDF 在未安装 Playwright 时回退到本机 Chrome/Chromium。</div>
                     </div>
 
                     <div class="form-group checkbox-group" id="podcastTranscribeGroup" style="display: none;">

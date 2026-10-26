@@ -6,6 +6,14 @@ while they use the service.  This is intentional: ``obscura serve --proxy``
 is a server-wide setting, so serializing requests lets us safely replace a
 managed server when the proxy changes without closing another request's
 browser underneath it.
+
+Two ways of talking to the server are supported:
+
+* ``fetch_native`` drives the raw Chrome DevTools Protocol (``websockets``
+  only) and is what the generic headless fetch uses.  It needs no Playwright.
+* ``session``/``fetch`` expose a Playwright ``Browser`` over CDP for callers
+  that run real page automation (locators, form fills, downloads).  That path
+  needs the optional ``browser`` extra.
 """
 
 from __future__ import annotations
@@ -13,6 +21,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -22,7 +31,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from typing import Dict, Iterator, Optional, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
+
+# ``[Browser] obscura_fetch`` values: use native CDP, native CDP with a
+# Playwright fallback, or the legacy Playwright path only.
+FETCH_MODES = ("auto", "native", "playwright")
 
 # A flock is process-wide on some platforms, and multiple ObscuraBackend
 # instances are created by Surf.  The in-process lock also avoids relying on
@@ -172,6 +187,111 @@ def _cleanup_started_servers() -> None:
             continue
 
 
+class CDPError(RuntimeError):
+    """Raised when the DevTools protocol returns an error or times out."""
+
+
+class CDPSession:
+    """Minimal synchronous Chrome DevTools Protocol client.
+
+    Surf only needs a handful of CDP commands (target/page/runtime), so this
+    keeps the wire protocol small instead of depending on Playwright.  Events
+    that arrive while a command response is awaited are buffered so callers can
+    wait for them afterwards.
+    """
+
+    def __init__(self, ws_url: str, *, open_timeout: float = 15.0) -> None:
+        try:
+            from websockets.sync.client import connect as websocket_connect
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            raise CDPError(
+                "The 'websockets' package is required for Obscura's native CDP "
+                "path. Reinstall Surf (``uv sync``) to restore it."
+            ) from exc
+        self._ws = websocket_connect(ws_url, max_size=None, open_timeout=open_timeout)
+        self._next_id = 0
+        self._events: List[dict] = []
+
+    # -- transport -----------------------------------------------------
+    def close(self) -> None:
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+    def _receive(self, timeout: float) -> dict:
+        try:
+            raw = self._ws.recv(timeout=max(0.01, timeout))
+        except TimeoutError as exc:
+            raise CDPError("timed out waiting for a CDP message") from exc
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", "replace")
+        try:
+            message = json.loads(raw)
+        except ValueError as exc:
+            raise CDPError("received an unparsable CDP message") from exc
+        if not isinstance(message, dict):
+            raise CDPError("received an unexpected CDP message")
+        return message
+
+    def send(
+        self,
+        method: str,
+        params: Optional[dict] = None,
+        session_id: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """Send one command and return its result, buffering interleaved events."""
+        self._next_id += 1
+        message_id = self._next_id
+        payload: dict = {"id": message_id, "method": method}
+        if params:
+            payload["params"] = params
+        if session_id:
+            payload["sessionId"] = session_id
+        self._ws.send(json.dumps(payload))
+
+        deadline = time.monotonic() + max(0.1, timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CDPError("timed out waiting for %s" % method)
+            message = self._receive(remaining)
+            if message.get("id") == message_id:
+                if message.get("error"):
+                    raise CDPError("%s failed: %s" % (method, message["error"]))
+                return message.get("result") or {}
+            self._events.append(message)
+
+    # -- events --------------------------------------------------------
+    @staticmethod
+    def _matches(event: dict, method: Optional[str], session_id: Optional[str]) -> bool:
+        if method is not None and event.get("method") != method:
+            return False
+        return session_id is None or event.get("sessionId") == session_id
+
+    def take_events(self, method: Optional[str] = None, session_id: Optional[str] = None) -> List[dict]:
+        """Remove and return buffered events matching *method*/*session_id*."""
+        matched = [event for event in self._events if self._matches(event, method, session_id)]
+        self._events = [event for event in self._events if not self._matches(event, method, session_id)]
+        return matched
+
+    def wait_for_event(self, method: str, session_id: Optional[str] = None, timeout: float = 30.0) -> dict:
+        """Return the next buffered or incoming event named *method*."""
+        buffered = self.take_events(method, session_id)
+        if buffered:
+            return buffered[0]
+        deadline = time.monotonic() + max(0.1, timeout)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CDPError("timed out waiting for the %s event" % method)
+            message = self._receive(remaining)
+            if self._matches(message, method, session_id):
+                return message
+            self._events.append(message)
+
+
 class ObscuraBackend:
     """Fetch pages through a lazily started, shared Obscura CDP server."""
 
@@ -182,6 +302,7 @@ class ObscuraBackend:
         startup_timeout: float = 15.0,
         stealth: bool = False,
         navigation_timeout: float = 60.0,
+        fetch_mode: str = "auto",
     ) -> None:
         self.executable = executable
         self.endpoint = endpoint.rstrip("/")
@@ -191,6 +312,8 @@ class ObscuraBackend:
         # gunicorn worker timeout so a slow page cannot get the worker
         # SIGKILLed; callers can override it from config.
         self.navigation_timeout = max(5.0, float(navigation_timeout))
+        mode = str(fetch_mode or "auto").strip().lower()
+        self.fetch_mode = mode if mode in FETCH_MODES else "auto"
         self._state_path, self._lock_path = self._coordination_paths(self.endpoint)
 
     @staticmethod
@@ -336,6 +459,20 @@ class ObscuraBackend:
         self._start_managed_server(proxy)
 
     @contextmanager
+    def _coordinated(self, proxy: Optional[str]) -> Iterator[None]:
+        """Hold the inter-process lock and keep the managed server alive."""
+        process_lock = _lock_for(self._lock_path)
+        with process_lock:
+            with _file_lock(self._lock_path):
+                self._ensure_server(proxy)
+                managed_user = self._acquire_server_user()
+                try:
+                    yield
+                finally:
+                    if managed_user:
+                        self._release_server_user()
+
+    @contextmanager
     def session(self, proxy: Optional[str] = None) -> Iterator["object"]:
         """Yield a Playwright ``Browser`` connected to the shared Obscura CDP server.
 
@@ -343,37 +480,135 @@ class ObscuraBackend:
         managed server is reference-counted so it is not stopped while other
         requests are still using it.  Callers may create contexts/pages on the
         yielded browser and run arbitrary page interactions before it closes.
+
+        This path needs the optional ``browser`` extra; the generic headless
+        fetch uses :meth:`fetch_native` instead and needs no Playwright.
         """
-        process_lock = _lock_for(self._lock_path)
-        with process_lock:
-            with _file_lock(self._lock_path):
-                self._ensure_server(proxy)
-                managed_user = self._acquire_server_user()
+        with self._coordinated(proxy):
+            from playwright.sync_api import sync_playwright
+
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(self.endpoint)
                 try:
-                    from playwright.sync_api import sync_playwright
-
-                    with sync_playwright() as playwright:
-                        browser = playwright.chromium.connect_over_cdp(self.endpoint)
-                        try:
-                            yield browser
-                        finally:
-                            # connect_over_cdp's browser.close() only disconnects
-                            # Playwright; it never stops the shared server.
-                            try:
-                                browser.close()
-                            except Exception:
-                                pass
+                    yield browser
                 finally:
-                    if managed_user:
-                        self._release_server_user()
+                    # connect_over_cdp's browser.close() only disconnects
+                    # Playwright; it never stops the shared server.
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
 
-    def fetch(self, url: str, proxy: Optional[str] = None) -> str:
-        """Return rendered HTML for *url* using Playwright over CDP.
+    def _websocket_url(self) -> str:
+        """Return the browser-level DevTools websocket URL for the endpoint."""
+        with urllib.request.urlopen(self.endpoint + "/json/version", timeout=5.0) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace") or "{}")
+        url = (payload or {}).get("webSocketDebuggerUrl")
+        if not url:
+            raise CDPError("Obscura did not report a webSocketDebuggerUrl")
+        return url
 
-        The coordination lock deliberately covers navigation as well as server
-        startup.  Obscura's proxy is a server-level option; this prevents a
-        proxy switch from terminating a browser used by another request.
+    def fetch_native(self, url: str, proxy: Optional[str] = None) -> str:
+        """Return rendered HTML for *url* using the raw DevTools protocol.
+
+        Playwright-free path: create a tab, navigate it, wait for the page to
+        settle and read back ``outerHTML``.  The coordination lock covers
+        navigation as well as startup, because Obscura's proxy is a
+        server-level option.
         """
+        nav_timeout = self.navigation_timeout
+        with self._coordinated(proxy):
+            cdp = CDPSession(self._websocket_url(), open_timeout=min(nav_timeout, 15.0))
+            target_id = None
+            try:
+                target_id = cdp.send("Target.createTarget", {"url": "about:blank"}, timeout=15.0)["targetId"]
+                session_id = cdp.send(
+                    "Target.attachToTarget", {"targetId": target_id, "flatten": True}, timeout=15.0
+                )["sessionId"]
+                cdp.send("Page.enable", session_id=session_id, timeout=15.0)
+                # Match Playwright's default context viewport so responsive
+                # layouts render the same way as the legacy path.
+                for method, params in (
+                    (
+                        "Emulation.setDeviceMetricsOverride",
+                        {"width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": False},
+                    ),
+                    ("Page.setLifecycleEventsEnabled", {"enabled": True}),
+                ):
+                    try:
+                        cdp.send(method, params, session_id=session_id, timeout=10.0)
+                    except CDPError as exc:
+                        logger.debug("obscura: %s unsupported (%s); continuing", method, exc)
+
+                navigation = cdp.send("Page.navigate", {"url": url}, session_id=session_id, timeout=30.0)
+                if navigation.get("errorText"):
+                    raise CDPError("navigation failed: %s" % navigation["errorText"])
+
+                self._wait_for_page_load(cdp, session_id, nav_timeout)
+
+                evaluated = cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "document.documentElement ? document.documentElement.outerHTML : ''",
+                        "returnByValue": True,
+                    },
+                    session_id=session_id,
+                    timeout=30.0,
+                )
+                value = (evaluated.get("result") or {}).get("value")
+                return value if isinstance(value, str) else ""
+            finally:
+                if target_id:
+                    try:
+                        cdp.send("Target.closeTarget", {"targetId": target_id}, timeout=5.0)
+                    except Exception:
+                        pass
+                cdp.close()
+
+    def _wait_for_page_load(self, cdp: CDPSession, session_id: str, timeout: float) -> None:
+        """Wait for network idle (or a completed document), then settle."""
+        saw_load = False
+        deadline = time.monotonic() + timeout
+        # After the ``load`` event, keep waiting for ``networkIdle`` only for a
+        # bounded grace period; pages with long-polling requests never go idle.
+        idle_deadline = None
+        while True:
+            now = time.monotonic()
+            limit = deadline if idle_deadline is None else min(deadline, idle_deadline)
+            if now >= limit:
+                break
+            try:
+                event = cdp.wait_for_event("Page.lifecycleEvent", session_id, timeout=limit - now)
+            except CDPError:
+                break
+            name = str((event.get("params") or {}).get("name") or "").lower()
+            if name == "networkidle":
+                saw_load = True
+                break
+            if name == "load" and not saw_load:
+                saw_load = True
+                idle_deadline = now + min(10.0, timeout)
+
+        if not saw_load:
+            # CDP servers without lifecycle events: poll readyState instead.
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                state = cdp.send(
+                    "Runtime.evaluate",
+                    {"expression": "document.readyState", "returnByValue": True},
+                    session_id=session_id,
+                    timeout=15.0,
+                )
+                value = str((state.get("result") or {}).get("value") or "").lower()
+                if value in {"interactive", "complete"}:
+                    break
+                time.sleep(0.3)
+
+        # Same settle window the Playwright path used after navigation.
+        time.sleep(2.0)
+
+    def _fetch_with_playwright(self, url: str, proxy: Optional[str] = None) -> str:
+        """Return rendered HTML for *url* using Playwright over CDP."""
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         nav_timeout_ms = int(self.navigation_timeout * 1000)
@@ -400,3 +635,26 @@ class ObscuraBackend:
                         context.close()
                     except Exception:
                         pass
+
+    def fetch(self, url: str, proxy: Optional[str] = None) -> str:
+        """Return rendered HTML for *url* through the shared Obscura server.
+
+        ``fetch_mode`` picks the transport: ``native`` speaks raw CDP,
+        ``playwright`` keeps the legacy Playwright path, and ``auto`` (default)
+        tries native CDP first and falls back to Playwright when the raw
+        protocol path fails.
+        """
+        if self.fetch_mode == "playwright":
+            return self._fetch_with_playwright(url, proxy)
+
+        try:
+            return self.fetch_native(url, proxy)
+        except Exception as native_error:
+            if self.fetch_mode == "native":
+                raise
+            logger.warning("Obscura native CDP fetch failed (%s); retrying with Playwright", native_error)
+            try:
+                return self._fetch_with_playwright(url, proxy)
+            except Exception as fallback_error:
+                logger.warning("Obscura Playwright fallback failed too: %s", fallback_error)
+                raise native_error

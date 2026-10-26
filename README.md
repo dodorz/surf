@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Smart Fetching**: Automatically switches between standard `requests` and `Playwright` (headless browser) for dynamic JavaScript-heavy sites.
+- **Smart Fetching**: Automatically switches between standard `requests` and a headless browser (Obscura by default, Playwright as an alternative) for dynamic JavaScript-heavy sites.
 - **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
 - **Failed URL Notes**: when the CLI or Web UI cannot fetch/convert/save a web URL (including search results), Surf writes that URL to `[Output] md_dir` as `获取失败_<title>.md` (or a host/path slug when no title is available) so it can be retried later. Existing unrelated files with the same title are never overwritten; an existing note for the same URL is reused.
 - **Keyword Search**: `-S/--search` treats the positional input as search keywords instead of a URL. Surf queries a search engine (`auto` tries DuckDuckGo, then Bing, then a configured SearXNG instance or Metaso; `duckduckgo`/`bing`/`searxng`/`metaso` force one), prints a numbered "title + URL" picker for the first `--search-preview` results, and runs the selected URLs through the normal fetch → convert → translate → save pipeline. `--search-top N` skips the picker for the first N results, `--feel-lucky` takes only the first result, and `--search-merge` writes all selected results as one document. Every file gets a mandatory filename prefix in brackets (`[<prefix>]<title>`): it defaults to the search keywords (truncated to 40 characters) and can be overridden with `--search-prefix`; no search subdirectory is created, and the front matter records `search_query`. Tracking parameters (`utm_*`, `fbclid`, `gclid`, ...) are stripped before fetching and from front matter `source`.
@@ -73,7 +73,7 @@ surf "https://example.com" -b
 surf "https://example.com" -r
 ```
 
-- **PDF Generation**: Generate PDF files using Playwright.
+- **PDF Generation**: Generate PDF files using Playwright, or a local Chrome/Chromium CLI when the optional Playwright extra is not installed.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
@@ -104,11 +104,30 @@ We recommend using `uv` for a clean environment.
 2.  **Setup Environment**:
     ```bash
     uv sync
-    uv run playwright install
+    # Optional: Playwright-based browser automation (see below)
+    uv sync --extra browser
+    uv run playwright install chromium
     ```
     `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr`, `rapidocr-onnxruntime`, and `pytesseract` for image OCR (the Tesseract binary itself must be installed separately).
 
-    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. Requests are coordinated across the web server's threads; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Bloomberg-family hosts automatically force Obscura stealth mode (even when `obscura_stealth = false`) because their PerimeterX "Are you a robot?" interstitial does not clear for a default headless profile; if a browser navigation still returns an anti-bot challenge, Surf retries it before falling back to the archive/paywall path. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Only headed interactive login and PDF generation still require Playwright. To use Playwright instead, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; waitress applies no hard request timeout, so slow browser/archive flows can finish without being killed. On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback. For a single run, `-B/--browser-backend {auto,obscura,playwright}` overrides `[Browser] backend` from the config file (`auto`, the default, follows the config); the Web UI exposes the same "浏览器后端" option.
+    Playwright is **optional** and lives in the `browser` extra: Surf's default headless fetch drives Obscura over the raw Chrome DevTools Protocol (through the small `websockets` package) and needs no Playwright at all. Install the extra only for:
+    - headed interactive login (`--login`),
+    - the special-site page handlers that automate a real page (archive.today, WeChat, Weibo/Threads, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Zhihu),
+    - the NCPSSD full-text PDF download,
+    - the Playwright PDF engine.
+
+    Everything else works without the extra: `requests`/`curl-cffi` fetching, dynamic pages through Obscura, and PDF export via a local `google-chrome`/`chromium`/Edge binary when one is installed. Features that need Playwright now log an actionable message (naming the extra to install) instead of a bare `ModuleNotFoundError`.
+
+    ```ini
+    [Browser]
+    ; How Surf talks to Obscura: auto (raw CDP, Playwright fallback on error),
+    ; native (raw CDP only), playwright (legacy Playwright client)
+    obscura_fetch = auto
+    ; Chrome/Chromium used by the Playwright-free PDF path (empty = auto-detect)
+    chrome_executable =
+    ```
+    `SURF_CHROME_EXECUTABLE` overrides `chrome_executable`.
+    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. The generic headless fetch speaks the raw Chrome DevTools Protocol (`[Browser] obscura_fetch = auto|native|playwright`), so it needs no Playwright: `auto` (default) uses raw CDP and falls back to the Playwright client if the protocol path fails, `native` never falls back, and `playwright` restores the legacy client. Requests are coordinated across the web server's threads; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Bloomberg-family hosts automatically force Obscura stealth mode (even when `obscura_stealth = false`) because their PerimeterX "Are you a robot?" interstitial does not clear for a default headless profile; if a browser navigation still returns an anti-bot challenge, Surf retries it before falling back to the archive/paywall path. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Headed interactive login, the special-site page handlers, the NCPSSD full-text PDF download and the Playwright PDF engine are the only features that need the optional Playwright extra (`uv sync --extra browser`). To use the Playwright client for every headless fetch too, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; waitress applies no hard request timeout, so slow browser/archive flows can finish without being killed. On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback. For a single run, `-B/--browser-backend {auto,obscura,playwright}` overrides `[Browser] backend` from the config file (`auto`, the default, follows the config); the Web UI exposes the same "浏览器后端" option.
 
     Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
 
@@ -414,9 +433,10 @@ uv run surf.py "https://example.com" -n
 
 ### Generate PDF (-p)
 
-Generate a PDF file using Playwright (the default PDF engine):
+Generate a PDF file. The Playwright engine is tried first, and a local Chrome/Chromium CLI is used when Playwright is unavailable or fails:
 
-- **playwright**: Highly reliable, uses the installed browser.
+- **playwright**: Highly reliable, uses the installed browser (needs the optional `browser` extra).
+- **local chrome/chromium**: `google-chrome`, `chromium`, or Edge rendered through `--headless=new --print-to-pdf`. No Python dependency; auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
 
 ```bash
 uv run surf.py "https://example.com" -p
