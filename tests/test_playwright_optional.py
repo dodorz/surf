@@ -118,6 +118,9 @@ def test_generate_pdf_reports_failure_when_no_engine_is_available(tmp_path, monk
     monkeypatch.setattr(
         OutputHandler, "_generate_with_headless_chrome", staticmethod(lambda *a, **k: False)
     )
+    monkeypatch.setattr(
+        OutputHandler, "_generate_with_weasyprint", staticmethod(lambda *a, **k: False)
+    )
     # The legacy behaviour is preserved: a path is returned even when rendering fails.
     filepath = OutputHandler.generate_pdf(
         "Title", "# Body", _FakeConfig(tmp_path), output_path=str(tmp_path / "out.pdf")
