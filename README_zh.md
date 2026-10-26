@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 和 `Playwright`（无头浏览器）之间切换。
+- **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 与无头浏览器（默认 Obscura，可选 Playwright）之间切换。
 - **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
 - **失败 URL 记录**：CLI 或 Web UI 获取/转换/保存网页 URL（包括搜索结果）失败时，会把该 URL 本身写入 `[Output] md_dir`，文件名为 `获取失败_<标题>.md`（没有标题时用域名/路径生成），方便之后重试。不会覆盖同名的无关文件；同一 URL 的已有记录会复用。
 - **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
@@ -25,7 +25,7 @@
 - **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。
 - **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
-- **多格式输出**：支持 Markdown、PDF、HTML 和音频。
+- **多格式输出**：支持 Markdown、PDF、HTML 和音频。PDF 先尝试 Playwright 引擎，未安装可选的 Playwright extra 时自动回退到本机 Chrome/Chromium 命令行渲染。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读；语音、语速、音量可通过 `--tts-voice` / `--tts-rate` / `--tts-volume`（CLI）或 Web TTS 选项单次覆盖。
@@ -86,10 +86,30 @@ Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、�
 2.  **设置环境**:
     ```bash
     uv sync
-    uv run playwright install
+    # 可选：基于 Playwright 的浏览器自动化（见下文）
+    uv sync --extra browser
+    uv run playwright install chromium
     ```
 
-    Obscura 是 Surf 默认且推荐的浏览器后端。Surf 也支持 Playwright 作为备选。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。Web 服务器的线程之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。对于 Bloomberg 系列站点，Surf 会强制启用 Obscura 隐身模式（即使 `obscura_stealth = false`），因为默认无头配置无法通过其 PerimeterX「Are you a robot?」验证页；若浏览器跳转后仍返回反爬挑战页，Surf 会先重试跳转，再考虑 archive/付费墙兜底。知乎是例外：即使 `backend = obscura`，其浏览器兜底也始终启动 Playwright 可见浏览器窗口，因为知乎的 `zse-ck` 挑战在无头会话中无法通过，因此 Linux 上需要图形会话（`DISPLAY`）。只有有头交互式登录和 PDF 生成仍必须使用 Playwright。如需使用 Playwright，请在 `config.ini` 的 `[Browser]` 中设置 `backend = playwright` 并运行 `uv run playwright install`。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长；waitress 没有硬性请求超时，较慢的浏览器/archive 流程不会被中途杀掉。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。单次运行可用 `-B/--browser-backend {auto,obscura,playwright}` 覆盖配置文件的 `[Browser] backend`（`auto` 为默认，表示跟随配置）；Web 界面提供同样的「浏览器后端」选项。
+    Playwright 现在是**可选依赖**（`browser` extra）：Surf 默认的无头抓取通过 `websockets` 直接使用 Chrome DevTools 协议驱动 Obscura，完全不需要 Playwright。只有以下场景需要安装该 extra：
+    - 有头交互式登录（`--login`）；
+    - 需要真实页面自动化的特殊站点处理器（archive.today、微信公众号、微博/Threads、小红书、NCPSSD、GitHub、Wikipedia、知乎）；
+    - NCPSSD 全文 PDF 下载；
+    - Playwright PDF 引擎。
+
+    不装该 extra 时其余功能照常工作：`requests`/`curl-cffi` 抓取、Obscura 动态页渲染，以及通过本机 `google-chrome`/`chromium`/Edge 生成 PDF。缺少 Playwright 的功能会打印可执行的安装提示，而不是只抛 `ModuleNotFoundError`。
+
+    ```ini
+    [Browser]
+    ; Surf 与 Obscura 的通信方式: auto（原生 CDP，失败时回退 Playwright）、
+    ; native（仅原生 CDP）、playwright（旧版 Playwright 客户端）
+    obscura_fetch = auto
+    ; 无 Playwright 时用于生成 PDF 的 Chrome/Chromium（留空则自动探测）
+    chrome_executable =
+    ```
+    环境变量 `SURF_CHROME_EXECUTABLE` 优先于 `chrome_executable`。
+
+    Obscura 是 Surf 默认且推荐的浏览器后端。Surf 也支持 Playwright 作为备选。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。通用无头抓取使用原生 Chrome DevTools 协议（`[Browser] obscura_fetch = auto|native|playwright`），因此不需要 Playwright：`auto`（默认）走原生 CDP，协议路径失败时回退到 Playwright 客户端；`native` 从不回退；`playwright` 使用旧版客户端。Web 服务器的线程之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。对于 Bloomberg 系列站点，Surf 会强制启用 Obscura 隐身模式（即使 `obscura_stealth = false`），因为默认无头配置无法通过其 PerimeterX「Are you a robot?」验证页；若浏览器跳转后仍返回反爬挑战页，Surf 会先重试跳转，再考虑 archive/付费墙兜底。知乎是例外：即使 `backend = obscura`，其浏览器兜底也始终启动 Playwright 可见浏览器窗口，因为知乎的 `zse-ck` 挑战在无头会话中无法通过，因此 Linux 上需要图形会话（`DISPLAY`）。有头交互式登录、特殊站点的页面自动化处理器、NCPSSD 全文 PDF 下载和 Playwright PDF 引擎是仅有的需要可选 Playwright extra（`uv sync --extra browser`）的功能。若希望所有无头抓取也使用 Playwright 客户端，请在 `config.ini` 的 `[Browser]` 中设置 `backend = playwright` 并运行 `uv run playwright install`。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长；waitress 没有硬性请求超时，较慢的浏览器/archive 流程不会被中途杀掉。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。单次运行可用 `-B/--browser-backend {auto,obscura,playwright}` 覆盖配置文件的 `[Browser] backend`（`auto` 为默认，表示跟随配置）；Web 界面提供同样的「浏览器后端」选项。
 
     Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
 
@@ -375,6 +395,8 @@ surf "https://example.com" -O               # 输出到 stdout (简写)
 surf -p "https://example.com" -o out.pdf     # PDF 保存为 out.pdf
 surf -p "https://example.com" -o ~/Note/out.pdf  # Windows: 保存到 %USERPROFILE%\Note\out.pdf
 ```
+
+使用 `-p` 生成 PDF 时，Surf 先尝试 Playwright 引擎；未安装可选的 Playwright extra（`uv sync --extra browser`）或渲染失败时，自动回退到本机 Chrome/Chromium 的 `--headless=new --print-to-pdf`。可用 `[Browser] chrome_executable` 或环境变量 `SURF_CHROME_EXECUTABLE` 指定浏览器路径，留空则自动探测 `google-chrome`、`chromium`、Edge 等。
 
 ### 语言模式 (-l)
 

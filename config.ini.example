@@ -88,6 +88,9 @@ audio_timeout = 120
 ; Browser backend for dynamic pages: obscura (default) or playwright
 ; Override per run with CLI -B/--browser-backend {auto,obscura,playwright}
 ; or the Web UI "浏览器后端" option (auto = follow this setting).
+; Playwright is an optional extra (`uv sync --extra browser`); it is required
+; for interactive login, the special-site page handlers, the NCPSSD PDF
+; download and the Playwright PDF engine only.
 ; Zhihu is an exception: its browser fallback always opens a visible
 ; Playwright window (the zse-ck challenge does not resolve headlessly),
 ; which needs a graphical session (DISPLAY) on Linux.
@@ -96,6 +99,10 @@ backend = obscura
 obscura_executable = obscura
 ; Obscura CDP endpoint; Surf starts and reuses a managed server when unavailable
 obscura_endpoint = http://127.0.0.1:9222
+; How Surf talks to Obscura: auto (raw CDP, Playwright fallback on error),
+; native (raw CDP only, no Playwright), playwright (legacy Playwright client)
+; The generic headless fetch uses raw Chrome DevTools Protocol by default.
+obscura_fetch = auto
 ; Build Obscura with anti-detection and tracker blocking enabled
 obscura_stealth = false
 ; Seconds to wait for the Obscura CDP endpoint during startup
@@ -103,6 +110,10 @@ obscura_startup_timeout = 15
 ; Upper bound (seconds) for a single page navigation through Obscura.
 ; Keep it below the gunicorn worker timeout (recommended: --timeout 120).
 obscura_navigation_timeout = 60
+; Chrome/Chromium binary used by the Playwright-free PDF fallback.
+; Leave empty to auto-detect (google-chrome, chromium, Edge, ...); the
+; SURF_CHROME_EXECUTABLE environment variable takes precedence.
+chrome_executable =
 ; Use curl-cffi TLS fingerprint impersonation to bypass Cloudflare challenges
 ; Requires: uv sync --extra curlcffi
 ; Values: false (default), true (always use), auto (use as fallback only)

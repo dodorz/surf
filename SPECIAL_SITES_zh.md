@@ -9,7 +9,7 @@
 
 本文档中的常见短网址（包括 `pca.st`）会在特殊网站匹配前解析为最终长网址，匹配规则、抓取和 front matter 的 `source` 默认使用 canonical URL。
 
-> 浏览器后端说明：下文处理器中描述的无头浏览器步骤（含 Twitter/X、知乎、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads、付费墙 archive 快照等）统一使用配置文件 `[Browser] backend` 指定的后端（`playwright` 或 `obscura`）。只有有头交互式登录、PDF 生成，以及 NCPSSD 全文 PDF 下载仍使用 Playwright。
+> 浏览器后端说明：下文处理器中描述的无头浏览器步骤（含 Twitter/X、知乎、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads、付费墙 archive 快照等）统一使用配置文件 `[Browser] backend` 指定的后端（`playwright` 或 `obscura`）。这些处理器会做真实页面自动化（定位元素、等待、下载），因此需要可选的 Playwright extra（`uv sync --extra browser`）；通用无头动态页抓取不需要——它通过原生 DevTools 协议驱动 Obscura。只有有头交互式登录、PDF 生成（未装 Playwright 时回退到本机 Chrome/Chromium 命令行），以及 NCPSSD 全文 PDF 下载仍使用 Playwright。
 
 - `patterns`: URL 匹配的正则表达式列表
 - `handler`: 处理函数，接收 `(url, config, proxy_mode_override, custom_proxy_override)` 参数

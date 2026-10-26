@@ -4,6 +4,7 @@ import base64
 import configparser
 import getpass
 import os
+import pathlib
 import sys
 import logging
 import json
@@ -47,6 +48,33 @@ from contextlib import contextmanager
 
 # Sentinel so callers can explicitly pass "no proxy" (None) to _browser_session.
 _UNSET = object()
+
+
+class PlaywrightNotInstalled(ImportError):
+    """Raised when a feature needs the optional Playwright dependency."""
+
+
+_PLAYWRIGHT_INSTALL_HINT = (
+    "Playwright is not installed, but {feature} needs it. Install the optional "
+    "browser extra and its Chromium build: `uv sync --extra browser` then "
+    "`uv run playwright install chromium` "
+    "(pip: `pip install 'surf[browser]'` then `playwright install chromium`)."
+)
+
+
+def _require_playwright(feature):
+    """Return ``(sync_playwright, TimeoutError)`` or raise an actionable error.
+
+    Playwright is an optional dependency: only headed logins, page automation
+    for special sites, the NCPSSD PDF download and the PDF engine need it.  The
+    generic headless fetch goes through Obscura's raw CDP client instead.
+    """
+    try:
+        from playwright.sync_api import TimeoutError as playwright_timeout_error
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise PlaywrightNotInstalled(_PLAYWRIGHT_INSTALL_HINT.format(feature=feature)) from exc
+    return sync_playwright, playwright_timeout_error
 
 
 def _build_direct_markdown_payload(
@@ -5363,12 +5391,14 @@ class Fetcher:
             )
         except (TypeError, ValueError):
             navigation_timeout = 60.0
+        fetch_mode = (config.get("Browser", "obscura_fetch", fallback="auto") or "auto").strip().lower()
         return ObscuraBackend(
             executable=executable,
             endpoint=endpoint,
             startup_timeout=startup_timeout,
             stealth=stealth,
             navigation_timeout=navigation_timeout,
+            fetch_mode=fetch_mode,
         )
 
     @staticmethod
@@ -5404,7 +5434,7 @@ class Fetcher:
                 yield browser
             return
 
-        from playwright.sync_api import sync_playwright
+        sync_playwright, _ = _require_playwright("browser sessions for special-site handlers")
 
         with sync_playwright() as p:
             kwargs = {"headless": headless, "args": list(launch_args or [])}
@@ -5476,7 +5506,7 @@ class Fetcher:
             raise ValueError(f"Unsupported browser backend: {backend}")
 
         logger.info("Launching browser...")
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
+        sync_playwright, PlaywrightTimeoutError = _require_playwright("dynamic page rendering")
 
         twitter_target_url = (
             Fetcher._normalize_twitter_article_url(url)
@@ -7489,10 +7519,15 @@ class Fetcher:
         Download the original NCPSSD full-text PDF by clicking the page's `全文下载` button.
         Returns the saved local PDF path on success, otherwise None.
         """
-        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
-
         if not Fetcher._is_ncpssd_secure_article_url(url):
             logger.info("NCPSSD direct PDF download skipped: URL is not a secure article detail page")
+            return None
+
+        try:
+            sync_playwright, PlaywrightTimeoutError = _require_playwright("the NCPSSD full-text PDF download")
+        except PlaywrightNotInstalled as e:
+            # Contract: return None so the caller can generate a PDF instead.
+            logger.warning("%s", e)
             return None
 
         parsed_input = urlparse(url)
@@ -10963,10 +10998,15 @@ class Fetcher:
             return wayback_html, wayback_url
 
         try:
-            from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-        except ImportError:
-            logger.warning("Playwright is not installed; cannot fetch from archive domains")
-            return None, None
+            _, PlaywrightTimeoutError = _require_playwright("the archive.today browser fallback")
+        except PlaywrightNotInstalled:
+            # Keep the requests fast paths usable without the browser extra: the
+            # browser attempts below fail fast inside _try_browser instead.
+            logger.warning(
+                "Playwright (optional 'browser' extra) is not installed; "
+                "the archive.today browser fallback is unavailable"
+            )
+            PlaywrightTimeoutError = TimeoutError
 
         browser_args = [
             "--disable-blink-features=AutomationControlled",
@@ -13832,7 +13872,7 @@ class OutputHandler:
     @staticmethod
     def _generate_with_playwright(full_html, filepath, config):
         try:
-            from playwright.sync_api import sync_playwright
+            sync_playwright, _ = _require_playwright("the Playwright PDF engine")
 
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -13841,9 +13881,116 @@ class OutputHandler:
                 page.pdf(path=filepath, format="A4")
                 browser.close()
             return True
+        except PlaywrightNotInstalled as e:
+            logger.info("%s", e)
+            return False
         except Exception as e:
             logger.error(f"Playwright PDF failed: {e}")
             return False
+
+    # Well-known Chrome/Chromium/Edge locations, used when no browser is on PATH.
+    _CHROME_CANDIDATES = (
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "chrome",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "msedge",
+    )
+    _CHROME_PATHS = (
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    )
+
+    @staticmethod
+    def _find_chrome_executable(config):
+        """Return a local Chrome/Chromium binary for the Playwright-free PDF path."""
+        candidates = []
+        env_override = os.environ.get("SURF_CHROME_EXECUTABLE", "").strip()
+        if env_override:
+            candidates.append(env_override)
+        config_value = ""
+        has_section = getattr(config, "has_section", lambda _name: False)
+        if has_section("Browser"):
+            config_value = (config.get("Browser", "chrome_executable", fallback="") or "").strip()
+        if config_value:
+            candidates.append(config_value)
+
+        for candidate in candidates:
+            resolved = resolve_user_path(candidate)
+            if os.path.isfile(resolved) or shutil.which(resolved):
+                return resolved
+            logger.warning("Configured Chrome executable not found: %s", candidate)
+
+        for name in OutputHandler._CHROME_CANDIDATES:
+            found = shutil.which(name)
+            if found:
+                return found
+        for path in OutputHandler._CHROME_PATHS:
+            if os.path.isfile(path):
+                return path
+        return None
+
+    @staticmethod
+    def _generate_with_headless_chrome(full_html, filepath, config):
+        """Render a PDF with a local Chrome/Chromium CLI (no Playwright needed)."""
+        binary = OutputHandler._find_chrome_executable(config)
+        if not binary:
+            logger.debug("No local Chrome/Chromium binary found for the PDF fallback")
+            return False
+
+        directory = os.path.dirname(filepath)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+        output_pdf = os.path.abspath(filepath)
+
+        with tempfile.TemporaryDirectory(prefix="surf-pdf-") as temp_dir:
+            html_path = os.path.join(temp_dir, "page.html")
+            with open(html_path, "w", encoding="utf-8") as handle:
+                handle.write(full_html)
+            page_uri = pathlib.Path(html_path).as_uri()
+
+            # `--headless=new` exists from Chrome 109; older builds only know
+            # `--headless`, so try the modern flag first and fall back.
+            for headless_flag in ("--headless=new", "--headless"):
+                command = [
+                    binary,
+                    headless_flag,
+                    "--disable-gpu",
+                    "--no-sandbox",
+                    "--run-all-compositor-stages-before-draw",
+                    "--virtual-time-budget=10000",
+                    "--no-pdf-header-footer",
+                    f"--print-to-pdf={output_pdf}",
+                    page_uri,
+                ]
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        timeout=120,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as e:
+                    logger.debug("Chrome PDF attempt failed (%s): %s", headless_flag, e)
+                    continue
+                if result.returncode == 0 and os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0:
+                    return True
+                detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                logger.debug(
+                    "Chrome PDF attempt failed (%s, exit %s): %s",
+                    headless_flag,
+                    result.returncode,
+                    detail[-1] if detail else "no stderr",
+                )
+        return False
 
     @staticmethod
     def generate_pdf(title, md_content, config, output_path=None, filename_prefix=""):
@@ -13888,11 +14035,18 @@ class OutputHandler:
             filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
 
         success = OutputHandler._generate_with_playwright(full_html, filepath, config)
+        if not success:
+            logger.info("Playwright PDF unavailable; trying a local Chrome/Chromium CLI")
+            success = OutputHandler._generate_with_headless_chrome(full_html, filepath, config)
 
         if success:
             logger.info(f"PDF saved to {filepath}")
         else:
-            logger.error("Failed to generate PDF.")
+            logger.error(
+                "Failed to generate PDF. Install the optional Playwright extra "
+                "(`uv sync --extra browser` + `uv run playwright install chromium`) or a "
+                "local Chrome/Chromium build ([Browser] chrome_executable / SURF_CHROME_EXECUTABLE)."
+            )
 
         return filepath
 
@@ -14566,7 +14720,12 @@ print(json.dumps(cookies, ensure_ascii=False))
         Returns:
             bool: True if login was successful, False otherwise
         """
-        from playwright.sync_api import sync_playwright
+        try:
+            sync_playwright, _ = _require_playwright("interactive login")
+        except PlaywrightNotInstalled as e:
+            logger.error("%s", e)
+            print(e)
+            return False
 
         normalized_site_name = AuthHandler.normalize_site_name(site_name)
         if not AuthHandler.can_launch_headed_browser():
