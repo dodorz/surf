@@ -7,9 +7,9 @@
 ## Features
 
 - **Smart Fetching**: Automatically switches between standard `requests` and a headless browser (Obscura by default, Playwright as an alternative) for dynamic JavaScript-heavy sites.
-- **Local File Support**: Read and process local HTML, Markdown, and text files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content.
+- **Local File Support**: Read and process local HTML, Markdown, text, and PDF files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content (local PDFs are copied unchanged with `-p`).
 - **Failed URL Notes**: when the CLI or Web UI cannot fetch/convert/save a web URL (including search results), Surf writes that URL to `[Output] md_dir` as `获取失败_<title>.md` (or a host/path slug when no title is available) so it can be retried later. Existing unrelated files with the same title are never overwritten; an existing note for the same URL is reused.
-- **Keyword Search**: `-S/--search` treats the positional input as search keywords instead of a URL. Surf queries a search engine (`auto` tries DuckDuckGo, then Bing, then a configured SearXNG instance or Metaso; `duckduckgo`/`bing`/`searxng`/`metaso` force one), prints a numbered "title + URL" picker for the first `--search-preview` results, and runs the selected URLs through the normal fetch → convert → translate → save pipeline. `--search-top N` skips the picker for the first N results, `--feel-lucky` takes only the first result, and `--search-merge` writes all selected results as one document. Every file gets a mandatory filename prefix in brackets (`[<prefix>]<title>`): it defaults to the search keywords (truncated to 40 characters) and can be overridden with `--search-prefix`; no search subdirectory is created, and the front matter records `search_query`. Tracking parameters (`utm_*`, `fbclid`, `gclid`, ...) are stripped before fetching and from front matter `source`.
+- **Keyword Search**: `-S/--search` treats the positional input as search keywords instead of a URL. Surf queries a search engine (`auto` tries DuckDuckGo, then Bing, then configured DeepSeek/SearXNG/Metaso; `duckduckgo`/`bing`/`searxng`/`metaso`/`deepseek` force one), prints a numbered "title + URL" picker for the first `--search-preview` results, and runs the selected URLs through the normal fetch → convert → translate → save pipeline. `--search-top N` skips the picker for the first N results, `--feel-lucky` takes only the first result, and `--search-merge` writes all selected results as one document. Every file gets a mandatory filename prefix in brackets (`[<prefix>]<title>`): it defaults to the search keywords (truncated to 40 characters) and can be overridden with `--search-prefix`; no search subdirectory is created, and the front matter records `search_query`. Tracking parameters (`utm_*`, `fbclid`, `gclid`, ...) are stripped before fetching and from front matter `source`.
 - **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), NCPSSD, Pocket Casts, and Xiaoyuzhou with reusable saved authentication support.
 - **Podcast Audio**: Pocket Casts and Xiaoyuzhou episodes can be saved as their original audio enclosure with `-a/--format audio` (the file keeps the source format such as `.m4a`). Use `-w/--transcribe` to additionally transcribe an episode locally through the optional `transcribe-cpp` backend.
 - **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
@@ -74,6 +74,7 @@ surf "https://example.com" -r
 ```
 
 - **PDF Generation**: Generate PDF files with a Playwright browser, a local Chrome/Chromium CLI, WeasyPrint, Typst or pandoc — no browser required at all. `[Output] pdf_engine` picks the engine chain.
+- **PDF Input**: When a URL returns a PDF, Surf keeps the original file for `-p/--format pdf`; for Markdown, HTML, audio or publish output it extracts the text with `pypdf` and runs the normal translation/save pipeline. OCR for scanned PDFs is not supported yet.
 - **Note Integration**: Automatically saves files to your designated notes folder.
 - **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
 - **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
@@ -279,8 +280,8 @@ html_inline = false
 extractor = auto
 
 [Search]
-; Engine for -S/--search: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso),
-; duckduckgo, bing, searxng, metaso. CLI --search-engine overrides this per run
+; Engine for -S/--search: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso),
+; duckduckgo, bing, searxng, metaso, deepseek. CLI --search-engine overrides this per run
 engine = auto
 ; Number of search results to retrieve per run (1-20)
 ; CLI --search-limit overrides this per run
@@ -291,6 +292,10 @@ preview = 5
 searxng_url =
 ; Metaso API key from https://metaso.cn
 metaso_api_key =
+; DeepSeek Search API key from https://platform.deepseek.com
+deepseek_api_key =
+; Optional DeepSeek Search endpoint override
+deepseek_url =
 
 [TTS]
 engine = edge-tts
@@ -349,7 +354,7 @@ Surf can read and process local HTML, Markdown, and text files directly. Support
 - **Unix-style on Windows**: `C:/Temp/article.md` (auto-converts `/` to `\`)
 - **file:// URIs**: `file:///tmp/article.html`
 
-Supported file types: `.html`, `.htm`, `.md`, `.txt`, `.rst`, `.adoc` (others are treated as plain text).
+Supported file types: `.html`, `.htm`, `.md`, `.txt`, `.rst`, `.adoc`, `.pdf` (others are treated as plain text). Local PDFs use the same text-extraction pipeline as PDF URLs.
 
 ```bash
 # Read a local HTML file
@@ -369,6 +374,10 @@ uv run surf.py /tmp/article.md -r
 
 # Generate PDF from local HTML
 uv run surf.py /tmp/article.html -p
+
+# Extract text from a local PDF, or copy it unchanged with -p
+uv run surf.py ~/docs/paper.pdf
+uv run surf.py ~/docs/paper.pdf -p
 ```
 
 - `.html`/`.htm` files are processed as-is.
@@ -387,6 +396,9 @@ uv run surf.py -S "python asyncio tutorial"
 uv run surf.py -S "python asyncio tutorial" --search-top 3
 uv run surf.py -S "python asyncio tutorial" --feel-lucky
 
+# Use DeepSeek Search (requires [Search] deepseek_api_key)
+uv run surf.py -S "python asyncio tutorial" --search-engine deepseek
+
 # Merge all selected results into one document
 uv run surf.py -S "python asyncio tutorial" --search-top 3 --search-merge
 
@@ -398,9 +410,10 @@ uv run surf.py -S "python asyncio tutorial" --search-prefix "asyncio"
 uv run surf.py -S "python asyncio tutorial" --search-preview 3 --search-delay 2
 ```
 
-- Engine: `--search-engine auto|duckduckgo|bing|searxng|metaso` (default: `[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then a configured SearXNG instance, then Metaso. DeepSeek's web search has no public API, so it is not available as an engine.
+- Engine: `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek` (default: `[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then configured DeepSeek/SearXNG/Metaso APIs.
 - SearXNG: set `[Search] searxng_url` to a self-hosted instance whose JSON API is enabled.
 - Metaso: set `[Search] metaso_api_key` (Metaso open API).
+- DeepSeek: set `[Search] deepseek_api_key` (DeepSeek platform API key, used with `POST https://api.deepseek.com/v1/tools/search`). `[Search] deepseek_url` can override the endpoint. DeepSeek search supports its own `site:`, `lang:`, `after:`, `before:`, exact-phrase and exclusion operators.
 - Results: `--search-limit N` (default: `[Search] limit`, 5; capped at 20) controls how many results are retrieved. The picker prints the first 5 by default; `--search-preview N` changes that (config: `[Search] preview`).
 - Selection: enter `1`, `1,3-5`, `1 3 5`, `all`, or an empty line to cancel. Invalid input is re-prompted up to three times.
 - Non-interactive stdin (scripts/CI) processes all retrieved results; use `--search-top N` or `--feel-lucky` to keep batches deterministic.
@@ -467,6 +480,23 @@ uv run surf.py "https://example.com" -p -o ~/Note/example.pdf
 ```
 
 CommonMark tables (`| a | b |`) and fenced code blocks are rendered properly in the PDF body.
+
+### PDF URLs as input
+
+When the fetched URL points at a PDF (detected by `Content-Type: application/pdf`, a `.pdf` response body, or `Content-Disposition`), the output format decides what happens:
+
+```bash
+surf "https://example.com/paper.pdf"          # Extract text -> Markdown (normal pipeline)
+surf "https://example.com/paper.pdf" -h       # Extract text -> HTML
+surf "https://example.com/paper.pdf" -r       # Extract text without translation
+surf "https://example.com/paper.pdf" -p       # Download and save the original PDF unchanged
+```
+
+- Text extraction uses `pypdf` and is skipped entirely for PDF output, so `-p` preserves the source file byte-for-byte.
+- The URL does not need to end in `.pdf`; the response itself is inspected.
+- Scanned/image-only PDFs have no extractable text and are not OCR'd yet. Use `-p` to keep the original file.
+- If the PDF host no longer resolves or the connection fails (for example a dead domain), Surf looks up the URL in the Wayback Machine and uses the archived raw PDF when a snapshot exists. The snapshot is written to the `archive` front matter field.
+- The Web UI follows the same rule: previews and Markdown/HTML saves use extracted text, while saving as PDF re-downloads the original PDF (or the archived PDF when the original host is dead).
 
 ### Save HTML (--html / --html-inline)
 

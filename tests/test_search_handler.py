@@ -202,6 +202,88 @@ def test_search_metaso_requires_api_key():
         surf.SearchHandler.search("kw", engine="metaso", config=None)
 
 
+def test_search_deepseek_uses_api_key_and_json(monkeypatch):
+    calls = []
+    payload = {
+        "results": [
+            {
+                "title": "DeepSeek A",
+                "url": "https://deeps.example/a",
+                "snippet": "Short summary",
+                "summary": "Longer summary",
+            }
+        ]
+    }
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs.get("json"), kwargs.get("headers")))
+        return FakeResponse(payload=payload)
+
+    monkeypatch.setattr(surf, "_requests_post_interruptibly", fake_post)
+    config = _FakeConfig({("Search", "deepseek_api_key"): "sk-deepseek"})
+
+    results = surf.SearchHandler.search("kw", engine="deepseek", limit=3, config=config)
+
+    assert calls[0][0] == "https://api.deepseek.com/v1/tools/search"
+    assert calls[0][1] == {"query": "kw", "count": 3, "need_content": False}
+    assert calls[0][2]["Authorization"] == "Bearer sk-deepseek"
+    assert results == [{"title": "DeepSeek A", "url": "https://deeps.example/a"}]
+
+
+def test_search_deepseek_honors_endpoint_override(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        return FakeResponse(payload={"results": [{"title": "A", "url": "https://example.com/a"}]})
+
+    monkeypatch.setattr(surf, "_requests_post_interruptibly", fake_post)
+    config = _FakeConfig(
+        {
+            ("Search", "deepseek_api_key"): "sk-deepseek",
+            ("Search", "deepseek_url"): "https://proxy.example/v1/tools/search",
+        }
+    )
+
+    surf.SearchHandler.search("kw", engine="deepseek", config=config)
+
+    assert calls == ["https://proxy.example/v1/tools/search"]
+
+
+def test_search_deepseek_requires_api_key():
+    with pytest.raises(ValueError):
+        surf.SearchHandler.search("kw", engine="deepseek", config=None)
+
+
+def test_search_deepseek_reports_api_error(monkeypatch):
+    def fake_post(url, **kwargs):
+        return FakeResponse(payload={"error": {"message": "invalid api key"}})
+
+    monkeypatch.setattr(surf, "_requests_post_interruptibly", fake_post)
+    config = _FakeConfig({("Search", "deepseek_api_key"): "bad"})
+
+    with pytest.raises(ValueError, match="invalid api key"):
+        surf.SearchHandler.search("kw", engine="deepseek", config=config)
+
+
+def test_auto_engine_order_includes_configured_deepseek():
+    config = _FakeConfig(
+        {
+            ("Search", "deepseek_api_key"): "sk-deepseek",
+            ("Search", "searxng_url"): "https://searx.example",
+            ("Search", "metaso_api_key"): "sk-metaso",
+        }
+    )
+
+    assert surf.SearchHandler._auto_engine_order(config) == [
+        "duckduckgo",
+        "bing",
+        "deepseek",
+        "searxng",
+        "metaso",
+    ]
+
+
 def test_search_rejects_unknown_engine():
     with pytest.raises(ValueError):
         surf.SearchHandler.search("anything", engine="altavista")
@@ -336,7 +418,7 @@ def test_run_search_batch_processes_selected_results(monkeypatch):
     monkeypatch.setattr(surf.SearchHandler, "search", classmethod(lambda cls, *a, **k: results))
     prepared = []
 
-    def fake_prepare(args, config, parser, proxy_mode, custom_proxy):
+    def fake_prepare(args, config, parser, proxy_mode, custom_proxy, filename_prefix=""):
         prepared.append(args.url)
         if "two.example" in args.url:
             raise SystemExit(1)
@@ -370,7 +452,10 @@ def test_run_search_batch_merge_saves_single_document(monkeypatch):
     monkeypatch.setattr(
         surf,
         "_prepare_single_url",
-        lambda args, config, parser, proxy_mode, custom_proxy: {"url": args.url, "processed": {"title": args.url}},
+        lambda args, config, parser, proxy_mode, custom_proxy, filename_prefix="": {
+            "url": args.url,
+            "processed": {"title": args.url},
+        },
     )
     merged = []
 
@@ -399,7 +484,7 @@ def test_run_search_batch_exits_when_every_result_fails(monkeypatch):
         classmethod(lambda cls, *a, **k: [{"title": "One", "url": "https://one.example/a"}]),
     )
 
-    def fake_prepare(args, config, parser, proxy_mode, custom_proxy):
+    def fake_prepare(args, config, parser, proxy_mode, custom_proxy, filename_prefix=""):
         raise SystemExit(1)
 
     monkeypatch.setattr(surf, "_prepare_single_url", fake_prepare)

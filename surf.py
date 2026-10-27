@@ -140,6 +140,8 @@ def _extract_direct_markdown_payload(html_content):
         source_meta = soup.find("meta", attrs={"name": "source-url"})
         base_meta = soup.find("meta", attrs={"name": "content-base-url"})
         site_meta = soup.find("meta", attrs={"name": "surf-source-site"})
+        pdf_meta = soup.find("meta", attrs={"name": "surf-pdf-document"})
+        pdf_archive_meta = soup.find("meta", attrs={"name": "surf-pdf-archive-url"})
         markdown_text = payload_node.get_text()
         return {
             "markdown": markdown_text or "",
@@ -147,10 +149,356 @@ def _extract_direct_markdown_payload(html_content):
             "source_url": source_meta.get("content") if source_meta else None,
             "base_url": base_meta.get("content") if base_meta else None,
             "site_name": site_meta.get("content") if site_meta else None,
+            "is_pdf": bool(pdf_meta and (pdf_meta.get("content") or "").strip().lower() == "true"),
+            "archive_url": pdf_archive_meta.get("content") if pdf_archive_meta else None,
             "soup": soup,
         }
     except Exception:
         return None
+
+
+class PdfTextExtractionError(ValueError):
+    """Raised when a fetched PDF cannot be converted into text."""
+
+
+class PdfDownload:
+    """Raw PDF bytes returned by :meth:`Fetcher.fetch` in download mode."""
+
+    def __init__(self, content, source_url, filename=None, title=None, archive_url=None):
+        self.content = content or b""
+        self.source_url = source_url
+        self.filename = filename
+        self.title = title
+        self.archive_url = archive_url
+
+    def __repr__(self):
+        return (
+            f"PdfDownload(source_url={self.source_url!r}, "
+            f"filename={self.filename!r}, bytes={len(self.content)}, "
+            f"archive_url={self.archive_url!r})"
+        )
+
+
+class PdfHandler:
+    """Detect PDF responses and either keep the bytes or extract their text.
+
+    Text extraction intentionally does not perform OCR: scanned/image-only PDFs
+    raise a clear error (and direct PDF output still downloads the original).
+    """
+
+    _PDF_MAGIC = b"%PDF-"
+    _PDF_HEADER_SCAN = 1024
+    _GENERIC_TITLES = {
+        "",
+        "(anonymous)",
+        "document",
+        "download",
+        "file",
+        "pdf",
+        "untitled",
+        "unknown",
+    }
+
+    @staticmethod
+    def looks_like_pdf_bytes(data):
+        if not data:
+            return False
+        header = bytes(data[: PdfHandler._PDF_HEADER_SCAN])
+        return PdfHandler._PDF_MAGIC in header
+
+    @staticmethod
+    def _header(response, name):
+        headers = getattr(response, "headers", None) or {}
+        try:
+            value = headers.get(name)
+            if value is not None:
+                return value
+            return headers.get(name.lower()) or headers.get(name.upper())
+        except Exception:
+            return None
+
+    @classmethod
+    def is_pdf_response(cls, response):
+        """Return True for ``application/pdf`` responses or PDF magic bytes."""
+        content_type = (cls._header(response, "Content-Type") or "").lower()
+        if "application/pdf" in content_type or "application/x-pdf" in content_type:
+            return True
+        try:
+            content = getattr(response, "content", b"") or b""
+        except Exception:
+            content = b""
+        return cls.looks_like_pdf_bytes(content)
+
+    @staticmethod
+    def _filename_from_disposition(value):
+        if not value:
+            return None
+        encoded_match = re.search(r"filename\*\s*=\s*([^;]+)", value, re.IGNORECASE)
+        if encoded_match:
+            raw_value = encoded_match.group(1).strip().strip('"')
+            if "''" in raw_value:
+                charset, _, encoded = raw_value.partition("''")
+                try:
+                    return unquote(encoded, encoding=charset or "utf-8", errors="replace")
+                except Exception:
+                    return unquote(encoded)
+            return unquote(raw_value)
+        plain_match = re.search(r'filename\s*=\s*("(?:[^"\\]|\\.)*"|[^;]+)', value, re.IGNORECASE)
+        if not plain_match:
+            return None
+        raw_value = plain_match.group(1).strip().strip('"')
+        return unquote(raw_value.replace('\\"', '"'))
+
+    @classmethod
+    def filename_from_response(cls, response, url):
+        filename = cls._filename_from_disposition(cls._header(response, "Content-Disposition"))
+        if not filename:
+            parsed = urlparse(url or "")
+            filename = unquote(os.path.basename((parsed.path or "").rstrip("/")))
+        filename = os.path.basename(str(filename or "")).strip().strip('"').strip("'")
+        if not filename:
+            return None
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
+        return filename
+
+    @classmethod
+    def _clean_title(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = re.sub(r"[\x00-\x1f\x7f]+", " ", str(value))
+        value = " ".join(value.split()).strip()
+        value = re.sub(
+            r"^Microsoft\s+(?:Word|PowerPoint|Excel)\s*-\s*",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(r"\.(?:pdf|docx?|pptx?|xlsx?)$", "", value, flags=re.IGNORECASE)
+        value = value.strip()
+        if value.lower() in cls._GENERIC_TITLES:
+            return None
+        return value[:300] or None
+
+    @classmethod
+    def _title_from_filename(cls, filename):
+        if not filename:
+            return None
+        stem = os.path.splitext(os.path.basename(str(filename)))[0]
+        stem = unquote(stem)
+        stem = re.sub(r"[_-]+", " ", stem)
+        return cls._clean_title(stem)
+
+    @classmethod
+    def _open_pdf(cls, pdf_bytes):
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError as exc:
+            raise PdfTextExtractionError(
+                "PDF text extraction needs the 'pypdf' package. "
+                "Install it with `uv sync` or `pip install pypdf`."
+            ) from exc
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+        except Exception as exc:
+            raise PdfTextExtractionError(f"Unable to read PDF document: {exc}") from exc
+
+        if getattr(reader, "is_encrypted", False):
+            try:
+                decrypted = reader.decrypt("")
+            except Exception as exc:
+                raise PdfTextExtractionError(
+                    "This PDF is encrypted and cannot be opened without a password."
+                ) from exc
+            if not decrypted:
+                raise PdfTextExtractionError(
+                    "This PDF is password-protected; text extraction is not available."
+                )
+        return reader
+
+    @staticmethod
+    def _normalize_lines(text):
+        lines = []
+        for raw_line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            line = raw_line.replace("\u00a0", " ").replace("\u200b", "")
+            line = re.sub(r"[ \t]+", " ", line).strip()
+            lines.append(line)
+        return lines
+
+    @staticmethod
+    def _looks_like_paragraph_break(previous, current):
+        if not previous or not current:
+            return False
+        if previous.endswith("-") and current[:1].islower():
+            return False
+        if not previous.endswith(tuple(".!?。！？;；:：")):
+            return False
+        first = current[:1]
+        if first in ")]}»”’）】》,，、；：！？":
+            return False
+        if first.islower() or first.isdigit():
+            return False
+        return True
+
+    @classmethod
+    def _split_long_paragraph(cls, paragraph, max_chars=1800):
+        if len(paragraph) <= max_chars:
+            return [paragraph]
+        sentences = re.split(r"(?<=[.!?。！？])\s*", paragraph)
+        chunks = []
+        current = []
+        current_len = 0
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if current and current_len + len(sentence) + 1 > max_chars:
+                chunks.append(" ".join(current))
+                current = []
+                current_len = 0
+            while len(sentence) > max_chars:
+                chunks.append(sentence[:max_chars])
+                sentence = sentence[max_chars:].lstrip()
+            if sentence:
+                current.append(sentence)
+                current_len += len(sentence) + 1
+        if current:
+            chunks.append(" ".join(current))
+        return chunks or [paragraph]
+
+    @classmethod
+    def _paragraphs_from_page_text(cls, text):
+        lines = cls._normalize_lines(text)
+        paragraphs = []
+        current = []
+
+        def flush():
+            if current:
+                paragraphs.append(" ".join(current))
+                current.clear()
+
+        for line in lines:
+            if not line:
+                flush()
+                continue
+            if not current:
+                current.append(line)
+                continue
+            previous = current[-1]
+            if previous.endswith("-") and len(previous) > 1 and line[:1].islower():
+                current[-1] = previous[:-1] + line
+                continue
+            if cls._looks_like_paragraph_break(previous, line):
+                flush()
+                current.append(line)
+            else:
+                current.append(line)
+        flush()
+
+        result = []
+        for paragraph in paragraphs:
+            result.extend(cls._split_long_paragraph(paragraph))
+        return result
+
+    @classmethod
+    def _markdown_from_pages(cls, page_texts):
+        paragraphs = []
+        for page_text in page_texts:
+            paragraphs.extend(cls._paragraphs_from_page_text(page_text))
+        return "\n\n".join(paragraph for paragraph in paragraphs if paragraph).strip()
+
+    @classmethod
+    def extract(cls, pdf_bytes, fallback_title=None):
+        """Return ``{'title', 'markdown', 'pages'}`` for a PDF byte string."""
+        reader = cls._open_pdf(pdf_bytes)
+
+        metadata_title = None
+        try:
+            metadata = getattr(reader, "metadata", None)
+            if metadata is not None:
+                metadata_title = cls._clean_title(getattr(metadata, "title", None))
+        except Exception as exc:
+            logger.debug("Could not read PDF metadata title: %s", exc)
+
+        try:
+            pages = list(reader.pages)
+        except Exception as exc:
+            raise PdfTextExtractionError(f"Unable to read PDF pages: {exc}") from exc
+
+        page_texts = []
+        for index, page in enumerate(pages, 1):
+            try:
+                page_text = page.extract_text() or ""
+            except Exception as exc:
+                logger.warning("PDF page %d text extraction failed: %s", index, exc)
+                page_text = ""
+            if not page_text.strip():
+                try:
+                    page_text = page.extract_text(extraction_mode="layout") or ""
+                except Exception:
+                    pass
+            page_texts.append(page_text)
+
+        markdown_text = cls._markdown_from_pages(page_texts)
+        title = metadata_title or cls._clean_title(fallback_title)
+        if not title:
+            for page_text in page_texts:
+                first_line = next((line.strip() for line in page_text.splitlines() if line.strip()), "")
+                if first_line:
+                    title = cls._clean_title(first_line)
+                    if title:
+                        break
+        return {
+            "title": title or "PDF Document",
+            "markdown": markdown_text,
+            "pages": len(page_texts),
+        }
+
+    @classmethod
+    def process_response(cls, response, url, mode="extract", archive_url=None):
+        """Turn a PDF HTTP response into either a raw download or a text payload."""
+        content = getattr(response, "content", b"") or b""
+        filename = cls.filename_from_response(response, url)
+
+        if mode == "download":
+            return PdfDownload(
+                content=content,
+                source_url=url,
+                filename=filename,
+                title=cls._title_from_filename(filename),
+                archive_url=archive_url,
+            )
+
+        fallback_title = cls._title_from_filename(filename)
+        extracted = cls.extract(content, fallback_title=fallback_title)
+        if not extracted["markdown"].strip():
+            raise PdfTextExtractionError(
+                "No extractable text was found in this PDF. It may be a scanned or "
+                "image-only PDF; OCR is not supported yet, so use `-p/--format pdf` "
+                "to save the original PDF instead."
+            )
+        logger.info(
+            "Extracted %d characters of text from PDF (%d pages)%s",
+            len(extracted["markdown"]),
+            extracted["pages"],
+            f": {extracted['title']}",
+        )
+        extra_meta = {
+            "surf-pdf-document": "true",
+            "surf-pdf-pages": str(extracted["pages"]),
+        }
+        if archive_url:
+            extra_meta["surf-pdf-archive-url"] = archive_url
+        return _build_direct_markdown_payload(
+            markdown_text=extracted["markdown"],
+            title=extracted["title"],
+            source_url=url,
+            site_name="pdf",
+            base_url=url,
+            extra_meta=extra_meta,
+        )
 
 _POCKETCASTS_PROTECTED_MARKDOWN_LINE_PATTERN = (
     r"^(?:##\s+(?:Show Notes|Transcript)"
@@ -774,6 +1122,12 @@ def _process_fetched_content(
         "source_url": source_url,
         "content_base_url": content_base_url,
         "html_content": html_content,
+        "is_pdf": bool(direct_markdown_payload and direct_markdown_payload.get("is_pdf")),
+        "pdf_archive_url": (
+            direct_markdown_payload.get("archive_url")
+            if direct_markdown_payload and direct_markdown_payload.get("is_pdf")
+            else None
+        ),
     }
 
 def _get_version():
@@ -1313,7 +1667,7 @@ def resolve_user_path(path):
 
     return os.path.expanduser(raw_path)
 
-_LOCAL_FILE_EXTENSIONS = {".html", ".htm", ".md", ".txt", ".rst", ".adoc"}
+_LOCAL_FILE_EXTENSIONS = {".html", ".htm", ".md", ".txt", ".rst", ".adoc", ".pdf"}
 _LOCAL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
 
 def _is_local_file_input(url_string):
@@ -1424,6 +1778,24 @@ def _read_local_file(file_path):
     file_path = os.path.abspath(file_path)
     ext = os.path.splitext(file_path)[1].lower()
     basename = os.path.basename(file_path)
+
+    if ext == ".pdf":
+        logger.info(f"Reading local PDF file: {file_path}")
+        try:
+            with open(file_path, "rb") as pdf_file:
+                pdf_bytes = pdf_file.read()
+        except OSError as e:
+            raise ValueError(f"Cannot read local PDF {file_path}: {e}")
+        if not pdf_bytes:
+            raise ValueError(f"Local PDF is empty: {file_path}")
+
+        class _LocalPdfResponse:
+            status_code = 200
+            headers = {"Content-Type": "application/pdf"}
+            content = pdf_bytes
+
+        source_url = pathlib.Path(file_path).as_uri()
+        return PdfHandler.process_response(_LocalPdfResponse, source_url, mode="extract"), file_path
 
     encoding = _detect_file_encoding(file_path)
     try:
@@ -2123,6 +2495,96 @@ class Fetcher:
         return False
 
     @staticmethod
+    def _handle_pdf_response(response, url, pdf_mode="extract", archive_url=None):
+        """Return a PDF result for a PDF HTTP response, or None for non-PDF pages."""
+        if getattr(response, "status_code", 200) >= 400:
+            return None
+        if not PdfHandler.is_pdf_response(response):
+            return None
+        action = "keeping original PDF" if pdf_mode == "download" else "extracting text"
+        logger.info("Detected PDF document (%s)", action)
+        return PdfHandler.process_response(
+            response, url, mode=pdf_mode, archive_url=archive_url
+        )
+
+    @staticmethod
+    def _looks_like_pdf_url(url):
+        try:
+            return (urlparse(url).path or "").lower().endswith(".pdf")
+        except Exception:
+            return False
+
+    @staticmethod
+    def _wayback_raw_pdf_url(snapshot_url):
+        """Turn a Wayback capture URL into its raw ``id_`` payload variant."""
+        if not snapshot_url:
+            return snapshot_url
+        match = re.match(
+            r"^(https?://web\.archive\.org/web/)(\d{14})(?:[A-Za-z_]+)?/(.*)$",
+            snapshot_url,
+        )
+        if not match:
+            return snapshot_url
+        return f"{match.group(1)}{match.group(2)}id_/{match.group(3)}"
+
+    @staticmethod
+    def _fetch_pdf_from_wayback(
+        url,
+        config,
+        proxy_mode_override=None,
+        custom_proxy_override=None,
+        pdf_mode="extract",
+    ):
+        """Try the Wayback Machine when a PDF URL's origin host is unreachable."""
+        req_proxies, _ = Fetcher._get_proxies(
+            config, proxy_mode_override, custom_proxy_override
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            availability = _requests_get_with_system_trust_interruptibly(
+                "https://archive.org/wayback/available",
+                params={"url": url},
+                headers=headers,
+                proxies=req_proxies,
+                timeout=30,
+            )
+            availability.raise_for_status()
+            payload = availability.json()
+            closest = (payload.get("archived_snapshots") or {}).get("closest") or {}
+            snapshot_url = closest.get("url")
+            if not snapshot_url:
+                logger.warning("Wayback Machine has no archived snapshot for this PDF URL")
+                return None
+
+            raw_url = Fetcher._wayback_raw_pdf_url(snapshot_url)
+            logger.warning("Original PDF is unreachable; trying Wayback snapshot: %s", raw_url)
+            archived_response = _requests_get_with_system_trust_interruptibly(
+                raw_url,
+                headers=headers,
+                proxies=req_proxies,
+                timeout=120,
+            )
+            pdf_result = Fetcher._handle_pdf_response(
+                archived_response,
+                url,
+                pdf_mode,
+                archive_url=raw_url,
+            )
+            if pdf_result is not None:
+                logger.warning("Using archived PDF from the Wayback Machine")
+                return pdf_result
+            logger.warning("Wayback snapshot did not return a PDF")
+            return None
+        except Exception as exc:
+            logger.warning("Wayback PDF fallback failed: %s", exc)
+            return None
+
+    @staticmethod
     def fetch(
         url,
         config,
@@ -2135,6 +2597,7 @@ class Fetcher:
         twitter_cli_bin=None,
         twitter_browser=None,
         twitter_profile=None,
+        pdf_mode="extract",
     ):
         """
         Fetches the content of a URL.
@@ -2148,6 +2611,9 @@ class Fetcher:
             use_browser: Force use browser
             proxy_mode_override: Override proxy_mode from command line
             custom_proxy_override: Override custom_proxy from command line
+            pdf_mode: How to handle a PDF response: "extract" (default) returns
+                an HTML payload with the extracted text, while "download"
+                returns a :class:`PdfDownload` holding the original bytes.
         """
         url = Fetcher._resolve_common_short_url(
             url,
@@ -2227,6 +2693,9 @@ class Fetcher:
                     proxies=req_proxies,
                     timeout=10,
                 )
+                pdf_result = Fetcher._handle_pdf_response(response, url, pdf_mode)
+                if pdf_result is not None:
+                    return pdf_result
                 decoded_text = Fetcher._decode_response_text(response)
 
                 # Check if likely dynamic (heuristic: very short content, explicit noscript,
@@ -2259,6 +2728,9 @@ class Fetcher:
                                 proxies=req_proxies,
                                 timeout=15,
                             )
+                            pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
+                            if pdf_result is not None:
+                                return pdf_result
                             curl_text = Fetcher._decode_response_text(curl_resp)
                             curl_is_ok = (
                                 curl_resp.status_code < 400
@@ -2277,6 +2749,8 @@ class Fetcher:
                                         urlparse(url).hostname
                                     )
                                 logger.warning("curl-cffi returned status %d or challenge page, falling back to browser", curl_resp.status_code)
+                        except PdfTextExtractionError:
+                            raise
                         except Exception as e:
                             logger.warning("curl-cffi fallback failed: %s", e)
                     
@@ -2286,11 +2760,16 @@ class Fetcher:
                     response.raise_for_status()
                     return decoded_text
 
+            except PdfTextExtractionError:
+                raise
             except Exception as e:
                 if Fetcher._should_retry_without_proxy(proxy_mode_override, req_proxies, e):
                     logger.warning(f"Requests failed via implicit proxy: {e}. Retrying direct connection...")
                     try:
                         response = _requests_get_with_system_trust_interruptibly(url, headers=headers, timeout=10)
+                        pdf_result = Fetcher._handle_pdf_response(response, url, pdf_mode)
+                        if pdf_result is not None:
+                            return pdf_result
                         decoded_text = Fetcher._decode_response_text(response)
                         is_error_status = response.status_code >= 400
                         needs_browser = Fetcher._fetched_html_needs_browser(
@@ -2302,9 +2781,31 @@ class Fetcher:
                         else:
                             response.raise_for_status()
                             return decoded_text
+                    except PdfTextExtractionError:
+                        raise
                     except Exception as retry_error:
                         logger.warning(f"Direct retry after proxy failure failed: {retry_error}. Switching to browser...")
+                        if pdf_mode and Fetcher._looks_like_pdf_url(url):
+                            archived_pdf = Fetcher._fetch_pdf_from_wayback(
+                                url,
+                                config,
+                                proxy_mode_override,
+                                custom_proxy_override,
+                                pdf_mode=pdf_mode,
+                            )
+                            if archived_pdf is not None:
+                                return archived_pdf
                         return Fetcher.fetch_with_browser(url, config, proxy_mode_override, custom_proxy_override)
+                if pdf_mode and Fetcher._looks_like_pdf_url(url):
+                    archived_pdf = Fetcher._fetch_pdf_from_wayback(
+                        url,
+                        config,
+                        proxy_mode_override,
+                        custom_proxy_override,
+                        pdf_mode=pdf_mode,
+                    )
+                    if archived_pdf is not None:
+                        return archived_pdf
                 logger.warning(f"Requests failed: {e}. Switching to browser...")
 
             if should_use_browser:
@@ -2363,11 +2864,16 @@ class Fetcher:
                         proxies=req_proxies,
                         timeout=15,
                     )
+                    pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
+                    if pdf_result is not None:
+                        return pdf_result
                     curl_resp.raise_for_status()
                     curl_text = Fetcher._decode_response_text(curl_resp)
                     if curl_text and not Fetcher._is_cloudflare_challenge(curl_text):
                         logger.info("curl-cffi TLS impersonation succeeded after browser challenge")
                         return curl_text
+                except PdfTextExtractionError:
+                    raise
                 except Exception as _curl_err:
                     logger.warning("curl-cffi attempt also failed: %s", _curl_err)
             
@@ -2383,11 +2889,16 @@ class Fetcher:
                     )
                 }
                 retry_resp = requests.get(url, headers=retry_headers, timeout=15)
+                pdf_result = Fetcher._handle_pdf_response(retry_resp, url, pdf_mode)
+                if pdf_result is not None:
+                    return pdf_result
                 retry_resp.raise_for_status()
                 retry_text = Fetcher._decode_response_text(retry_resp)
                 if retry_text and not Fetcher._is_cloudflare_challenge(retry_text):
                     logger.info("Plain requests retry succeeded after browser challenge")
                     return retry_text
+            except PdfTextExtractionError:
+                raise
             except Exception as _retry_err:
                 logger.warning("Plain requests retry also failed: %s", _retry_err)
 
@@ -2395,11 +2906,16 @@ class Fetcher:
             try:
                 _time.sleep(3)
                 retry2_resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                pdf_result = Fetcher._handle_pdf_response(retry2_resp, url, pdf_mode)
+                if pdf_result is not None:
+                    return pdf_result
                 retry2_resp.raise_for_status()
                 retry2_text = Fetcher._decode_response_text(retry2_resp)
                 if retry2_text and not Fetcher._is_cloudflare_challenge(retry2_text):
                     logger.info("Simple-UA requests retry succeeded after browser challenge")
                     return retry2_text
+            except PdfTextExtractionError:
+                raise
             except Exception as _retry2_err:
                 logger.warning("Simple-UA requests retry also failed: %s", _retry2_err)
 
@@ -11508,7 +12024,7 @@ def _get_handler_for_url(url):
 class SearchHandler:
     """Turn keywords into search results (``{"title", "url"}``) via a web engine."""
 
-    ENGINES = ("duckduckgo", "bing", "searxng", "metaso")
+    ENGINES = ("duckduckgo", "bing", "searxng", "metaso", "deepseek")
     ENGINE_CHOICES = ("auto",) + ENGINES
     DEFAULT_ENGINE = "auto"
     DEFAULT_LIMIT = 5
@@ -11711,9 +12227,48 @@ class SearchHandler:
         return []
 
     @classmethod
+    def _search_deepseek(cls, query, max_results, proxies, config):
+        api_key = ""
+        if config is not None:
+            api_key = (config.get("Search", "deepseek_api_key", fallback="") or "").strip()
+        if not api_key:
+            raise ValueError("deepseek requires [Search] deepseek_api_key in config.ini")
+        endpoint = "https://api.deepseek.com/v1/tools/search"
+        if config is not None:
+            endpoint = (
+                config.get("Search", "deepseek_url", fallback="") or endpoint
+            ).strip() or endpoint
+        body = {
+            "query": query,
+            "count": max_results,
+            "need_content": False,
+        }
+        response = _requests_post_interruptibly(
+            endpoint,
+            json=body,
+            headers={
+                **cls._HEADERS,
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            proxies=proxies,
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict) and payload.get("error"):
+            error = payload.get("error")
+            message = error.get("message") if isinstance(error, dict) else error
+            raise ValueError(f"DeepSeek search API error: {message}")
+        return cls._parse_json_results(payload, max_results)
+
+    @classmethod
     def _auto_engine_order(cls, config):
         order = ["duckduckgo", "bing"]
         if config is not None:
+            if (config.get("Search", "deepseek_api_key", fallback="") or "").strip():
+                order.append("deepseek")
             if (config.get("Search", "searxng_url", fallback="") or "").strip():
                 order.append("searxng")
             if (config.get("Search", "metaso_api_key", fallback="") or "").strip():
@@ -11728,7 +12283,7 @@ class SearchHandler:
         Results are deduplicated, tracked query parameters are stripped,
         restricted to http(s) links, and truncated to *limit*. Search requests
         honor the same proxy settings as page fetches. ``engine="auto"`` tries
-        DuckDuckGo, then Bing, and finally any configured SearXNG/Metaso API.
+        DuckDuckGo, then Bing, and finally configured DeepSeek/SearXNG/Metaso APIs.
         """
         query = (keywords or "").strip()
         if not query:
@@ -11778,6 +12333,8 @@ class SearchHandler:
             return cls._search_searxng(query, max_results, proxies, config)
         if engine_name == "metaso":
             return cls._search_metaso(query, max_results, proxies, config)
+        if engine_name == "deepseek":
+            return cls._search_deepseek(query, max_results, proxies, config)
         if engine_name == "bing":
             endpoints = [("https://www.bing.com/search", {"q": query, "count": str(max_results)})]
             parser = cls._parse_bing_html
@@ -14740,6 +15297,54 @@ class OutputHandler:
         return filepath
 
     @staticmethod
+    def save_pdf_download(pdf_download, config, output_path=None, filename_prefix=""):
+        """Save the original bytes of a fetched PDF without re-rendering it."""
+        if pdf_download is None or not getattr(pdf_download, "content", b""):
+            raise ValueError("The downloaded PDF is empty")
+
+        content = pdf_download.content
+
+        if output_path == "-":
+            stream = getattr(sys.stdout, "buffer", None)
+            if stream is not None:
+                stream.write(content)
+                stream.flush()
+            else:
+                sys.stdout.write(content.decode("latin-1"))
+                sys.stdout.flush()
+            logger.info("PDF output to stdout")
+            return None
+
+        default_name = (
+            os.path.basename(str(getattr(pdf_download, "filename", "") or ""))
+            or os.path.basename(str(getattr(pdf_download, "title", "") or ""))
+            or "document.pdf"
+        )
+        stem = re.sub(r"\.pdf$", "", default_name, flags=re.IGNORECASE)
+        safe_title = OutputHandler._safe_filename_title(
+            f"{filename_prefix}{stem}", max_len=120
+        )
+
+        if output_path:
+            filepath = resolve_user_path(output_path)
+            if os.path.isdir(filepath):
+                filepath = os.path.join(filepath, f"{safe_title}.pdf")
+            filepath_dir = os.path.dirname(filepath)
+            if filepath_dir and not os.path.exists(filepath_dir):
+                os.makedirs(filepath_dir)
+        else:
+            pdf_dir = config.get_path("Output", "pdf_dir", fallback=".")
+            if not os.path.exists(pdf_dir):
+                os.makedirs(pdf_dir)
+            filepath = os.path.join(pdf_dir, f"{safe_title}.pdf")
+
+        with open(filepath, "wb") as handle:
+            handle.write(content)
+
+        logger.info(f"PDF saved to {filepath}")
+        return filepath
+
+    @staticmethod
     def save_html(title, html_content, config, inline=False, output_path=None, base_url=None, filename_prefix=""):
         """
         Save content as HTML file.
@@ -15834,11 +16439,12 @@ def _resolve_lang_mode(args):
     return "trans"
 
 
-def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
+def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy, filename_prefix=""):
     """Fetch and convert ``args.url``; return a dict ready to be saved.
 
-    Returns ``None`` when the input was handled directly (local image OCR or a
-    NCPSSD original-PDF download), so the caller has nothing left to save.
+    Returns ``None`` when the input was handled directly (local image OCR, a
+    NCPSSD original-PDF download, or a PDF URL saved with ``-p``), so the
+    caller has nothing left to save.
     """
     # Check if url is required but not provided
     if not args.url:
@@ -15923,6 +16529,31 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
     if args.O:
         output_path = "-"
 
+    # Local PDF input saved as PDF is copied byte-for-byte; other formats are
+    # handled by _read_local_file below, which extracts the text.
+    if (
+        local_file_path
+        and output_format == "pdf"
+        and os.path.splitext(local_file_path)[1].lower() == ".pdf"
+    ):
+        try:
+            with open(local_file_path, "rb") as pdf_file:
+                pdf_bytes = pdf_file.read()
+            OutputHandler.save_pdf_download(
+                PdfDownload(
+                    pdf_bytes,
+                    pathlib.Path(os.path.abspath(local_file_path)).as_uri(),
+                    filename=os.path.basename(local_file_path),
+                ),
+                config,
+                output_path=output_path,
+                filename_prefix=filename_prefix,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to save local PDF: {exc}")
+            sys.exit(1)
+        return None
+
     # For NCPSSD secure article pages, PDF mode should download the original full-text PDF
     # by simulating a click on the page's "全文下载" button.
     if output_format == "pdf" and site_name == "ncpssd" and Fetcher._is_ncpssd_secure_article_url(args.url):
@@ -15939,6 +16570,14 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
         logger.warning(
             "NCPSSD original PDF download was unavailable. Falling back to generated PDF from extracted content."
         )
+
+    # A PDF response is either kept as-is (`-p`) or converted to text first.
+    # Search merge mode needs the text so multiple PDFs can be combined.
+    pdf_mode = (
+        "download"
+        if output_format == "pdf" and not getattr(args, "search_merge", False)
+        else "extract"
+    )
 
     # 1. Fetch
     _raise_if_interrupted()
@@ -15963,13 +16602,30 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
                 twitter_cli_bin=args.twitter_cli_bin,
                 twitter_browser=args.twitter_browser,
                 twitter_profile=args.twitter_profile,
+                pdf_mode=pdf_mode,
             )
+        except PdfTextExtractionError as e:
+            logger.error(f"Failed to extract text from PDF {args.url}: {e}")
+            sys.exit(1)
         except Exception as e:
             logger.error(f"Failed to fetch {args.url}: {e}")
             diagnosis = _diagnose_network_fetch_failure(args.url, e)
             if diagnosis:
                 logger.error(diagnosis)
             sys.exit(1)
+
+        if isinstance(html_content, PdfDownload):
+            try:
+                OutputHandler.save_pdf_download(
+                    html_content,
+                    config,
+                    output_path=output_path,
+                    filename_prefix=filename_prefix,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to save PDF: {exc}")
+                sys.exit(1)
+            return None
 
         if not html_content:
             if Fetcher._is_twitter_url(args.url):
@@ -16035,6 +16691,9 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy):
     except Exception as e:
         logger.error(f"Failed to process fetched content: {e}")
         sys.exit(1)
+
+    if not archive_is_url and processed.get("pdf_archive_url"):
+        archive_is_url = processed["pdf_archive_url"]
 
     return {
         "url": args.url,
@@ -16379,7 +17038,14 @@ def _run_search_batch(args, config, parser, proxy_mode, custom_proxy):
         args.url = result["url"]
         logger.info(f"[{index}/{len(selected)}] Processing {result['url']}")
         try:
-            prepared = _prepare_single_url(args, config, parser, proxy_mode, custom_proxy)
+            prepared = _prepare_single_url(
+                args,
+                config,
+                parser,
+                proxy_mode,
+                custom_proxy,
+                filename_prefix=filename_prefix,
+            )
             if prepared is not None:
                 prepared_results.append(prepared)
                 if not merge_output:
@@ -16483,6 +17149,16 @@ Local Files:
   surf file:///tmp/article.html                 # file:// URI
   surf /tmp/article.md -r                       # Local file, keep original language
   surf /tmp/article.html -p                     # Local HTML to PDF
+  surf ~/docs/paper.pdf                         # Extract text from a local PDF
+  surf ~/docs/paper.pdf -p                      # Copy the local PDF unchanged
+
+PDF URLs:
+  surf https://example.com/paper.pdf            # Extract text, then save Markdown
+  surf https://example.com/paper.pdf -h         # Extract text, then save HTML
+  surf https://example.com/paper.pdf -p         # Download and keep the original PDF
+  PDF text extraction uses pypdf. Scanned/image-only PDFs are not OCR'd;
+  use -p to save the original file instead. If a .pdf host is unreachable,
+  Surf retries with a Wayback Machine snapshot when one exists.
 
 Special Sites:
   WeChat & Xiaohongshu: Default to no proxy and no translation.
@@ -16550,7 +17226,8 @@ Browser Backend:
         "-f",
         "--format",
         choices=["md", "pdf", "html", "audio", "publish"],
-        help="Output format: md/pdf/html/audio/publish (default: md)",
+        help="Output format: md/pdf/html/audio/publish (default: md). For a PDF URL, "
+        "pdf keeps the original file while other formats use extracted text",
     )
     format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
     format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
@@ -16774,7 +17451,7 @@ Browser Backend:
     parser.add_argument(
         "--search-engine",
         choices=list(SearchHandler.ENGINE_CHOICES),
-        help="Search engine for -S/--search: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso), duckduckgo, bing, searxng, metaso (config: [Search] engine)",
+        help="Search engine for -S/--search: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso), duckduckgo, bing, searxng, metaso, deepseek (config: [Search] engine)",
     )
     parser.add_argument(
         "--search-limit",
