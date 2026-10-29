@@ -10841,7 +10841,8 @@ class Fetcher:
         r"register-wall|sign-in-wall|login-wall|login-required|"
         r"hard-paywall|soft-paywall|dynamic-paywall|regwall|reg-wall|"
         r"gate-content|gated-content|locked-content|blocked-content|"
-        r"barrier|piano-paywall|piano-container|piano-wall|"
+        r"(?:paywall|content|article|premium|subscription)[-_]barrier|"
+        r"piano-paywall|piano-container|piano-wall|"
         r"tp-modal|tp-container|tp-backdrop|tp-iframe|"
         r"fc-ab-root|fc-dialog-container|fc-dialog-overlay|"
         r"evolok-paywall|pelcro-paywall|zephr-paywall|"
@@ -11082,10 +11083,14 @@ class Fetcher:
                     confidence += 0.40
 
         # ── CSS class / id patterns ──
+        # Script/style streams often carry framework class names such as
+        # React's ``$tsr-stream-barrier``; they are not page content and must
+        # never count as paywall markers.
+        ignored_tags = {"script", "style", "noscript", "template", "meta", "link"}
         paywall_elements = []
         for element in soup.select(
             "[class*='paywall'], [id*='paywall'], "
-            "[class*='metered'], [class*='meter-'], [class*='premium'], "
+            "[class*='metered'], [class*='meter-'], "
             "[class*='register-wall'], [class*='sign-in-wall'], [class*='login-wall'], "
             "[class*='content-gate'], [class*='content-locked'], "
             "[class*='article-locked'], [class*='article-gated'], "
@@ -11094,8 +11099,11 @@ class Fetcher:
             "[class*='fc-ab-root'], [class*='fc-dialog'], "
             "[class*='piano-paywall'], [class*='pelcro'], [class*='zephr']"
         ):
-            paywall_elements.append(element)
+            if element.name not in ignored_tags:
+                paywall_elements.append(element)
         for tag in soup.find_all(True):
+            if tag.name in ignored_tags:
+                continue
             cls = (tag.get("class") or [])
             cls_str = " ".join(cls) if isinstance(cls, list) else str(cls)
             elem_id = str(tag.get("id") or "")
@@ -11138,14 +11146,18 @@ class Fetcher:
         # domains we weight it heavily enough to trigger the archive.is fallback
         # even when no other paywall marker is present.
         if confidence >= 0.3:
+            # Different selectors can point at different nodes (e.g. a tiny
+            # download card inside <article> and the real body inside <main>).
+            # Use the longest candidate so a small side card is not mistaken
+            # for paywall-truncated article content.
             article_text = ""
             for sel in ("article", "[role='main']", "main",
                         ".post-content", ".article-content", ".story-content",
                         ".article-body", ".post-body"):
-                article_el = soup.select_one(sel)
-                if article_el:
-                    article_text = article_el.get_text(" ", strip=True)
-                    break
+                for article_el in soup.select(sel):
+                    candidate = article_el.get_text(" ", strip=True)
+                    if len(candidate) > len(article_text):
+                        article_text = candidate
             if not article_text:
                 article_text = text_content
             if len(article_text) < 800:
