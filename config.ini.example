@@ -48,7 +48,7 @@ extractor = auto
 
 [Search]
 ; Keywords -> search engine -> interactive pick -> fetch/convert/save (CLI -S/--search).
-; Engine: auto (DuckDuckGo, Bing, then configured SearXNG/Metaso), duckduckgo, bing, searxng, metaso
+; Engine: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso), duckduckgo, bing, searxng, metaso, deepseek
 engine = auto
 ; Number of search results to retrieve per run (1-20)
 limit = 5
@@ -58,6 +58,10 @@ preview = 5
 searxng_url =
 ; Metaso API key from https://metaso.cn (open API)
 metaso_api_key =
+; DeepSeek Search API key from https://platform.deepseek.com (used by --search-engine deepseek)
+deepseek_api_key =
+; Optional DeepSeek Search endpoint override (default: https://api.deepseek.com/v1/tools/search)
+deepseek_url =
 
 [LLM]
 ; Default LLM provider name

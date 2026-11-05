@@ -73,6 +73,7 @@ from surf import (
     OcrHandler,
     OutputHandler,
     PublishHandler,
+    PdfDownload,
     SearchHandler,
     TTSHandler,
     _apply_browser_backend_override,
@@ -2353,6 +2354,48 @@ def resolve_web_save_proxy_overrides(formData):
     return get_web_proxy_override(proxy_mode), custom_proxy
 
 
+def save_pdf_result(title, resultData, config, output_path, form_data=None):
+    """Save a PDF result, keeping the original file when the source was a PDF.
+
+    URLs that pointed directly at a PDF were converted to text for previews and
+    Markdown/HTML output.  For PDF output we re-download the original bytes so
+    the user gets the source document rather than a re-rendered copy.
+    """
+    source_url = ((resultData.get("metadata") or {}).get("source_url") or "").strip()
+    if resultData.get("source_is_pdf") and source_url:
+        proxy_override, custom_proxy = resolve_web_save_proxy_overrides(form_data)
+        candidates = [source_url]
+        archive_url = (resultData.get("pdf_archive_url") or "").strip()
+        if archive_url and archive_url != source_url:
+            candidates.append(archive_url)
+        for candidate in candidates:
+            try:
+                downloaded = Fetcher.fetch(
+                    candidate,
+                    config=config,
+                    proxy_mode_override=proxy_override,
+                    custom_proxy_override=custom_proxy,
+                    pdf_mode="download",
+                )
+                if isinstance(downloaded, PdfDownload):
+                    return OutputHandler.save_pdf_download(
+                        downloaded,
+                        config,
+                        output_path=output_path,
+                    )
+                logger.warning("PDF source did not return a PDF: %s", candidate)
+            except Exception as exc:
+                logger.warning("Could not re-download PDF from %s (%s)", candidate, exc)
+        logger.warning("Falling back to a PDF generated from the extracted text")
+
+    return OutputHandler.generate_pdf(
+        title,
+        resultData.get("markdown", ""),
+        config,
+        output_path=output_path,
+    )
+
+
 def resolve_web_bool_option(data, key, config, section, option):
     """Boolean option: explicit form/API value wins; otherwise fall back to config."""
     if key in data:
@@ -2500,11 +2543,12 @@ def get_web_ui_context(config):
         default_search_limit = SearchHandler.DEFAULT_LIMIT
     default_search_limit = max(1, min(default_search_limit, SearchHandler.MAX_LIMIT))
     search_engine_labels = {
-        "auto": "自动（DuckDuckGo → Bing → SearXNG/Metaso）",
+        "auto": "自动（DuckDuckGo → Bing → DeepSeek/SearXNG/Metaso）",
         "duckduckgo": "DuckDuckGo",
         "bing": "Bing",
         "searxng": "SearXNG（需配置实例）",
         "metaso": "Metaso（需配置 API Key）",
+        "deepseek": "DeepSeek（需配置 API Key）",
     }
     search_engine_options = [
         {
@@ -2872,8 +2916,8 @@ def _run_web_save_job(job_id):
                 title, "pdf", targetDir, source_url=source_url, html_content=html_content,
                 filename_prefix=search_prefix,
             )
-            save_path = OutputHandler.generate_pdf(
-                title, md_content, config, output_path=output_path
+            save_path = save_pdf_result(
+                title, resultData, config, output_path, form_data=formData
             )
         elif fileType == "audio":
             if resultData.get("source_site") in {"pocketcasts", "xiaoyuzhoufm"}:
@@ -3211,6 +3255,7 @@ def _process_web_request(data, translate_sync=False):
     translation_pending = False
     translated_description = None
     processed = {}
+    source_is_pdf = False
 
     # Fetch content
     proxy_mode = normalize_web_proxy_mode(data.get("proxy", "no"))
@@ -3324,6 +3369,7 @@ def _process_web_request(data, translate_sync=False):
         translated_title = processed["translated_title"]
         translated_description = processed["translated_description"]
         translation_performed = processed["translation_performed"]
+        source_is_pdf = bool(processed.get("is_pdf"))
         translation_pending = (not translate_sync) and lang_mode in {"trans", "both"}
         if translation_pending:
             title = original_title
@@ -3365,6 +3411,8 @@ def _process_web_request(data, translate_sync=False):
         "raw_markdown": original_md,
         "original_title": original_title,
         "source_site": site_name,
+        "source_is_pdf": source_is_pdf,
+        "pdf_archive_url": processed.get("pdf_archive_url"),
         "defaultDirs": defaultDirs,
         "defaultSaveTitle": defaultSaveTitle,
         "translation_performed": translation_performed,
@@ -3649,8 +3697,12 @@ def save_file():
                 title, "pdf", targetDir, source_url=source_url, html_content=html_content,
                 filename_prefix=search_prefix,
             )
-            pdf_path = OutputHandler.generate_pdf(
-                title, md_content, config, output_path=output_path
+            pdf_path = save_pdf_result(
+                title,
+                resultData,
+                config,
+                output_path,
+                form_data=data.get("formData"),
             )
             return jsonify({"success": True, "savePath": pdf_path})
 

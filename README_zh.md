@@ -7,9 +7,9 @@
 ## 功能
 
 - **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 与无头浏览器（默认 Obscura，可选 Playwright）之间切换。
-- **本地文件支持**：直接读取和处理本地 HTML、Markdown 和文本文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理。
+- **本地文件支持**：直接读取和处理本地 HTML、Markdown、文本和 PDF 文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理（本地 PDF 使用 `-p` 时按原样复制）。
 - **失败 URL 记录**：CLI 或 Web UI 获取/转换/保存网页 URL（包括搜索结果）失败时，会把该 URL 本身写入 `[Output] md_dir`，文件名为 `获取失败_<标题>.md`（没有标题时用域名/路径生成），方便之后重试。不会覆盖同名的无关文件；同一 URL 的已有记录会复用。
-- **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
+- **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek、SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`/`deepseek`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
 - **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙等网站优化处理，支持复用已保存的登录态。
 - **Podcast 音频**：Pocket Casts 和小宇宙剧集可以使用 `-a/--format audio` 保存 RSS/页面中的原始音频文件（保留 `.m4a` 等源格式）；使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写。
 - **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
@@ -26,6 +26,7 @@
 - **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。
 - **纯净提取**：使用 `readability` 仅提取主要文章内容。
 - **多格式输出**：支持 Markdown、PDF、HTML 和音频。PDF 可用 Playwright 浏览器、本机 Chrome/Chromium 命令行、WeasyPrint、Typst 或 pandoc 渲染（可完全不需要浏览器），由 `[Output] pdf_engine` 指定引擎链。
+- **PDF 输入**：URL 返回 PDF 时，`-p/--format pdf` 会直接保存原始 PDF；Markdown、HTML、音频或发布输出则先用 `pypdf` 提取文本，再走正常的翻译/保存流程。暂不支持扫描版 PDF 的 OCR。
 - **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
 - **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
 - **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读；语音、语速、音量可通过 `--tts-voice` / `--tts-rate` / `--tts-volume`（CLI）或 Web TTS 选项单次覆盖。
@@ -262,8 +263,8 @@ html_inline = false
 extractor = auto
 
 [Search]
-; -S/--search 使用的搜索引擎：auto（DuckDuckGo、Bing，然后是已配置的 SearXNG/Metaso）、
-; duckduckgo、bing、searxng、metaso。CLI --search-engine 可单次覆盖
+; -S/--search 使用的搜索引擎：auto（DuckDuckGo、Bing，然后是已配置的 DeepSeek/SearXNG/Metaso）、
+; duckduckgo、bing、searxng、metaso、deepseek。CLI --search-engine 可单次覆盖
 engine = auto
 ; 每次运行获取的搜索结果数量（1-20）
 ; CLI --search-limit 可单次覆盖
@@ -274,6 +275,10 @@ preview = 5
 searxng_url =
 ; Metaso（秘塔搜索）开放平台 API Key
 metaso_api_key =
+; DeepSeek Search API Key（https://platform.deepseek.com）
+deepseek_api_key =
+; 可选的 DeepSeek Search 接口地址覆盖
+deepseek_url =
 
 [TTS]
 engine = edge-tts
@@ -326,13 +331,13 @@ surf "https://example.com"
 
 ### 本地文件
 
-Surf 可以直接读取和处理本地 HTML、Markdown 和文本文件。支持的输入格式：
+Surf 可以直接读取和处理本地 HTML、Markdown、文本和 PDF 文件。支持的输入格式：
 
 - **操作系统路径**：`/tmp/article.html`、`~/docs/readme.md`、`C:\Temp\notes.txt`
 - **Windows 下 Unix 风格路径**：`C:/Temp/article.md`（自动将 `/` 转换为 `\`）
 - **file:// URI**：`file:///tmp/article.html`
 
-支持的文件类型：`.html`、`.htm`、`.md`、`.txt`、`.rst`、`.adoc`（其他类型按纯文本处理）。
+支持的文件类型：`.html`、`.htm`、`.md`、`.txt`、`.rst`、`.adoc`、`.pdf`（其他类型按纯文本处理）。本地 PDF 与 PDF URL 使用相同的文本提取流程。
 
 ```bash
 # 读取本地 HTML 文件
@@ -352,6 +357,10 @@ surf /tmp/article.md -r
 
 # 从本地 HTML 生成 PDF
 surf /tmp/article.html -p
+
+# 提取本地 PDF 文本，或用 -p 原样复制
+surf ~/docs/paper.pdf
+surf ~/docs/paper.pdf -p
 ```
 
 - `.html`/`.htm` 文件按原样处理。
@@ -370,6 +379,9 @@ surf -S "python asyncio 教程"
 surf -S "python asyncio 教程" --search-top 3
 surf -S "python asyncio 教程" --feel-lucky
 
+# 使用 DeepSeek Search（需配置 [Search] deepseek_api_key）
+surf -S "python asyncio 教程" --search-engine deepseek
+
 # 把选中的结果合并成一个文档
 surf -S "python asyncio 教程" --search-top 3 --search-merge
 
@@ -381,9 +393,10 @@ surf -S "python asyncio 教程" --search-prefix "asyncio"
 surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
 ```
 
-- 搜索引擎：`--search-engine auto|duckduckgo|bing|searxng|metaso`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 SearXNG 实例和 Metaso。DeepSeek 的联网搜索没有公开 API，因此未作为可选引擎。
+- 搜索引擎：`--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek/SearXNG/Metaso。
 - SearXNG：在 `[Search] searxng_url` 填入自建实例地址，并在该实例上开启 JSON API。
 - Metaso：在 `[Search] metaso_api_key` 填入秘塔开放平台 API Key。
+- DeepSeek：在 `[Search] deepseek_api_key` 填入 DeepSeek 平台 API Key，接口为 `POST https://api.deepseek.com/v1/tools/search`；可用 `[Search] deepseek_url` 覆盖接口地址。DeepSeek 搜索支持 `site:`、`lang:`、`after:`、`before:`、精确短语和排除语法。
 - 结果数量：`--search-limit N`（默认取 `[Search] limit`，即 5；上限 20）控制获取多少条结果；选择列表默认显示前 5 条，可用 `--search-preview N` 调整（配置项 `[Search] preview`）。
 - 选择输入：`1`、`1,3-5`、`1 3 5`、`all`，空行表示取消；非法输入最多重试三次。
 - 非交互 stdin（脚本/CI）会处理全部已获取结果；脚本中建议使用 `--search-top N` 或 `--feel-lucky` 保证行为确定。
@@ -425,6 +438,23 @@ pandoc_args =                   ; 例如 --toc -V CJKmainfont="Noto Serif CJK SC
 ```
 
 PDF 正文现在能正确渲染 Markdown 表格（`| a | b |`）与围栏代码块。
+
+### PDF URL 输入
+
+当抓取的 URL 指向 PDF（通过 `Content-Type: application/pdf`、响应体 PDF 魔数或 `Content-Disposition` 判断）时，由输出格式决定处理方式：
+
+```bash
+surf "https://example.com/paper.pdf"          # 提取文本 -> Markdown（正常流程）
+surf "https://example.com/paper.pdf" -h       # 提取文本 -> HTML
+surf "https://example.com/paper.pdf" -r       # 提取文本，不翻译
+surf "https://example.com/paper.pdf" -p       # 直接下载并保存原始 PDF
+```
+
+- 文本提取使用 `pypdf`；PDF 输出会完全跳过文本提取，因此 `-p` 按字节保留源文件。
+- URL 不一定以 `.pdf` 结尾，Surf 会检查响应内容。
+- 扫描版/纯图片 PDF 没有可提取文本，暂不做 OCR；可改用 `-p` 保存原文件。
+- 如果 PDF 站点已失效（域名无法解析或连接失败），Surf 会向 Wayback Machine 查询该 URL，并在存在快照时使用归档的原始 PDF；快照地址会写入 front matter 的 `archive` 字段。
+- Web 界面规则相同：预览以及 Markdown/HTML 保存使用提取文本，保存为 PDF 时会重新下载原始 PDF（原始站点已失效时使用归档 PDF）。
 
 ### 语言模式 (-l)
 
