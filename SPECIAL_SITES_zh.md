@@ -20,7 +20,7 @@
 
 ### 付费墙文章
 
-Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.is`、`archive.ph`、`archive.today`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
+Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
 
 ---
 
@@ -43,6 +43,7 @@ Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取
 - V2EX
 - 国家哲学社会科学文献中心 (NCPSSD)
 - BBC News
+- Foreign Affairs
 
 ### Pocket Casts（播客剧集）
 
@@ -690,6 +691,37 @@ surf "https://v2ex.com/t/1208365" -r -t
 
 **默认策略**:
 - `default_no_proxy`: True（大多数地区可直接访问 BBC，默认不使用代理）
+
+**降级行为**:
+- 若特殊处理器失败，回退到常规抓取流程（可能会使用浏览器后端）。
+
+### 14. Foreign Affairs
+
+**域名**: `foreignaffairs.com`
+
+**匹配规则**:
+```regex
+^https?://(www\.)?foreignaffairs\.com/(?!(?:authors|topics|regions|tags|issues|user|subscribe|search)/)[a-z0-9-]+/[a-z0-9-]+
+```
+
+**处理函数**: `Fetcher._fetch_foreignaffairs_article`
+
+**处理流程**:
+1. 使用 `requests` 库发起普通 HTTP 请求获取文章页面。
+2. 清理 `<article>` 内的阅读干扰元素：
+   - `.article-tools` / `.js--article-tools`（「Listen / Share / Print / Save」工具栏，其提示文字为 “Subscribe to unlock this feature”），
+   - `.js--modal` / `.wrapper__modal`（分享与引用弹窗，会重复标题、作者和引用标签页），
+   - `.paywall-free-article`（“You are reading a free article” 订阅推销框），
+   - 新闻订阅模块与 DFP 广告位。
+3. 返回清理后的 HTML，交由通用提取流程（Readability/trafilatura）处理。
+4. 若页面出现「免费文章」横幅，则注入 `<meta name="surf-free-article" content="true">`，告知付费墙检测该文可读。
+
+**默认策略**:
+- 无。中英文判断、代理模式与翻译行为与普通网页一致。
+
+**说明**:
+- Foreign Affairs 把真正的正文容器命名为 `paywall-content`，页面同时带有 “Subscribe to unlock this feature” 提示和 “You are reading a free article” 横幅。这些标记过去会被判定为付费墙，即使全文已经在 HTML 中，导致 Surf 走 archive 快照路径（并把链接改写成 `archive.ph` 前缀）。处理器只移除 `.paywall-free-article`，因此真正受限的文章仍保留付费墙标记并继续触发 archive 回退。
+- 付费墙检测把明确的免费信号（`article:content_tier=free`、`article:access=public`、`surf-free-article=true`，或正文足够长且页面明示「free article」）视为权威依据；`paywall-content` 这类含义模糊的 CSS 命名只有在正文仍像摘要（过短）时才计入分数。
 
 **降级行为**:
 - 若特殊处理器失败，回退到常规抓取流程（可能会使用浏览器后端）。

@@ -147,684 +147,1060 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Surf - URL转Markdown/PDF/HTML/Audio</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23667eea'/%3E%3Cstop offset='100%25' stop-color='%23764ba2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Cpath d='M12 38c6-8 10-12 16-12 7 0 10 8 16 8 4 0 7-2 12-8v10c-5 6-8 8-12 8-6 0-9-8-16-8-6 0-10 4-16 12V38z' fill='white' fill-opacity='.92'/%3E%3Cpath d='M12 24c6-8 10-12 16-12 7 0 10 8 16 8 4 0 7-2 12-8v10c-5 6-8 8-12 8-6 0-9-8-16-8-6 0-10 4-16 12V24z' fill='white' fill-opacity='.72'/%3E%3C/svg%3E">
+    <title>Surf</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230e7490'/%3E%3Cpath d='M12 38c6-8 10-12 16-12 7 0 10 8 16 8 4 0 7-2 12-8v10c-5 6-8 8-12 8-6 0-9-8-16-8-6 0-10 4-16 12V38z' fill='white' fill-opacity='.92'/%3E%3Cpath d='M12 24c6-8 10-12 16-12 7 0 10 8 16 8 4 0 7-2 12-8v10c-5 6-8 8-12 8-6 0-9-8-16-8-6 0-10 4-16 12V24z' fill='white' fill-opacity='.72'/%3E%3C/svg%3E">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root {
+            --bg: #f5f7f9;
+            --surface: #ffffff;
+            --surface-2: #f1f4f7;
+            --surface-3: #e9edf2;
+            --line: #e2e7ed;
+            --line-strong: #cbd3dc;
+            --ink: #101820;
+            --ink-2: #48535f;
+            --ink-3: #7b8794;
+            --accent: #0e7490;
+            --accent-ink: #0b5b72;
+            --accent-soft: #e6f4f7;
+            --ok: #0f7b4f;
+            --ok-soft: #e8f6ef;
+            --warn: #8a5a00;
+            --warn-soft: #fdf4e3;
+            --err: #b3261e;
+            --err-soft: #fdecea;
+            --radius: 16px;
+            --radius-sm: 10px;
+            --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 18px 40px -28px rgba(16, 24, 40, .35);
+            --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
         }
-        
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0d1117;
+                --surface: #141a21;
+                --surface-2: #1a222b;
+                --surface-3: #222c37;
+                --line: #232d38;
+                --line-strong: #35424f;
+                --ink: #e9eef4;
+                --ink-2: #a9b5c2;
+                --ink-3: #7d8b99;
+                --accent: #4cc2d9;
+                --accent-ink: #7fd7e8;
+                --accent-soft: rgba(76, 194, 217, .13);
+                --ok: #55c98a;
+                --ok-soft: rgba(85, 201, 138, .12);
+                --warn: #e0aa55;
+                --warn-soft: rgba(224, 170, 85, .12);
+                --err: #f08b82;
+                --err-soft: rgba(240, 139, 130, .12);
+                --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 18px 40px -28px rgba(0, 0, 0, .9);
+            }
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { -webkit-text-size-adjust: 100%; }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-        }
-        
-        .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
-        }
-        
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        
-        .header p {
-            opacity: 0.9;
-        }
-        
-        .card {
-            background: white;
-            border-radius: 12px;
-            padding: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            margin-bottom: 20px;
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
-        label {
-            display: block;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: #333;
-        }
-        
-        input[type="text"], input[type="url"], textarea, select {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e1e5e9;
-            border-radius: 8px;
-            font-size: 16px;
-            transition: border-color 0.3s;
-        }
-        
-        input[type="text"]:focus, input[type="url"]:focus, textarea:focus, select:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        
-        .url-input {
-            font-size: 18px;
-            min-height: 96px;
-            resize: vertical;
+            background: var(--bg);
+            color: var(--ink);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            font-size: 15px;
+            line-height: 1.55;
+            -webkit-font-smoothing: antialiased;
         }
 
-        .input-toolbar {
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0 0 0 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* ---------- top bar ---------- */
+
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 50;
             display: flex;
+            align-items: center;
             justify-content: space-between;
-            align-items: center;
-            gap: 12px;
-            margin-top: 12px;
-            flex-wrap: wrap;
+            gap: 16px;
+            padding: 12px 24px;
+            background: var(--bg);
+            background: color-mix(in srgb, var(--bg) 82%, transparent);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--line);
         }
 
-        .input-actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        
-        .options-grid {
+        .brand { display: flex; align-items: center; gap: 10px; }
+
+        .brand-mark {
+            width: 28px;
+            height: 28px;
+            border-radius: 9px;
+            background: var(--accent);
+            color: #fff;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 18px 20px;
-            align-items: start;
+            place-items: center;
+            flex: 0 0 auto;
         }
 
-        .form-group.wide {
-            grid-column: 1 / -1;
+        .brand-mark svg { width: 18px; height: 18px; }
+
+        .brand-name { font-size: 17px; font-weight: 700; letter-spacing: -.01em; }
+
+        .brand-ver {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--ink-3);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            padding: 1px 8px;
         }
-        
-        .checkbox-group {
+
+        .topbar-meta { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-3); }
+
+        .live-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--ok);
+            box-shadow: 0 0 0 3px var(--ok-soft);
+        }
+
+        .queue-badge {
+            display: none;
+            align-items: center;
+            gap: 6px;
+            font-size: 12.5px;
+            font-weight: 600;
+            color: var(--accent-ink);
+            background: var(--accent-soft);
+            border-radius: 999px;
+            padding: 3px 10px;
+        }
+
+        .queue-badge.show { display: inline-flex; }
+
+        /* ---------- layout ---------- */
+
+        .page {
+            max-width: 1060px;
+            margin: 0 auto;
+            padding: 0 24px 88px;
+        }
+
+        .intro { padding: 46px 0 26px; }
+
+        .intro h1 {
+            font-size: clamp(26px, 3.6vw, 38px);
+            line-height: 1.15;
+            letter-spacing: -.025em;
+            font-weight: 720;
+        }
+
+        .intro p {
+            margin-top: 10px;
+            max-width: 60ch;
+            color: var(--ink-2);
+            font-size: 15.5px;
+        }
+
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            margin-bottom: 18px;
+        }
+
+        .section-label {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            margin: 34px 0 14px;
+        }
+
+        .section-label h2 {
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--ink-3);
+        }
+
+        .section-label .count { font-size: 12.5px; color: var(--ink-3); }
+
+        /* ---------- composer ---------- */
+
+        .composer { padding: 20px; }
+
+        .mode-switch {
+            display: inline-flex;
+            gap: 2px;
+            padding: 3px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            border-radius: 11px;
+            margin-bottom: 14px;
+        }
+
+        .mode {
+            border: 0;
+            background: transparent;
+            color: var(--ink-3);
+            font: inherit;
+            font-size: 13.5px;
+            padding: 6px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background .15s, color .15s;
+        }
+
+        .mode:hover { color: var(--ink); }
+
+        .mode.active {
+            background: var(--surface);
+            color: var(--accent-ink);
+            font-weight: 650;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, .08);
+        }
+
+        textarea#url {
+            display: block;
+            width: 100%;
+            min-height: 118px;
+            resize: vertical;
+            padding: 16px 18px;
+            border: 1px solid var(--line-strong);
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+            color: var(--ink);
+            font: inherit;
+            font-size: 16px;
+            line-height: 1.6;
+            transition: border-color .15s, background .15s, box-shadow .15s;
+        }
+
+        textarea#url::placeholder { color: var(--ink-3); }
+
+        textarea#url:focus {
+            outline: none;
+            background: var(--surface);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 4px var(--accent-soft);
+        }
+
+        .composer-row {
             display: flex;
             align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+        }
+
+        .composer-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             gap: 8px;
+            border: 1px solid transparent;
+            border-radius: var(--radius-sm);
+            font: inherit;
+            font-size: 14.5px;
+            font-weight: 600;
+            padding: 11px 20px;
+            cursor: pointer;
+            transition: transform .12s, background .15s, border-color .15s, color .15s, box-shadow .15s;
+            white-space: nowrap;
         }
 
-        .checkbox-group label {
-            margin-bottom: 0;
+        .btn:active { transform: translateY(1px); }
+
+        .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+            box-shadow: 0 6px 18px -10px rgba(14, 116, 144, .8);
         }
 
-        .checkbox-group input[type="checkbox"] {
+        .btn-primary:hover:not(:disabled) { background: var(--accent-ink); }
+
+        .btn-ghost {
+            background: transparent;
+            border-color: var(--line-strong);
+            color: var(--ink-2);
+        }
+
+        .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); }
+
+        .btn-sm { padding: 8px 14px; font-size: 13.5px; }
+
+        .check {
+            display: inline-flex;
+            align-items: center;
+            gap: 9px;
+            font-size: 14px;
+            color: var(--ink-2);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .check input[type="checkbox"] {
+            appearance: none;
             width: 18px;
             height: 18px;
-        }
-
-        .tts-options-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr 1fr;
-            gap: 12px;
-            align-items: end;
-        }
-
-        .tts-sublabel {
-            font-size: 13px;
-            font-weight: 600;
-            color: #555;
-            margin-bottom: 6px;
-        }
-
-        .radio-group {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-
-        .radio-option {
+            border: 1.5px solid var(--line-strong);
+            border-radius: 6px;
+            background: var(--surface);
+            cursor: pointer;
             position: relative;
+            flex: 0 0 auto;
+            transition: background .15s, border-color .15s;
         }
+
+        .check input[type="checkbox"]:checked {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+
+        .check input[type="checkbox"]:checked::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: no-repeat center/11px 11px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E");
+        }
+
+        .check input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+        .check input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
+
+        .hint {
+            margin-top: 10px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--ink-3);
+        }
+
+        .hint code {
+            font-family: var(--mono);
+            font-size: 12px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            border-radius: 5px;
+            padding: 1px 5px;
+        }
+
+        .search-fields {
+            display: none;
+            grid-template-columns: 1.4fr .7fr 1.2fr;
+            gap: 14px;
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px dashed var(--line);
+        }
+
+        /* ---------- fields ---------- */
+
+        .field { display: block; margin-bottom: 18px; }
+
+        .field:last-child { margin-bottom: 0; }
+
+        .field-label {
+            display: block;
+            font-size: 12.5px;
+            font-weight: 650;
+            letter-spacing: .01em;
+            color: var(--ink-2);
+            margin-bottom: 8px;
+        }
+
+        .input, select.input {
+            width: 100%;
+            padding: 9px 12px;
+            border: 1px solid var(--line-strong);
+            border-radius: 9px;
+            background: var(--surface);
+            color: var(--ink);
+            font: inherit;
+            font-size: 14px;
+            transition: border-color .15s, box-shadow .15s;
+        }
+
+        .input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+
+        select.input {
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%237b8794' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' d='M4 6.5l4 4 4-4'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            background-size: 14px;
+            padding-right: 32px;
+        }
+
+        .seg {
+            display: inline-flex;
+            flex-wrap: wrap;
+            gap: 2px;
+            padding: 3px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            border-radius: 10px;
+        }
+
+        .radio-option { position: relative; }
 
         .radio-option input[type="radio"] {
             position: absolute;
             opacity: 0;
+            width: 1px;
+            height: 1px;
             pointer-events: none;
         }
 
         .radio-option label {
             display: inline-flex;
             align-items: center;
-            min-height: 44px;
-            padding: 10px 14px;
-            margin-bottom: 0;
-            border: 2px solid #e1e5e9;
-            border-radius: 999px;
-            background: #fff;
+            padding: 6px 12px;
+            border-radius: 7px;
+            font-size: 13.5px;
+            color: var(--ink-2);
             cursor: pointer;
-            transition: all 0.2s ease;
+            white-space: nowrap;
+            user-select: none;
+            transition: background .15s, color .15s, box-shadow .15s;
         }
+
+        .radio-option label:hover { background: var(--surface); color: var(--ink); }
 
         .radio-option input[type="radio"]:checked + label {
-            border-color: #667eea;
-            background: #eef2ff;
-            color: #4c63d2;
+            background: var(--surface);
+            color: var(--accent-ink);
+            font-weight: 650;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, .1);
         }
 
-        .radio-option input[type="radio"]:disabled + label {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
-        .btn {
-            display: inline-block;
-            padding: 15px 40px;
-            border: none;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
-        }
-        
-        .btn-primary:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-        
-        .btn-secondary {
-            background: #6c757d;
-            color: white;
-            padding: 10px 20px;
-            font-size: 14px;
-        }
-        
-        .result-card {
-            display: none;
-        }
-        
-        .result-card.show {
-            display: block;
+        .radio-option input[type="radio"]:focus-visible + label {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
         }
 
-        .aggregate-card {
-            border: 2px solid #d6defa;
-            background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
-        }
+        .radio-option input[type="radio"]:disabled + label { opacity: .45; cursor: not-allowed; }
 
-        .aggregate-card .result-title {
-            font-size: 1.15em;
-            font-weight: 700;
-            color: #3047b0;
-        }
+        /* ---------- options ---------- */
 
-        .search-preview-card {
-            border: 2px solid #c7d2fe;
-            background: linear-gradient(180deg, #f8faff 0%, #ffffff 100%);
-        }
+        .options { overflow: hidden; }
 
-        .search-preview-actions {
+        .options-head {
             display: flex;
-            gap: 10px;
             align-items: center;
-            flex-wrap: wrap;
-        }
-
-        .search-preview-actions .btn {
-            padding: 8px 16px;
-            font-size: 14px;
-        }
-
-        .search-result-count {
-            color: #666;
-            font-size: 0.9em;
-        }
-
-        .search-result-list {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            max-height: 460px;
-            overflow-y: auto;
-            margin-top: 12px;
-        }
-
-        .search-result-item {
-            display: flex;
-            gap: 10px;
-            align-items: flex-start;
-            padding: 10px 12px;
-            border: 1px solid #e1e5e9;
-            border-radius: 8px;
-            background: #fff;
-            cursor: pointer;
-        }
-
-        .search-result-item:hover {
-            border-color: #667eea;
-            background: #f6f8ff;
-        }
-
-        .search-result-item input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
-            flex: 0 0 auto;
-            margin-top: 3px;
-        }
-
-        .search-result-text {
-            min-width: 0;
-        }
-
-        .search-result-title {
-            display: block;
-            font-weight: 600;
-            color: #333;
-            word-break: break-word;
-        }
-
-        .search-result-url {
-            display: block;
-            color: #667eea;
-            font-size: 0.85em;
-            word-break: break-all;
-        }
-        
-        .result-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid #e1e5e9;
-        }
-        
-        .save-links {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-
-        .save-actions {
-            display: flex;
-            flex-direction: column;
-            align-items: stretch;
-            justify-content: flex-start;
-            gap: 12px;
+            gap: 14px;
             width: 100%;
-        }
-
-        .play-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        .save-btn {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 6px;
-            text-decoration: none;
-            font-size: 14px;
-            font-weight: 500;
+            padding: 16px 20px;
+            border: 0;
+            background: transparent;
+            color: var(--ink);
+            font: inherit;
             cursor: pointer;
-            transition: all 0.3s;
+            text-align: left;
         }
 
-        .save-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        .options-head:hover { background: var(--surface-2); }
+
+        .options-title { font-size: 14.5px; font-weight: 650; }
+
+        .options-summary {
+            flex: 1;
+            min-width: 0;
+            font-size: 13px;
+            color: var(--ink-3);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
-        .save-btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
+        .chevron { color: var(--ink-3); transition: transform .18s; flex: 0 0 auto; }
 
-        .save-md { background: #28a745; color: white; }
-        .save-html { background: #e34c26; color: white; }
-        .save-pdf { background: #f40f02; color: white; }
-        .save-audio { background: #6f42c1; color: white; }
+        .options[data-open="false"] .chevron { transform: rotate(-90deg); }
 
-        .save-config {
+        .options-body {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 12px;
-            margin: 0;
+            grid-template-columns: repeat(auto-fit, minmax(288px, 1fr));
+            gap: 26px 30px;
+            padding: 4px 20px 22px;
+            border-top: 1px solid var(--line);
         }
 
-        .result-source {
+        .options[data-open="false"] .options-body { display: none; }
+
+        .options-group { padding-top: 18px; }
+
+        .options-group > h3 {
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--ink-3);
             margin-bottom: 14px;
         }
 
-        .save-field {
+        .tts-grid { display: grid; grid-template-columns: 1.6fr .7fr .7fr; gap: 10px; }
+
+        .tts-grid .input { font-size: 13.5px; }
+
+        /* ---------- activity ---------- */
+
+        .activity {
             display: flex;
-            flex-direction: column;
-            gap: 6px;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            border-left: 3px solid var(--accent);
         }
 
-        .save-field label {
-            font-size: 13px;
-            font-weight: 600;
-            color: #4a5568;
+        .activity[hidden] { display: none; }
+
+        .activity-dot {
+            width: 9px;
+            height: 9px;
+            margin-top: 6px;
+            border-radius: 50%;
+            background: var(--accent);
+            flex: 0 0 auto;
+        }
+
+        .activity-text { flex: 1; min-width: 0; font-size: 14px; color: var(--ink-2); word-break: break-word; }
+
+        .activity-text b { color: var(--ink); }
+
+        .activity-processing .activity-dot { animation: pulse 1.4s ease-in-out infinite; }
+
+        .activity-success { border-left-color: var(--ok); background: var(--ok-soft); }
+        .activity-success .activity-dot { background: var(--ok); animation: none; }
+        .activity-success .activity-text { color: var(--ok); }
+
+        .activity-error { border-left-color: var(--err); background: var(--err-soft); }
+        .activity-error .activity-dot { background: var(--err); animation: none; }
+        .activity-error .activity-text { color: var(--err); }
+
+        .activity-close {
+            border: 0;
+            background: transparent;
+            color: inherit;
+            opacity: .6;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 2px 4px;
+        }
+
+        .activity-close:hover { opacity: 1; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: .35; transform: scale(.85); }
+            50% { opacity: 1; transform: scale(1); }
+        }
+
+        /* ---------- result cards ---------- */
+
+        .result-card { padding: 20px; }
+
+        .result-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 14px;
+        }
+
+        .result-title-wrap { min-width: 0; }
+
+        .result-title {
+            font-size: 17px;
+            font-weight: 680;
+            line-height: 1.35;
+            letter-spacing: -.01em;
+            word-break: break-word;
+        }
+
+        .result-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin-top: 7px;
+            font-size: 12.5px;
+            color: var(--ink-3);
+        }
+
+        .result-source { word-break: break-all; }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+            font-weight: 650;
+            letter-spacing: .02em;
+            padding: 1px 8px;
+            border-radius: 999px;
+            background: var(--surface-3);
+            color: var(--ink-2);
+        }
+
+        .badge-ok { background: var(--ok-soft); color: var(--ok); }
+        .badge-accent { background: var(--accent-soft); color: var(--accent-ink); }
+        .badge-err { background: var(--err-soft); color: var(--err); }
+
+        .save-bar {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-top: 16px;
+            padding: 14px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+        }
+
+        .save-config {
+            display: grid;
+            grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr);
+            gap: 12px;
+            flex: 1 1 380px;
+            min-width: 0;
+        }
+
+        .save-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+
+        .save-field > span {
+            font-size: 11.5px;
+            font-weight: 650;
+            letter-spacing: .02em;
+            color: var(--ink-3);
         }
 
         .save-input {
             width: 100%;
-            padding: 10px 12px;
-            border: 1px solid #cfd8e3;
+            padding: 7px 10px;
+            border: 1px solid var(--line-strong);
             border-radius: 8px;
-            font-size: 14px;
-            font-family: inherit;
-            color: #1f2937;
-            background: #fff;
+            background: var(--surface);
+            color: var(--ink);
+            font: inherit;
+            font-size: 13px;
         }
 
-        .save-input:focus {
-            outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+        .save-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+        .save-links { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+        .save-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 12px;
+            border: 1px solid var(--line-strong);
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--ink-2);
+            font: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: border-color .15s, color .15s, background .15s;
         }
-        
+
+        .save-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-ink); background: var(--accent-soft); }
+
+        .save-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+        .save-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+        .save-btn-primary:hover:not(:disabled) { background: var(--accent-ink); border-color: var(--accent-ink); color: #fff; }
+
+        .save-btn-divider { width: 1px; align-self: stretch; background: var(--line-strong); margin: 0 2px; }
+
+        .tabs { display: flex; gap: 2px; margin-top: 18px; border-bottom: 1px solid var(--line); }
+
+        .tab {
+            border: 0;
+            background: transparent;
+            padding: 9px 12px;
+            margin-bottom: -1px;
+            border-bottom: 2px solid transparent;
+            color: var(--ink-3);
+            font: inherit;
+            font-size: 13.5px;
+            cursor: pointer;
+        }
+
+        .tab:hover { color: var(--ink); }
+
+        .tab.active { color: var(--accent-ink); border-bottom-color: var(--accent); font-weight: 650; }
+
+        .tab-content { display: none; }
+
+        .tab-content.active { display: block; }
+
         .content-preview {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            max-height: 500px;
-            overflow-y: auto;
+            max-height: 460px;
+            overflow: auto;
+            margin-top: 12px;
+            padding: 16px;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            color: var(--ink-2);
+            font-family: var(--mono);
+            font-size: 13px;
+            line-height: 1.65;
             white-space: pre-wrap;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 14px;
-            line-height: 1.6;
-        }
-        
-        .status {
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            display: none;
-        }
-        
-        .status.show {
-            display: block;
-        }
-        
-        .status-processing {
-            background: #fff3cd;
-            color: #856404;
-            border: 1px solid #ffeeba;
-        }
-        
-        .status-success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-        
-        .status-error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            word-break: break-word;
         }
 
-        .toast-container {
-            position: fixed;
-            bottom: 24px;
-            right: 24px;
-            z-index: 9999;
+        .result-card[data-tone="error"] { border-color: var(--err); }
+
+        .results { scroll-margin-top: 76px; }
+
+        .empty-state {
+            padding: 56px 24px;
+            text-align: center;
+            border: 1px dashed var(--line-strong);
+            border-radius: var(--radius);
+            color: var(--ink-3);
+            font-size: 14px;
+        }
+
+        .empty-state strong { display: block; margin-bottom: 6px; color: var(--ink-2); font-size: 15px; }
+
+        /* ---------- search picker ---------- */
+
+        .search-preview-card { border-color: var(--accent); }
+
+        .search-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 14px;
+        }
+
+        .search-toolbar-left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+        .search-result-count { font-size: 12.5px; color: var(--ink-3); }
+
+        .search-result-list {
             display: flex;
             flex-direction: column;
-            gap: 10px;
-            max-width: 380px;
+            gap: 8px;
+            max-height: 440px;
+            overflow-y: auto;
+            margin-top: 14px;
         }
 
-        .toast {
-            padding: 12px 18px;
-            border-radius: 8px;
-            color: #fff;
-            font-size: 14px;
-            font-weight: 500;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
-            animation: toastIn 0.3s ease-out;
+        .search-result-item {
+            display: flex;
+            gap: 11px;
+            align-items: flex-start;
+            padding: 10px 12px;
+            border: 1px solid var(--line);
+            border-radius: 10px;
+            background: var(--surface);
             cursor: pointer;
-            opacity: 1;
-            transition: opacity 0.3s;
+            transition: border-color .15s, background .15s;
         }
 
-        .toast.fade-out {
-            opacity: 0;
+        .search-result-item:hover { border-color: var(--accent); background: var(--accent-soft); }
+
+        .search-result-checkbox {
+            appearance: none;
+            width: 17px;
+            height: 17px;
+            margin-top: 2px;
+            border: 1.5px solid var(--line-strong);
+            border-radius: 5px;
+            flex: 0 0 auto;
+            position: relative;
+            cursor: pointer;
         }
 
-        .toast-success { background: #28a745; }
-        .toast-error { background: #dc3545; }
-        .toast-info { background: #17a2b8; }
+        .search-result-checkbox:checked { background: var(--accent); border-color: var(--accent); }
+
+        .search-result-checkbox:checked::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: no-repeat center/10px 10px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='white' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E");
+        }
+
+        .search-result-text { min-width: 0; display: block; }
+
+        .search-result-title { display: block; font-weight: 600; font-size: 14px; word-break: break-word; }
+
+        .search-result-url { display: block; font-size: 12px; color: var(--accent-ink); word-break: break-all; margin-top: 2px; }
+
+        /* ---------- save queue ---------- */
+
+        .queue-panel { display: none; padding: 16px 20px; }
+
+        .queue-panel.show { display: block; }
 
         .save-queue-title {
-            font-weight: 600;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: var(--ink-3);
             margin-bottom: 10px;
         }
 
-        .save-queue-list {
-            list-style: none;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            max-height: 260px;
-            overflow-y: auto;
-        }
+        .save-queue-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
 
         .save-queue-item {
             display: flex;
             align-items: baseline;
             gap: 10px;
-            padding: 6px 10px;
-            border-radius: 6px;
-            background: rgba(255, 255, 255, 0.65);
-            font-size: 13px;
+            padding: 7px 10px;
+            border-radius: 8px;
+            background: var(--surface-2);
+            font-size: 12.5px;
             word-break: break-all;
         }
 
-        .save-queue-type {
-            flex-shrink: 0;
-            font-weight: 700;
-            font-size: 11px;
-            text-transform: uppercase;
+        .save-queue-type { flex: 0 0 auto; font-family: var(--mono); font-size: 10.5px; font-weight: 700; color: var(--ink-3); }
+
+        .save-queue-url { color: var(--ink-2); }
+
+        .save-queue-status { margin-left: auto; flex: 0 0 auto; font-weight: 650; white-space: nowrap; }
+
+        .save-queue-status-pending { color: var(--warn); }
+        .save-queue-status-running { color: var(--accent-ink); }
+        .save-queue-status-done { color: var(--ok); }
+        .save-queue-status-error { color: var(--err); }
+
+        .save-queue-detail { display: block; width: 100%; color: var(--ink-3); font-family: var(--mono); font-size: 11.5px; }
+
+        /* ---------- toasts ---------- */
+
+        .toast-container {
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-width: min(380px, calc(100vw - 40px));
         }
 
-        .save-queue-url {
-            color: inherit;
+        .toast {
+            padding: 12px 16px;
+            border-radius: 11px;
+            border: 1px solid var(--line);
+            background: var(--surface);
+            color: var(--ink);
+            font-size: 13.5px;
+            box-shadow: var(--shadow);
+            cursor: pointer;
+            animation: toast-in .22s ease-out;
+            transition: opacity .3s, transform .3s;
+            word-break: break-word;
         }
 
-        .save-queue-status {
-            margin-left: auto;
-            flex-shrink: 0;
-            white-space: nowrap;
-            font-weight: 600;
+        .toast::before {
+            content: "";
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            margin-right: 9px;
+            vertical-align: 1px;
+            background: var(--accent);
         }
 
-        .save-queue-status-pending { color: #856404; }
-        .save-queue-status-running { color: #004085; }
-        .save-queue-status-done { color: #155724; }
-        .save-queue-status-error { color: #721c24; }
+        .toast-success::before { background: var(--ok); }
+        .toast-error::before { background: var(--err); }
 
-        .save-queue-detail {
-            display: block;
-            width: 100%;
-            color: inherit;
-            opacity: 0.85;
+        .toast.fade-out { opacity: 0; transform: translateY(6px); }
+
+        @keyframes toast-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
-        @keyframes toastIn {
-            from { transform: translateX(100%); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
-        }
+        /* ---------- spinner ---------- */
+
         .spinner {
             display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(0,0,0,0.1);
+            width: 13px;
+            height: 13px;
+            border: 2px solid currentColor;
+            border-top-color: transparent;
             border-radius: 50%;
-            border-top-color: #667eea;
-            animation: spin 1s ease-in-out infinite;
-            margin-right: 10px;
-            vertical-align: middle;
+            animation: spin .7s linear infinite;
+            vertical-align: -2px;
         }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        .tabs {
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ---------- footer ---------- */
+
+        .footer {
+            padding: 26px 0 0;
+            border-top: 1px solid var(--line);
+            margin-top: 30px;
+            font-size: 12.5px;
+            color: var(--ink-3);
             display: flex;
-            gap: 5px;
-            margin-bottom: 15px;
-        }
-        
-        .tab {
-            padding: 10px 20px;
-            border: none;
-            background: #e1e5e9;
-            border-radius: 6px 6px 0 0;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-        }
-        
-        .tab.active {
-            background: #667eea;
-            color: white;
-        }
-        
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
-        }
-        
-        .section-title {
-            font-size: 1.1em;
-            font-weight: 600;
-            color: #667eea;
-            margin: 20px 0 15px;
-            padding-bottom: 8px;
-            border-bottom: 2px solid #e1e5e9;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
         }
 
-        .field-hint {
-            margin-top: 6px;
-            font-size: 13px;
-            color: #6c757d;
-            line-height: 1.5;
-        }
-        
-        .version-info {
-            text-align: center;
-            color: rgba(255,255,255,0.7);
-            font-size: 12px;
-            margin-top: 20px;
+        kbd {
+            font-family: var(--mono);
+            font-size: 11px;
+            border: 1px solid var(--line-strong);
+            border-bottom-width: 2px;
+            border-radius: 5px;
+            padding: 0 5px;
+            color: var(--ink-3);
         }
 
-        @media (max-width: 768px) {
-            .result-header {
-                flex-direction: column;
-                align-items: stretch;
-                gap: 12px;
-            }
+        /* ---------- responsive ---------- */
 
-            .save-actions {
-                justify-content: flex-start;
-            }
+        @media (max-width: 860px) {
+            .search-fields { grid-template-columns: 1fr 1fr; }
+            .search-fields > :last-child { grid-column: 1 / -1; }
+        }
 
-            .input-toolbar {
-                align-items: stretch;
-            }
+        @media (max-width: 640px) {
+            .page { padding: 0 16px 64px; }
+            .topbar { padding: 10px 16px; }
+            .intro { padding: 30px 0 20px; }
+            .composer { padding: 16px; }
+            .composer-actions { width: 100%; }
+            .composer-actions .btn { flex: 1 1 auto; }
+            .save-config { grid-template-columns: 1fr; }
+            .save-bar { align-items: stretch; }
+            .save-links { justify-content: flex-start; }
+            .search-fields { grid-template-columns: 1fr; }
+            .tts-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🌊 Surf</h1>
-            <p>将网页转换为 Markdown / PDF / HTML / Audio，或发布到 Pastebin</p>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M2 14c2.8-3.6 4.7-5.4 7.3-5.4 3.1 0 4.4 3.6 7.2 3.6 1.8 0 3.2-.9 5.5-3.6v4.5c-2.3 2.7-3.7 3.6-5.5 3.6-2.8 0-4.1-3.6-7.2-3.6C6.7 13.1 4.8 14.9 2 18v-4z" fill="currentColor"/>
+                    <path d="M2 7.5c2.8-3.6 4.7-5.4 7.3-5.4 3.1 0 4.4 3.6 7.2 3.6 1.8 0 3.2-.9 5.5-3.6v4.5c-2.3 2.7-3.7 3.6-5.5 3.6-2.8 0-4.1-3.6-7.2-3.6C6.7 6.6 4.8 8.4 2 11.5V7.5z" fill="currentColor" fill-opacity=".55"/>
+                </svg>
+            </span>
+            <span class="brand-name">Surf</span>
+            <span class="brand-ver">v{{ version }}</span>
         </div>
-        
-        <div class="card">
-            <form id="surfForm">
-                <div class="form-group">
-                    <label for="url" id="urlLabel">URL 地址或纯文本</label>
-                    <textarea id="url" name="url" class="url-input" rows="4"
-                              placeholder="粘贴链接，或直接输入一段没有 URL 的文字"></textarea>
-                    <div class="input-toolbar">
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="saveFullText" name="save_full_text">
-                            <label for="saveFullText">全文保存</label>
-                        </div>
-                        <div class="checkbox-group">
-                            <input type="checkbox" id="searchMode" name="search_mode">
-                            <label for="searchMode">关键词搜索 (-S)</label>
-                        </div>
-                        <div class="input-actions">
-                            <button type="submit" class="btn btn-primary" id="submitBtn">开始获取</button>
-                            <button type="button" class="btn btn-secondary" id="directSaveBtn">直接保存</button>
-                        </div>
-                    </div>
-                    <div class="field-hint" id="urlHint">如果包含链接，Surf 会自动提取其中第一个 http/https URL；如果没有链接，会直接把这段文字保存为帖子，第一句作为标题。</div>
-                    <div class="field-hint" id="saveFullTextHint">勾选“全文保存”后，即使文本里包含 URL，也会整段作为正文保存，不再提取链接抓取网页。</div>
-                </div>
+        <div class="topbar-meta">
+            <span class="queue-badge" id="queueBadge"><span class="spinner"></span><span id="queueBadgeText">0</span></span>
+            <span class="live-dot" aria-hidden="true"></span>
+            <span>本地运行</span>
+        </div>
+    </header>
 
-                <div class="options-grid" id="searchOptionsGroup" style="display: none;">
-                    <div class="form-group">
-                        <label for="searchEngine">搜索引擎</label>
-                        <select id="searchEngine" name="search_engine">
-                            {% for option in search_engine_options %}
-                            <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="searchLimit">结果数量</label>
-                        <input type="number" id="searchLimit" name="search_limit" min="1" max="20" value="{{ default_search_limit }}">
-                    </div>
-                    <div class="form-group">
-                        <label for="searchPrefix">文件名前缀</label>
-                        <input type="text" id="searchPrefix" name="search_prefix" placeholder="留空 = 使用搜索关键词">
-                        <div class="field-hint">保存文件名为 [前缀]标题.扩展名。</div>
-                    </div>
-                    <div class="form-group wide">
-                        <div class="field-hint">搜索后先显示「标题 + URL」勾选列表；获取选中的结果会生成常规结果卡，之后可逐条保存或用“合并保存全部结果”合并保存。“直接保存”会保存本次搜索返回的全部结果。</div>
-                    </div>
-                </div>
+    <main class="page">
+        <section class="intro">
+            <h1>一个链接，一份干净的文档。</h1>
+            <p>抓取网页或本地文件，去掉广告与噪音，按需翻译，然后保存为 Markdown、HTML、PDF 或音频。</p>
+        </section>
 
-                <div class="section-title">获取内容</div>
-                <div class="options-grid">
-                    <div class="form-group">
-                        <label>代理模式</label>
-                        <div class="radio-group" id="proxyGroup">
+        <form id="surfForm" class="panel composer">
+            <div class="mode-switch" role="tablist" aria-label="输入模式">
+                <button type="button" class="mode active" data-mode="link" role="tab" aria-selected="true">链接 / 文本</button>
+                <button type="button" class="mode" data-mode="search" role="tab" aria-selected="false">关键词搜索</button>
+            </div>
+            <input type="checkbox" id="searchMode" name="search_mode" class="sr-only" tabindex="-1">
+
+            <label for="url" id="urlLabel" class="sr-only">URL 地址或纯文本</label>
+            <textarea id="url" name="url" rows="3"
+                      placeholder="粘贴一个或多个链接，或直接输入一段文字"></textarea>
+
+            <div class="composer-row">
+                <label class="check" id="saveFullTextWrap">
+                    <input type="checkbox" id="saveFullText" name="save_full_text">
+                    <span>全文保存（不提取链接）</span>
+                </label>
+                <div class="composer-actions">
+                    <button type="button" class="btn btn-ghost" id="directSaveBtn" title="抓取后直接进入后台保存队列，不生成预览卡片">直接保存</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn">提取</button>
+                </div>
+            </div>
+
+            <p class="hint" id="urlHint">输入里包含链接时只抓取第一个 <code>http/https</code> URL；不含链接时，这段文字会作为一篇帖子保存，第一句作为标题。</p>
+            <p class="hint" id="saveFullTextHint">“全文保存”会保留整段文字（包含其中链接），直接按帖子处理。</p>
+
+            <div class="search-fields" id="searchOptionsGroup">
+                <label class="field">
+                    <span class="field-label">搜索引擎</span>
+                    <select id="searchEngine" name="search_engine" class="input">
+                        {% for option in search_engine_options %}
+                        <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label class="field">
+                    <span class="field-label">结果数量</span>
+                    <input type="number" id="searchLimit" name="search_limit" class="input" min="1" max="20" value="{{ default_search_limit }}">
+                </label>
+                <label class="field">
+                    <span class="field-label">文件名前缀</span>
+                    <input type="text" id="searchPrefix" name="search_prefix" class="input" placeholder="留空则用关键词">
+                </label>
+                <p class="hint" style="grid-column: 1 / -1; margin: 0;">先检索，再勾选要抓取的条目。“直接保存”会保存本次检索返回的全部结果。</p>
+            </div>
+        </form>
+
+        <section class="panel options" id="optionsPanel" data-open="true">
+            <button type="button" class="options-head" id="optionsToggle" aria-expanded="true" aria-controls="optionsBody">
+                <span class="options-title">选项</span>
+                <span class="options-summary" id="optionsSummary"></span>
+                <svg class="chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
+            <div class="options-body" id="optionsBody">
+                <div class="options-group">
+                    <h3>抓取</h3>
+                    <div class="field">
+                        <span class="field-label">代理</span>
+                        <div class="seg" id="proxyGroup">
                             <div class="radio-option">
                                 <input type="radio" id="proxy-auto" name="proxy" value="auto" {% if default_proxy_mode == 'auto' %}checked{% endif %}>
-                                <label for="proxy-auto">自动（与 CLI 一致）</label>
+                                <label for="proxy-auto">自动</label>
                             </div>
                             {% if is_windows %}
                             <div class="radio-option">
                                 <input type="radio" id="proxy-win" name="proxy" value="win" {% if default_proxy_mode == 'win' %}checked{% endif %}>
-                                <label for="proxy-win">Windows 系统代理</label>
+                                <label for="proxy-win">系统代理</label>
                             </div>
                             {% endif %}
                             <div class="radio-option">
@@ -833,96 +1209,24 @@ HTML_TEMPLATE = """
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="proxy-custom" name="proxy" value="custom" {% if default_proxy_mode == 'custom' %}checked{% endif %}>
-                                <label for="proxy-custom">自定义代理</label>
+                                <label for="proxy-custom">自定义</label>
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="proxy-no" name="proxy" value="no" {% if default_proxy_mode == 'no' %}checked{% endif %}>
-                                <label for="proxy-no">不使用代理</label>
+                                <label for="proxy-no">不使用</label>
                             </div>
                         </div>
                     </div>
-                    
-                    <div class="form-group" id="customProxyGroup" style="display: none;">
-                        <label for="customProxy">自定义代理地址</label>
-                        <input type="text" id="customProxy" name="custom_proxy" 
-                               value="{{ default_custom_proxy }}"
-                               placeholder="http://127.0.0.1:7890">
-                    </div>
 
-                    <div class="form-group checkbox-group">
-                        <input type="checkbox" id="browser" name="browser">
-                        <label for="browser">使用浏览器渲染 (JavaScript)</label>
-                    </div>
+                    <label class="field" id="customProxyGroup" style="display: none;">
+                        <span class="field-label">代理地址</span>
+                        <input type="text" id="customProxy" name="custom_proxy" class="input"
+                               value="{{ default_custom_proxy }}" placeholder="http://127.0.0.1:7890">
+                    </label>
 
-                    <div class="form-group wide">
-                        <label>浏览器后端</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="browser-backend-auto" name="browser_backend" value="auto" checked>
-                                <label for="browser-backend-auto">跟随配置（{{ config_browser_backend }}）</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="browser-backend-obscura" name="browser_backend" value="obscura">
-                                <label for="browser-backend-obscura">Obscura</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="browser-backend-playwright" name="browser_backend" value="playwright">
-                                <label for="browser-backend-playwright">Playwright</label>
-                            </div>
-                        </div>
-                        <div class="field-hint">仅影响无头浏览器抓取；对应 CLI 的 `-B/--browser-backend`。有头登录 / 知乎兜底 / 特殊站点页面自动化需要可选的 Playwright extra（`uv sync --extra browser`）；PDF 在未安装 Playwright 时回退到本机 Chrome/Chromium。</div>
-                    </div>
-
-                    <div class="form-group checkbox-group" id="podcastTranscribeGroup" style="display: none;">
-                        <input type="checkbox" id="podcastTranscribe" name="podcast_transcribe" disabled>
-                        <label for="podcastTranscribe">转写 Podcast 音频（-w）</label>
-                    </div>
-
-                    <div class="form-group wide">
-                        <label>线程抓取</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="thread-default" name="thread_mode" value="default" checked>
-                                <label for="thread-default">跟随站点默认</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="thread-off" name="thread_mode" value="off">
-                                <label for="thread-off">关闭</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="thread-after" name="thread_mode" value="after">
-                                <label for="thread-after">向后</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="thread-before" name="thread_mode" value="before">
-                                <label for="thread-before">向前</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="thread-both" name="thread_mode" value="both">
-                                <label for="thread-both">前后</label>
-                            </div>
-                        </div>
-                        <div class="field-hint">对应 CLI 的 `--thread/--no-thread`。仅支持的社交站点会生效。</div>
-                    </div>
-
-                    <div class="form-group wide">
-                        <label>线程作者范围</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="thread-author-all" name="thread_author" value="all" checked>
-                                <label for="thread-author-all">所有作者</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="thread-author-same" name="thread_author" value="same">
-                                <label for="thread-author-same">仅同作者</label>
-                            </div>
-                        </div>
-                        <div class="field-hint">对应 CLI 的 `--thread-author same|all`。</div>
-                    </div>
-
-                    <div class="form-group wide">
-                        <label>内容提取</label>
-                        <div class="radio-group">
+                    <div class="field">
+                        <span class="field-label">内容提取</span>
+                        <div class="seg">
                             <div class="radio-option">
                                 <input type="radio" id="extractor-auto" name="extractor" value="auto" {% if default_extractor == 'auto' %}checked{% endif %}>
                                 <label for="extractor-auto">自动</label>
@@ -941,13 +1245,80 @@ HTML_TEMPLATE = """
                             </div>
                         </div>
                     </div>
+
+                    <div class="field">
+                        <span class="field-label">浏览器渲染</span>
+                        <label class="check" style="margin-bottom: 10px;">
+                            <input type="checkbox" id="browser" name="browser">
+                            <span>强制用无头浏览器打开</span>
+                        </label>
+                        <div class="seg">
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-auto" name="browser_backend" value="auto" checked>
+                                <label for="browser-backend-auto">跟随配置（{{ config_browser_backend }}）</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-obscura" name="browser_backend" value="obscura">
+                                <label for="browser-backend-obscura">Obscura</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="browser-backend-playwright" name="browser_backend" value="playwright">
+                                <label for="browser-backend-playwright">Playwright</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <span class="field-label">线程抓取</span>
+                        <div class="seg">
+                            <div class="radio-option">
+                                <input type="radio" id="thread-default" name="thread_mode" value="default" checked>
+                                <label for="thread-default">站点默认</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-off" name="thread_mode" value="off">
+                                <label for="thread-off">关闭</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-after" name="thread_mode" value="after">
+                                <label for="thread-after">向后</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-before" name="thread_mode" value="before">
+                                <label for="thread-before">向前</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-both" name="thread_mode" value="both">
+                                <label for="thread-both">前后</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <span class="field-label">线程作者</span>
+                        <div class="seg">
+                            <div class="radio-option">
+                                <input type="radio" id="thread-author-all" name="thread_author" value="all" checked>
+                                <label for="thread-author-all">所有作者</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="thread-author-same" name="thread_author" value="same">
+                                <label for="thread-author-same">仅原帖作者</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <label class="check" id="podcastTranscribeGroup" style="display: none;">
+                        <input type="checkbox" id="podcastTranscribe" name="podcast_transcribe" disabled>
+                        <span>转写 Podcast 音频</span>
+                    </label>
                 </div>
 
-                <div class="section-title">内容处理</div>
-                <div class="options-grid">
-                    <div class="form-group">
-                        <label>语言模式</label>
-                        <div class="radio-group">
+                <div class="options-group">
+                    <h3>处理</h3>
+                    <div class="field">
+                        <span class="field-label">语言</span>
+                        <div class="seg">
                             <div class="radio-option">
                                 <input type="radio" id="lang-trans" name="lang" value="trans" checked>
                                 <label for="lang-trans">翻译为中文</label>
@@ -963,24 +1334,21 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div class="form-group" id="llmProviderGroup">
-                        <label>LLM Provider</label>
-                        <div class="radio-group">
+                    <label class="field" id="llmProviderGroup">
+                        <span class="field-label">LLM Provider</span>
+                        <select id="llm" name="llm" class="input">
                             {% for provider in llm_providers %}
-                            <div class="radio-option">
-                                <input type="radio" id="llm-{{ loop.index }}" name="llm" value="{{ provider }}" {% if provider == default_llm_provider %}checked{% endif %}>
-                                <label for="llm-{{ loop.index }}">{{ provider }}</label>
-                            </div>
+                            <option value="{{ provider }}" {% if provider == default_llm_provider %}selected{% endif %}>{{ provider }}</option>
                             {% endfor %}
-                        </div>
-                    </div>
+                        </select>
+                    </label>
 
-                    <div class="form-group">
-                        <label>图片 OCR</label>
-                        <div class="radio-group">
+                    <div class="field">
+                        <span class="field-label">图片 OCR</span>
+                        <div class="seg">
                             <div class="radio-option">
                                 <input type="radio" id="ocr-mode-default" name="ocr_mode" value="default" checked>
-                                <label for="ocr-mode-default">跟随站点默认</label>
+                                <label for="ocr-mode-default">站点默认</label>
                             </div>
                             <div class="radio-option">
                                 <input type="radio" id="ocr-mode-on" name="ocr_mode" value="on">
@@ -993,9 +1361,17 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div class="form-group" id="ocrEngineGroup" {% if not default_ocr_enabled %}style="display: none;"{% endif %}>
-                        <label>OCR 引擎</label>
-                        <div class="radio-group">
+                    <div class="field" id="ocrEngineGroup" {% if not default_ocr_enabled %}style="display: none;"{% endif %}>
+                        <span class="field-label">OCR 引擎</span>
+                        <div class="seg">
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-auto" name="ocr_engine" value="auto" {% if default_ocr_engine == 'auto' %}checked{% endif %}>
+                                <label for="ocr-engine-auto">自动回退</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="ocr-engine-paddleocr" name="ocr_engine" value="paddleocr" {% if default_ocr_engine == 'paddleocr' %}checked{% endif %}>
+                                <label for="ocr-engine-paddleocr">PaddleOCR</label>
+                            </div>
                             <div class="radio-option">
                                 <input type="radio" id="ocr-engine-rapidocr" name="ocr_engine" value="rapidocr" {% if default_ocr_engine == 'rapidocr' %}checked{% endif %}>
                                 <label for="ocr-engine-rapidocr">RapidOCR</label>
@@ -1003,22 +1379,13 @@ HTML_TEMPLATE = """
                             <div class="radio-option">
                                 <input type="radio" id="ocr-engine-tesseract" name="ocr_engine" value="tesseract" {% if default_ocr_engine == 'tesseract' %}checked{% endif %}>
                                 <label for="ocr-engine-tesseract">Tesseract</label>
-
-                            <div class="radio-option">
-                                <input type="radio" id="ocr-engine-paddleocr" name="ocr_engine" value="paddleocr" {% if default_ocr_engine == 'paddleocr' %}checked{% endif %}>
-                                <label for="ocr-engine-paddleocr">PaddleOCR</label>
-                            </div>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="ocr-engine-auto" name="ocr_engine" value="auto" {% if default_ocr_engine == 'auto' %}checked{% endif %}>
-                                <label for="ocr-engine-auto">自动回退</label>
                             </div>
                         </div>
                     </div>
 
-                    <div class="form-group" id="ocrLangGroup" style="display: none;">
-                        <label>OCR 语言</label>
-                        <div class="radio-group">
+                    <div class="field" id="ocrLangGroup" style="display: none;">
+                        <span class="field-label">OCR 语言（Tesseract）</span>
+                        <div class="seg">
                             {% for option in ocr_lang_options %}
                             <div class="radio-option">
                                 <input type="radio" id="ocr-lang-{{ loop.index }}" name="ocr_lang" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
@@ -1029,85 +1396,90 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <div class="section-title">输出设置</div>
-                <div class="options-grid">
-                    <div class="form-group wide">
-                        <label>格式</label>
-                        <div class="radio-group">
-                            <div class="radio-option">
-                                <input type="radio" id="format-md" name="format" value="md" checked>
-                                <label for="format-md">Markdown (.md)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-html" name="format" value="html">
-                                <label for="format-html">HTML (.html)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-pdf" name="format" value="pdf">
-                                <label for="format-pdf">PDF (.pdf)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-audio" name="format" value="audio">
-                                <label for="format-audio">Audio (TTS / original Podcast)</label>
-                            </div>
-                            <div class="radio-option">
-                                <input type="radio" id="format-publish" name="format" value="publish">
-                                <label for="format-publish">发布到 Pastebin</label>
-                            </div>
+                <div class="options-group">
+                    <h3>输出</h3>
+                    <label class="field">
+                        <span class="field-label">默认保存格式</span>
+                        <select id="format" name="format" class="input">
+                            <option value="md" selected>Markdown (.md)</option>
+                            <option value="html">HTML (.html)</option>
+                            <option value="pdf">PDF (.pdf)</option>
+                            <option value="audio">音频 (.mp3)</option>
+                            <option value="publish">发布到 Pastebin</option>
+                        </select>
+                    </label>
+
+                    <div class="field" id="ttsOptionsGroup">
+                        <span class="field-label">TTS 语音（保存音频时使用）</span>
+                        <div class="tts-grid">
+                            <select id="ttsVoice" name="tts_voice" class="input">
+                                {% for option in tts_voice_options %}
+                                <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
+                                {% endfor %}
+                            </select>
+                            <input type="text" id="ttsRate" name="tts_rate" class="input" value="{{ default_tts_rate }}" placeholder="+0%">
+                            <input type="text" id="ttsVolume" name="tts_volume" class="input" value="{{ default_tts_volume }}" placeholder="+0%">
                         </div>
                     </div>
-                    
-                    <div class="form-group checkbox-group" id="htmlInlineGroup" style="display: none;">
-                        <input type="checkbox" id="htmlInline" name="html_inline" {% if default_html_inline %}checked{% endif %}>
-                        <label for="htmlInline">内联 CSS/JS (HTML)</label>
-                    </div>
 
-                    <div class="form-group checkbox-group" id="noFrontMatterGroup">
-                        <input type="checkbox" id="noFrontMatter" name="no_front_matter" {% if default_no_front_matter %}checked{% endif %}>
-                        <label for="noFrontMatter">禁用 YAML Front Matter</label>
-                    </div>
-
-                    <div class="form-group checkbox-group" id="archiveSourceGroup">
-                        <input type="checkbox" id="archiveSource" name="archive_source" {% if default_archive %}checked{% endif %}>
-                        <label for="archiveSource">保存 source 到 Internet Archive</label>
-                    </div>
-
-                    <div class="form-group wide tts-options-group" id="ttsOptionsGroup" style="display: none;">
-                        <label>TTS 设置</label>
-                        <div class="tts-options-grid">
-                            <div>
-                                <label for="ttsVoice" class="tts-sublabel">语音</label>
-                                <select id="ttsVoice" name="tts_voice">
-                                    {% for option in tts_voice_options %}
-                                    <option value="{{ option.value }}" {% if option.selected %}selected{% endif %}>{{ option.label }}</option>
-                                    {% endfor %}
-                                </select>
-                            </div>
-                            <div>
-                                <label for="ttsRate" class="tts-sublabel">语速</label>
-                                <input type="text" id="ttsRate" name="tts_rate" value="{{ default_tts_rate }}" placeholder="+0%">
-                            </div>
-                            <div>
-                                <label for="ttsVolume" class="tts-sublabel">音量</label>
-                                <input type="text" id="ttsVolume" name="tts_volume" value="{{ default_tts_volume }}" placeholder="+0%">
-                            </div>
-                        </div>
+                    <div class="field">
+                        <span class="field-label">Markdown / HTML</span>
+                        <label class="check" style="margin-bottom: 9px;">
+                            <input type="checkbox" id="noFrontMatter" name="no_front_matter" {% if default_no_front_matter %}checked{% endif %}>
+                            <span>不写入 YAML Front Matter</span>
+                        </label>
+                        <label class="check" style="margin-bottom: 9px;">
+                            <input type="checkbox" id="htmlInline" name="html_inline" {% if default_html_inline %}checked{% endif %}>
+                            <span>HTML 内联 CSS/JS</span>
+                        </label>
+                        <label class="check">
+                            <input type="checkbox" id="archiveSource" name="archive_source" {% if default_archive %}checked{% endif %}>
+                            <span>提交原链接到 Internet Archive</span>
+                        </label>
                     </div>
                 </div>
-                
-            </form>
+            </div>
+        </section>
+
+        <div class="panel activity" id="activityBar" hidden>
+            <span class="activity-dot" aria-hidden="true"></span>
+            <div class="activity-text" id="status"></div>
+            <button type="button" class="activity-close" id="statusClose" aria-label="关闭">×</button>
         </div>
-        
-        <div id="resultsContainer"></div>
-        <div id="toastContainer" class="toast-container"></div>
-        
-        <div class="version-info">
-            Surf v{{ version }} | 运行本地服务器
-        </div>
-    </div>
-    
+
+        <section class="results" id="resultsSection">
+            <div class="section-label">
+                <h2>结果</h2>
+                <span class="count" id="resultCount"></span>
+            </div>
+            <div id="resultsContainer"></div>
+            <div class="empty-state" id="emptyState">
+                <strong>还没有结果</strong>
+                提取完成后，每份内容会生成一张卡片，可预览并分别保存为多种格式。
+            </div>
+        </section>
+
+        <div class="panel queue-panel" id="saveQueuePanel"></div>
+
+        <footer class="footer">
+            <span>Surf v{{ version }}</span>
+            <span>·</span>
+            <span>本地服务，内容不离开你的机器</span>
+            <span>·</span>
+            <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 提取</span>
+        </footer>
+    </main>
+
+    <div id="toastContainer" class="toast-container"></div>
+
     <script>
         const API_BASE = '{{ root_path }}';
+
+        // ---------------------------------------------------------------- state
+        let currentResults = [];
+        const translationJobIds = new Set();
+        const saveJobIds = new Set();
+        const knownSaveJobStates = new Map();
         let proxyModeTouched = false;
         let proxyModeProgrammaticUpdate = false;
         let langModeTouched = false;
@@ -1120,10 +1492,17 @@ HTML_TEMPLATE = """
         };
         let siteDefaultsRequestId = 0;
         let siteDefaultsTimer = null;
+        let statusTimer = null;
+
         const urlInput = document.getElementById('url');
         const searchModeCheckbox = document.getElementById('searchMode');
         const saveFullTextCheckbox = document.getElementById('saveFullText');
+        const saveFullTextWrap = document.getElementById('saveFullTextWrap');
+        const resultsContainer = document.getElementById('resultsContainer');
+        const emptyState = document.getElementById('emptyState');
+        const resultCount = document.getElementById('resultCount');
 
+        // -------------------------------------------------------------- helpers
         function getCheckedRadioValue(name) {
             const checked = document.querySelector(`input[name="${name}"]:checked`);
             return checked ? checked.value : '';
@@ -1138,10 +1517,178 @@ HTML_TEMPLATE = """
             return radio;
         }
 
-        // Show/hide custom proxy input
+        function getSaveFormat() {
+            const select = document.getElementById('format');
+            return (select && select.value) || 'md';
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        async function parseJsonResponse(response) {
+            const text = await response.text();
+            let result = null;
+
+            try {
+                result = text ? JSON.parse(text) : {};
+            } catch (error) {
+                const snippet = text.trim().slice(0, 240) || ('HTTP ' + response.status);
+                throw new Error(`HTTP ${response.status}: ${snippet}`);
+            }
+
+            if (!response.ok) {
+                const message = result?.error || result?.message || (`HTTP ${response.status}`);
+                throw new Error(message);
+            }
+
+            return result;
+        }
+
+        function extractUrlsFromInput(value) {
+            const matches = (value || '').match(/https?:\\/\\/[^\\s<>"']+/g) || [];
+            const seen = new Set();
+            const urls = [];
+            for (const match of matches) {
+                const cleaned = match.replace(/[`'")\\]}>,.;!?，。；！？、）】》]+$/g, '');
+                if (cleaned && !seen.has(cleaned)) {
+                    seen.add(cleaned);
+                    urls.push(cleaned);
+                }
+            }
+            return urls;
+        }
+
+        // --------------------------------------------------------------- modes
+        document.querySelectorAll('.mode').forEach((button) => {
+            button.addEventListener('click', () => {
+                const isSearch = button.dataset.mode === 'search';
+                if (searchModeCheckbox) {
+                    searchModeCheckbox.checked = isSearch;
+                }
+                document.querySelectorAll('.mode').forEach((other) => {
+                    const active = other === button;
+                    other.classList.toggle('active', active);
+                    other.setAttribute('aria-selected', active ? 'true' : 'false');
+                });
+                updateSearchModeControls();
+                if (!isSearch) {
+                    scheduleSiteDefaultsRefresh();
+                }
+            });
+        });
+
+        function updateSearchModeControls() {
+            const enabled = !!searchModeCheckbox?.checked;
+            const group = document.getElementById('searchOptionsGroup');
+            if (group) {
+                group.style.display = enabled ? 'grid' : 'none';
+            }
+            const label = document.getElementById('urlLabel');
+            if (label) {
+                label.textContent = enabled ? '搜索关键词' : 'URL 地址或纯文本';
+            }
+            if (urlInput) {
+                urlInput.placeholder = enabled
+                    ? '输入搜索关键词，例如：python asyncio tutorial'
+                    : '粘贴一个或多个链接，或直接输入一段文字';
+            }
+            if (saveFullTextCheckbox) {
+                if (enabled) {
+                    saveFullTextCheckbox.checked = false;
+                }
+                saveFullTextCheckbox.disabled = enabled;
+            }
+            if (saveFullTextWrap) {
+                saveFullTextWrap.style.opacity = enabled ? '0.5' : '1';
+            }
+            const urlHint = document.getElementById('urlHint');
+            if (urlHint) {
+                urlHint.style.display = enabled ? 'none' : 'block';
+            }
+            const saveFullTextHint = document.getElementById('saveFullTextHint');
+            if (saveFullTextHint) {
+                saveFullTextHint.style.display = enabled ? 'none' : 'block';
+            }
+        }
+
+        if (searchModeCheckbox) {
+            updateSearchModeControls();
+        }
+
+        function isSearchMode() {
+            return !!searchModeCheckbox?.checked;
+        }
+
+        // ------------------------------------------------------- options panel
+        const optionsPanel = document.getElementById('optionsPanel');
+        const optionsToggle = document.getElementById('optionsToggle');
+
+        if (optionsToggle && optionsPanel) {
+            // On narrow screens the options panel would push the results far
+            // below the fold, so start collapsed there.
+            if (window.matchMedia('(max-width: 720px)').matches) {
+                optionsPanel.dataset.open = 'false';
+                optionsToggle.setAttribute('aria-expanded', 'false');
+            }
+            optionsToggle.addEventListener('click', () => {
+                const open = optionsPanel.dataset.open !== 'false';
+                optionsPanel.dataset.open = open ? 'false' : 'true';
+                optionsToggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+            });
+        }
+
+        const LANG_LABELS = { trans: '翻译', raw: '原文', both: '双语' };
+        const PROXY_LABELS = { auto: '自动代理', win: '系统代理', env: '环境变量代理', custom: '自定义代理', no: '不使用代理' };
+        const OCR_LABELS = { default: 'OCR 站点默认', on: 'OCR 开启', off: 'OCR 关闭' };
+
+        function updateOptionsSummary() {
+            const summary = document.getElementById('optionsSummary');
+            if (!summary) {
+                return;
+            }
+            const parts = [
+                LANG_LABELS[getCheckedRadioValue('lang')] || '',
+                PROXY_LABELS[getCheckedRadioValue('proxy')] || '',
+                OCR_LABELS[getCheckedRadioValue('ocr_mode')] || '',
+                (getSaveFormat() === 'publish' ? 'Pastebin' : getSaveFormat().toUpperCase()),
+            ];
+            summary.textContent = parts.filter(Boolean).join(' · ');
+        }
+
+        document.querySelectorAll('input[name="lang"], input[name="proxy"], input[name="ocr_mode"]').forEach((input) => {
+            input.addEventListener('change', updateOptionsSummary);
+        });
+        const formatSelect = document.getElementById('format');
+        if (formatSelect) {
+            formatSelect.addEventListener('change', () => {
+                updateOptionsSummary();
+                refreshSaveButtonHighlight();
+            });
+        }
+        updateOptionsSummary();
+
+        function refreshSaveButtonHighlight() {
+            const preferred = getSaveFormat();
+            resultsContainer.querySelectorAll('.save-links').forEach((links) => {
+                links.querySelectorAll('.save-btn').forEach((button) => {
+                    const isPreferred = button.dataset.saveType === preferred;
+                    button.classList.toggle('save-btn-primary', isPreferred);
+                });
+            });
+        }
+
+        // ------------------------------------------------------ default proxy
         function updateCustomProxyVisibility() {
             const customGroup = document.getElementById('customProxyGroup');
-            customGroup.style.display = getCheckedRadioValue('proxy') === 'custom' ? 'block' : 'none';
+            if (customGroup) {
+                customGroup.style.display = getCheckedRadioValue('proxy') === 'custom' ? 'block' : 'none';
+            }
         }
 
         document.querySelectorAll('input[name="proxy"]').forEach((input) => {
@@ -1169,19 +1716,15 @@ HTML_TEMPLATE = """
                     proxyModeProgrammaticUpdate = true;
                     setCheckedRadioValue('proxy', result.proxy_mode);
                     updateCustomProxyVisibility();
+                    updateOptionsSummary();
                     proxyModeProgrammaticUpdate = false;
                 }
             } catch (error) {
-                // Ignore default-proxy refresh errors and keep current selection.
                 proxyModeProgrammaticUpdate = false;
             }
         }
 
-        if (urlInput) {
-            urlInput.addEventListener('blur', () => refreshProxyDefault(false));
-        }
-        refreshProxyDefault(true);
-
+        // ------------------------------------------------------- site defaults
         async function refreshSiteDefaults(force = false) {
             if (isSearchMode()) {
                 return;
@@ -1207,6 +1750,7 @@ HTML_TEMPLATE = """
                     langModeProgrammaticUpdate = true;
                     setCheckedRadioValue('lang', currentSiteDefaults.lang_mode);
                     updateLanguageControls();
+                    updateOptionsSummary();
                     langModeProgrammaticUpdate = false;
                 }
                 updateOcrControls();
@@ -1226,39 +1770,15 @@ HTML_TEMPLATE = """
 
         if (urlInput) {
             urlInput.addEventListener('input', scheduleSiteDefaultsRefresh);
-            urlInput.addEventListener('blur', () => refreshSiteDefaults(false));
+            urlInput.addEventListener('blur', () => {
+                refreshSiteDefaults(false);
+                refreshProxyDefault(false);
+            });
         }
+        refreshProxyDefault(true);
+        refreshSiteDefaults(true);
 
-        // Show/hide format-specific options
-        function updateFormatSpecificOptions() {
-            const format = getCheckedRadioValue('format');
-
-            // YAML Front Matter option - only for markdown
-            const noFrontMatterGroup = document.getElementById('noFrontMatterGroup');
-            if (noFrontMatterGroup) {
-                noFrontMatterGroup.style.display = format === 'md' ? 'flex' : 'none';
-            }
-
-            // HTML inline option - only for html
-            const htmlInlineGroup = document.getElementById('htmlInlineGroup');
-            if (htmlInlineGroup) {
-                htmlInlineGroup.style.display = format === 'html' ? 'flex' : 'none';
-            }
-
-            // TTS options - only for audio
-            const ttsOptionsGroup = document.getElementById('ttsOptionsGroup');
-            if (ttsOptionsGroup) {
-                ttsOptionsGroup.style.display = format === 'audio' ? 'block' : 'none';
-            }
-        }
-
-        document.querySelectorAll('input[name="format"]').forEach((input) => {
-            input.addEventListener('change', updateFormatSpecificOptions);
-        });
-
-        // Initialize format-specific options visibility on page load
-        updateFormatSpecificOptions();
-
+        // --------------------------------------------------- conditional bits
         function updateOcrControls() {
             const ocrMode = getCheckedRadioValue('ocr_mode');
             const effectiveOcrEnabled = ocrMode === 'on' || (
@@ -1293,9 +1813,8 @@ HTML_TEMPLATE = """
             if (!group || !checkbox) {
                 return;
             }
-
             const supported = currentSiteDefaults.podcast_transcribe_supported;
-            group.style.display = supported ? 'flex' : 'none';
+            group.style.display = supported ? 'inline-flex' : 'none';
             checkbox.disabled = !supported;
             if (!supported) {
                 checkbox.checked = false;
@@ -1308,9 +1827,10 @@ HTML_TEMPLATE = """
             if (llmProviderGroup) {
                 llmProviderGroup.style.display = keepOriginal ? 'none' : 'block';
             }
-            document.querySelectorAll('input[name="llm"]').forEach((input) => {
-                input.disabled = keepOriginal;
-            });
+            const llmSelect = document.getElementById('llm');
+            if (llmSelect) {
+                llmSelect.disabled = keepOriginal;
+            }
         }
 
         document.querySelectorAll('input[name="lang"]').forEach((input) => {
@@ -1322,69 +1842,299 @@ HTML_TEMPLATE = """
             });
         });
 
-        refreshSiteDefaults(true);
+        updateLanguageControls();
+        updateOcrControls();
 
-        // Tab switching
-        document.querySelectorAll('.tab').forEach(tab => {
-            tab.addEventListener('click', function() {
-                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                
-                this.classList.add('active');
-                document.getElementById('tab-' + this.dataset.tab).classList.add('active');
-            });
-        });
-
-        async function parseJsonResponse(response) {
-            const text = await response.text();
-            let result = null;
-
-            try {
-                result = text ? JSON.parse(text) : {};
-            } catch (error) {
-                const snippet = text.trim().slice(0, 240) || ('HTTP ' + response.status);
-                throw new Error(`HTTP ${response.status}: ${snippet}`);
+        // -------------------------------------------------------- status/toast
+        function showStatus(type, message) {
+            const bar = document.getElementById('activityBar');
+            const body = document.getElementById('status');
+            const close = document.getElementById('statusClose');
+            if (!bar || !body) {
+                return;
             }
-
-            if (!response.ok) {
-                const message = result?.error || result?.message || (`HTTP ${response.status}`);
-                throw new Error(message);
+            bar.className = 'panel activity activity-' + type;
+            body.innerHTML = message;
+            bar.hidden = false;
+            if (close) {
+                close.hidden = type === 'processing';
             }
-
-            return result;
+            window.clearTimeout(statusTimer);
+            if (type !== 'processing') {
+                statusTimer = window.setTimeout(() => {
+                    bar.hidden = true;
+                }, type === 'error' ? 14000 : 7000);
+            }
         }
-        
-        function extractUrlsFromInput(value) {
-            const matches = (value || '').match(/https?:\\/\\/[^\\s<>"']+/g) || [];
-            const seen = new Set();
-            const urls = [];
-            for (const match of matches) {
-                const cleaned = match.replace(/[`'")\\]}>,.;!?，。；！？、）】》]+$/g, '');
-                if (cleaned && !seen.has(cleaned)) {
-                    seen.add(cleaned);
-                    urls.push(cleaned);
+
+        const statusCloseBtn = document.getElementById('statusClose');
+        if (statusCloseBtn) {
+            statusCloseBtn.addEventListener('click', () => {
+                document.getElementById('activityBar').hidden = true;
+            });
+        }
+
+        function showToast(type, message, duration = 5000) {
+            const container = document.getElementById('toastContainer');
+            if (!container) {
+                return;
+            }
+            const toast = document.createElement('div');
+            toast.className = 'toast toast-' + type;
+            toast.textContent = message;
+            toast.addEventListener('click', () => {
+                toast.classList.add('fade-out');
+                setTimeout(() => toast.remove(), 300);
+            });
+            container.appendChild(toast);
+            if (duration > 0) {
+                setTimeout(() => {
+                    toast.classList.add('fade-out');
+                    setTimeout(() => toast.remove(), 300);
+                }, duration);
+            }
+        }
+
+        // ------------------------------------------------------- result cards
+        function updateResultsMeta() {
+            const cards = resultsContainer.querySelectorAll('.result-card:not(.aggregate-card)');
+            if (resultCount) {
+                resultCount.textContent = cards.length
+                    ? `${cards.length} 张结果卡${cards.length > 1 ? '（可合并保存）' : ''}`
+                    : '';
+            }
+            if (emptyState) {
+                emptyState.style.display = cards.length ? 'none' : 'block';
+            }
+        }
+
+        function revealResults() {
+            const section = document.getElementById('resultsSection');
+            if (section) {
+                section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        }
+
+        function collapseOptions() {
+            if (optionsPanel && optionsPanel.dataset.open !== 'false') {
+                optionsPanel.dataset.open = 'false';
+                if (optionsToggle) {
+                    optionsToggle.setAttribute('aria-expanded', 'false');
                 }
             }
-            return urls;
         }
+
+        function cardShell() {
+            return `
+                <div class="result-head">
+                    <div class="result-title-wrap">
+                        <h2 class="result-title"></h2>
+                        <div class="result-meta"><span class="result-source"></span><span class="result-flags"></span></div>
+                    </div>
+                </div>
+                <div class="save-bar">
+                    <div class="save-config">
+                        <label class="save-field">
+                            <span>保存到</span>
+                            <input class="save-input save-dir-input" type="text" spellcheck="false">
+                        </label>
+                        <label class="save-field">
+                            <span>文件名</span>
+                            <input class="save-input save-title-input" type="text">
+                        </label>
+                    </div>
+                    <div class="save-links"></div>
+                </div>
+                <div class="tabs">
+                    <button type="button" class="tab active" data-tab="markdown">Markdown</button>
+                    <button type="button" class="tab" data-tab="html">HTML</button>
+                    <button type="button" class="tab" data-tab="raw">原文</button>
+                </div>
+                <div class="tab-content active" data-tab-content="markdown"><pre class="content-preview"></pre></div>
+                <div class="tab-content" data-tab-content="html"><pre class="content-preview"></pre></div>
+                <div class="tab-content" data-tab-content="raw"><pre class="content-preview"></pre></div>
+            `;
+        }
+
+        function wireResultTabs(card) {
+            card.querySelectorAll('.tab').forEach(tab => {
+                tab.addEventListener('click', function() {
+                    card.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    card.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                    this.classList.add('active');
+                    const target = card.querySelector(`[data-tab-content="${this.dataset.tab}"]`);
+                    if (target) {
+                        target.classList.add('active');
+                    }
+                });
+            });
+        }
+
+        function resultDefaultDirs(container) {
+            try {
+                return JSON.parse(container.dataset.defaultDirs || '{}');
+            } catch (error) {
+                return {};
+            }
+        }
+
+        function getSaveFormState(container, fileType) {
+            const dirInput = container.querySelector('.save-dir-input');
+            const titleInput = container.querySelector('.save-title-input');
+            const defaultDirs = resultDefaultDirs(container);
+            const defaultTitle = (container.dataset.defaultSaveTitle || '').trim();
+
+            return {
+                saveDir: (dirInput?.value || '').trim() || (defaultDirs[fileType] || ''),
+                customTitle: (titleInput?.value || '').trim() || defaultTitle || 'Untitled',
+            };
+        }
+
+        const SAVE_FORMATS = [
+            { type: 'md', label: 'MD' },
+            { type: 'html', label: 'HTML' },
+            { type: 'pdf', label: 'PDF' },
+            { type: 'audio', label: '音频' },
+            { type: 'publish', label: 'Pastebin' },
+        ];
 
         function addSaveButtons(container, result) {
             const saveLinks = container.querySelector('.save-links');
+            if (!saveLinks) {
+                return;
+            }
             saveLinks.innerHTML = '';
+            const preferred = getSaveFormat();
 
-            const saveBtn = document.createElement('button');
-            saveBtn.className = 'save-btn save-main';
-            saveBtn.innerHTML = '💾 保存';
-            saveBtn.onclick = () => saveFile(container, result);
-            saveLinks.appendChild(saveBtn);
+            SAVE_FORMATS.forEach((format) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'save-btn' + (format.type === preferred ? ' save-btn-primary' : '');
+                button.dataset.saveType = format.type;
+                button.textContent = format.label;
+                button.title = `保存为 ${format.type.toUpperCase()}`;
+                button.onclick = () => saveFile(container, result, { fileType: format.type });
+                saveLinks.appendChild(button);
+            });
+
+            const divider = document.createElement('span');
+            divider.className = 'save-btn-divider';
+            saveLinks.appendChild(divider);
 
             const playBtn = document.createElement('button');
-            playBtn.className = 'save-btn play-btn';
-            playBtn.innerHTML = '▶ 朗读';
+            playBtn.type = 'button';
+            playBtn.className = 'save-btn';
+            playBtn.textContent = '朗读';
+            playBtn.title = '生成并播放语音';
             playBtn.onclick = () => playAudio(container, result);
             saveLinks.appendChild(playBtn);
         }
 
+        function fillResultCard(card, result, meta) {
+            const title = result?.title || meta?.title || 'Untitled';
+            card.dataset.defaultDirs = JSON.stringify(result?.defaultDirs || {});
+            card.dataset.defaultSaveTitle = result?.defaultSaveTitle || title;
+            card.dataset.inputUrl = result?.input_url || '';
+            card.dataset.translationJobId = result?.translation_job_id || '';
+
+            const titleEl = card.querySelector('.result-title');
+            if (titleEl) {
+                titleEl.textContent = title;
+            }
+            const sourceEl = card.querySelector('.result-source');
+            if (sourceEl) {
+                sourceEl.textContent = meta?.source || '';
+            }
+            const flags = [];
+            if (result?.source_site && result.source_site !== 'text') {
+                flags.push(`<span class="badge badge-accent">${escapeHtml(result.source_site)}</span>`);
+            }
+            if (result?.source_is_pdf) {
+                flags.push('<span class="badge">PDF</span>');
+            }
+            if (result?.translation_pending) {
+                flags.push('<span class="badge badge-accent">翻译中</span>');
+            } else if (result?.translation_performed) {
+                flags.push('<span class="badge badge-ok">已翻译</span>');
+            }
+            if (result?.metadata?.search_prefix) {
+                flags.push(`<span class="badge">${escapeHtml(result.metadata.search_prefix)}</span>`);
+            }
+            const flagsEl = card.querySelector('.result-flags');
+            if (flagsEl) {
+                flagsEl.innerHTML = flags.join('');
+            }
+
+            const markdownPre = card.querySelector('[data-tab-content="markdown"] pre');
+            const htmlPre = card.querySelector('[data-tab-content="html"] pre');
+            const rawPre = card.querySelector('[data-tab-content="raw"] pre');
+            if (markdownPre) markdownPre.textContent = result?.markdown || '';
+            if (htmlPre) htmlPre.textContent = result?.html || '';
+            if (rawPre) rawPre.textContent = result?.raw || '';
+
+            const dirInput = card.querySelector('.save-dir-input');
+            const titleInput = card.querySelector('.save-title-input');
+            if (dirInput) {
+                dirInput.value = (result?.defaultDirs || {}).md || '';
+            }
+            if (titleInput) {
+                titleInput.value = result?.defaultSaveTitle || title;
+            }
+
+            addSaveButtons(card, result);
+            wireResultTabs(card);
+        }
+
+        function populateResultCard(card, result, index, total) {
+            card.innerHTML = cardShell();
+            const label = total > 1 ? ` (${index + 1}/${total})` : '';
+            const source = result?.metadata?.source_url || result?.input_url || '';
+            fillResultCard(card, result, { source: `${source}${label}` });
+            return card;
+        }
+
+        function renderResultCard(result, index, total) {
+            const card = document.createElement('div');
+            card.className = 'panel result-card';
+            populateResultCard(card, result, index, total);
+            resultsContainer.appendChild(card);
+            updateResultsMeta();
+            return card;
+        }
+
+        function updateResultCard(card, result, index, total) {
+            if (!card) {
+                return;
+            }
+            populateResultCard(card, result, index, total);
+        }
+
+        function renderErrorCard(input, message, index, total) {
+            const card = document.createElement('div');
+            card.className = 'panel result-card';
+            card.dataset.tone = 'error';
+            const label = total > 1 ? ` (${index + 1}/${total})` : '';
+            card.innerHTML = `
+                <div class="result-head">
+                    <div class="result-title-wrap">
+                        <h2 class="result-title"></h2>
+                        <div class="result-meta">
+                            <span class="result-source"></span>
+                            <span class="badge badge-err">失败</span>
+                        </div>
+                    </div>
+                </div>
+                <pre class="content-preview"></pre>
+            `;
+            card.querySelector('.result-title').textContent = `获取失败${label}`;
+            card.querySelector('.result-source').textContent = input;
+            card.querySelector('pre').textContent = message || 'Unknown error';
+            resultsContainer.appendChild(card);
+            updateResultsMeta();
+            return card;
+        }
+
+        // ------------------------------------------------------- merge / save
         function stripMarkdownHeading(markdownText, title) {
             const normalized = (markdownText || '').replace(/^﻿/, '');
             const escapedTitle = (title || '').replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&');
@@ -1410,8 +2160,8 @@ HTML_TEMPLATE = """
                 const rawBody = stripMarkdownHeading(result.raw || '', itemTitle).trim();
                 const htmlBody = (result.html || '').trim();
 
-                markdownSections.push(`## ${itemTitle}\n\n${markdownBody || '_No content_'}`);
-                rawSections.push(`## ${itemTitle}\n\n${rawBody || '_No content_'}`);
+                markdownSections.push(`## ${itemTitle}\\n\\n${markdownBody || '_No content_'}`);
+                rawSections.push(`## ${itemTitle}\\n\\n${rawBody || '_No content_'}`);
                 htmlSections.push(`<section><h2>${itemTitle}</h2>${htmlBody || '<p><em>No content.</em></p>'}</section>`);
                 if (source) {
                     sourceLines.push(`- ${itemTitle}: ${source}`);
@@ -1443,7 +2193,13 @@ HTML_TEMPLATE = """
         }
 
         function renderAggregateSaveCard(results) {
+            const container = resultsContainer;
+            const existingAggregate = container.querySelector('.aggregate-card');
+            if (existingAggregate) {
+                existingAggregate.remove();
+            }
             if (!results || results.length <= 1) {
+                updateResultsMeta();
                 return;
             }
 
@@ -1452,797 +2208,20 @@ HTML_TEMPLATE = """
                 return;
             }
 
-            const container = document.getElementById('resultsContainer');
-            const existingAggregate = container.querySelector('.aggregate-card');
-            if (existingAggregate) {
-                existingAggregate.remove();
-            }
             const card = document.createElement('div');
-            card.className = 'card result-card show aggregate-card';
-            card.innerHTML = `
-                <div class="result-header">
-                    <h2 class="result-title">合并保存全部结果</h2>
-                    <div class="save-actions">
-                        <div class="save-links"></div>
-                        <div class="save-config">
-                            <div class="save-field">
-                                <label>保存文件夹</label>
-                                <input class="save-input save-dir-input" type="text">
-                            </div>
-                            <div class="save-field">
-                                <label>文件标题</label>
-                                <input class="save-input save-title-input" type="text">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="field-hint result-source"></div>
-                <div class="tabs">
-                    <button class="tab active" data-tab="markdown">Markdown</button>
-                    <button class="tab" data-tab="html">HTML</button>
-                    <button class="tab" data-tab="raw">原始内容</button>
-                </div>
-                <div class="tab-content active" data-tab-content="markdown">
-                    <pre class="content-preview"></pre>
-                </div>
-                <div class="tab-content" data-tab-content="html">
-                    <pre class="content-preview"></pre>
-                </div>
-                <div class="tab-content" data-tab-content="raw">
-                    <pre class="content-preview"></pre>
-                </div>
-            `;
-
-            card.querySelector('.result-source').textContent = `合并保存 ${results.length} 张结果卡`;
-            card.dataset.defaultDirs = JSON.stringify(aggregateResult.defaultDirs || {});
-            card.dataset.defaultSaveTitle = aggregateResult.defaultSaveTitle || aggregateResult.title || 'Untitled';
-            card.querySelector('[data-tab-content="markdown"] pre').textContent = aggregateResult.markdown || '';
-            card.querySelector('[data-tab-content="html"] pre').textContent = aggregateResult.html || '';
-            card.querySelector('[data-tab-content="raw"] pre').textContent = aggregateResult.raw || '';
-            card.querySelector('.save-dir-input').value = (aggregateResult.defaultDirs || {}).md || '';
-            card.querySelector('.save-title-input').value = aggregateResult.defaultSaveTitle || aggregateResult.title || 'Untitled';
-
-            addSaveButtons(card, aggregateResult);
-            wireResultTabs(card);
+            card.className = 'panel result-card aggregate-card';
+            card.innerHTML = cardShell();
+            fillResultCard(card, aggregateResult, {
+                source: `把 ${results.length} 张结果卡合并成一份文档`,
+                title: '合并保存全部结果',
+            });
+            card.querySelector('.result-title').textContent = '合并保存全部结果';
             container.prepend(card);
+            updateResultsMeta();
         }
-
-        function resultDefaultDirs(container) {
-            try {
-                return JSON.parse(container.dataset.defaultDirs || '{}');
-            } catch (error) {
-                return {};
-            }
-        }
-
-        function getSaveFormState(container, fileType) {
-            const dirInput = container.querySelector('.save-dir-input');
-            const titleInput = container.querySelector('.save-title-input');
-            const defaultDirs = resultDefaultDirs(container);
-            const defaultTitle = (container.dataset.defaultSaveTitle || '').trim();
-
-            return {
-                saveDir: (dirInput?.value || '').trim() || (defaultDirs[fileType] || ''),
-                customTitle: (titleInput?.value || '').trim() || defaultTitle || 'Untitled',
-            };
-        }
-
-        function wireResultTabs(card) {
-            card.querySelectorAll('.tab').forEach(tab => {
-                tab.addEventListener('click', function() {
-                    card.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                    card.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                    this.classList.add('active');
-                    const target = card.querySelector(`[data-tab-content="${this.dataset.tab}"]`);
-                    if (target) {
-                        target.classList.add('active');
-                    }
-                });
-            });
-        }
-
-        function populateResultCard(card, result, index, total) {
-            const label = total > 1 ? ` (${index + 1}/${total})` : '';
-            const source = result?.metadata?.source_url || result?.input_url || '';
-
-            card.innerHTML = `
-                <div class="result-header">
-                    <div class="save-actions">
-                        <div class="save-links"></div>
-                        <div class="save-config">
-                            <div class="save-field">
-                                <label>保存文件夹</label>
-                                <input class="save-input save-dir-input" type="text">
-                            </div>
-                            <div class="save-field">
-                                <label>文件标题</label>
-                                <input class="save-input save-title-input" type="text">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                ${source ? `<div class="field-hint result-source"></div>` : ''}
-                ${result?.metadata?.search_prefix ? `<div class="field-hint">保存文件名前缀：${escapeHtml(result.metadata.search_prefix)}</div>` : ''}
-                ${result.translation_pending ? '<div class="field-hint">翻译处理中，先显示原文结果。</div>' : ''}
-                <div class="tabs">
-                    <button class="tab active" data-tab="markdown">Markdown</button>
-                    <button class="tab" data-tab="html">HTML</button>
-                    <button class="tab" data-tab="raw">原始内容</button>
-                </div>
-                <div class="tab-content active" data-tab-content="markdown">
-                    <pre class="content-preview"></pre>
-                </div>
-                <div class="tab-content" data-tab-content="html">
-                    <pre class="content-preview"></pre>
-                </div>
-                <div class="tab-content" data-tab-content="raw">
-                    <pre class="content-preview"></pre>
-                </div>
-            `;
-
-            const hint = card.querySelector('.result-source');
-            if (hint) {
-                hint.textContent = `${source}${label}`;
-            }
-            card.dataset.defaultDirs = JSON.stringify(result.defaultDirs || {});
-            card.dataset.defaultSaveTitle = result.defaultSaveTitle || result.title || 'Untitled';
-            card.dataset.inputUrl = result.input_url || '';
-            card.dataset.translationJobId = result.translation_job_id || '';
-            card.querySelector('[data-tab-content="markdown"] pre').textContent = result.markdown || '';
-            card.querySelector('[data-tab-content="html"] pre').textContent = result.html || '';
-            card.querySelector('[data-tab-content="raw"] pre').textContent = result.raw || '';
-            card.querySelector('.save-dir-input').value = (result.defaultDirs || {}).md || '';
-            card.querySelector('.save-title-input').value = result.defaultSaveTitle || result.title || 'Untitled';
-
-            addSaveButtons(card, result);
-            wireResultTabs(card);
-            return card;
-        }
-
-        function renderResultCard(result, index, total) {
-            const container = document.getElementById('resultsContainer');
-            const card = document.createElement('div');
-            card.className = 'card result-card show';
-            populateResultCard(card, result, index, total);
-            container.appendChild(card);
-            return card;
-        }
-
-        function renderErrorCard(input, message, index, total) {
-            const container = document.getElementById('resultsContainer');
-            const card = document.createElement('div');
-            card.className = 'card result-card show status-error';
-            const label = total > 1 ? ` (${index + 1}/${total})` : '';
-            card.innerHTML = `
-                <div class="result-header">
-                    <h2 class="result-title"></h2>
-                </div>
-                <div class="field-hint"></div>
-                <pre class="content-preview"></pre>
-            `;
-            card.querySelector('.result-title').textContent = `获取失败${label}`;
-            card.querySelector('.field-hint').textContent = input;
-            card.querySelector('pre').textContent = message || 'Unknown error';
-            container.appendChild(card);
-        }
-
-        function updateSearchModeControls() {
-            const enabled = !!searchModeCheckbox?.checked;
-            const group = document.getElementById('searchOptionsGroup');
-            if (group) {
-                group.style.display = enabled ? 'grid' : 'none';
-            }
-            const label = document.getElementById('urlLabel');
-            if (label) {
-                label.textContent = enabled ? '搜索关键词' : 'URL 地址或纯文本';
-            }
-            if (urlInput) {
-                urlInput.placeholder = enabled
-                    ? '输入搜索关键词，例如：python asyncio tutorial'
-                    : '粘贴链接，或直接输入一段没有 URL 的文字';
-            }
-            if (saveFullTextCheckbox) {
-                if (enabled) {
-                    saveFullTextCheckbox.checked = false;
-                }
-                saveFullTextCheckbox.disabled = enabled;
-            }
-            const urlHint = document.getElementById('urlHint');
-            if (urlHint) {
-                urlHint.style.display = enabled ? 'none' : 'block';
-            }
-            const saveFullTextHint = document.getElementById('saveFullTextHint');
-            if (saveFullTextHint) {
-                saveFullTextHint.style.display = enabled ? 'none' : 'block';
-            }
-        }
-
-        if (searchModeCheckbox) {
-            searchModeCheckbox.addEventListener('change', updateSearchModeControls);
-            updateSearchModeControls();
-        }
-
-        function isSearchMode() {
-            return !!searchModeCheckbox?.checked;
-        }
-
-        async function requestSearch(keywords, data) {
-            const payload = {
-                keywords,
-                search_engine: data.search_engine || '',
-                search_limit: data.search_limit || '',
-                search_prefix: data.search_prefix || '',
-                proxy: data.proxy || 'no',
-                custom_proxy: data.custom_proxy || '',
-            };
-            const response = await fetch(API_BASE + '/api/search', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-            const result = await parseJsonResponse(response);
-            if (!result.success) {
-                throw new Error(result.error || '搜索失败');
-            }
-            return result;
-        }
-
-        function renderSearchPreviewCard(searchData) {
-            const container = document.getElementById('resultsContainer');
-            container.querySelectorAll('.search-preview-card').forEach((el) => el.remove());
-            const card = document.createElement('div');
-            card.className = 'card result-card show search-preview-card';
-            card.dataset.keywords = searchData.keywords || '';
-            card.dataset.prefix = searchData.prefix || '';
-            card.innerHTML = `
-                <div class="result-header">
-                    <h2 class="result-title"></h2>
-                    <div class="search-preview-actions">
-                        <label class="checkbox-group" style="margin: 0;">
-                            <input type="checkbox" class="search-select-all" checked>
-                            <span>全选</span>
-                        </label>
-                        <span class="search-result-count"></span>
-                        <button type="button" class="btn btn-primary search-fetch-btn">获取选中</button>
-                    </div>
-                </div>
-                <div class="field-hint">勾选要获取的搜索结果。获取后会生成常规结果卡，可逐条保存，也可用“合并保存全部结果”合并保存。保存文件名前缀：${escapeHtml(searchData.prefix || '')}</div>
-                <div class="search-result-list"></div>
-            `;
-            card.querySelector('.result-title').textContent =
-                `搜索结果：${searchData.keywords}（${searchData.results.length} 条，${searchData.engine}）`;
-            card.querySelector('.search-result-list').innerHTML = '';
-            const list = card.querySelector('.search-result-list');
-            searchData.results.forEach((item, index) => {
-                const row = document.createElement('label');
-                row.className = 'search-result-item';
-                row.innerHTML = `
-                    <input type="checkbox" class="search-result-checkbox" data-index="${index}" checked>
-                    <span class="search-result-text">
-                        <span class="search-result-title"></span>
-                        <span class="search-result-url"></span>
-                    </span>
-                `;
-                row.querySelector('.search-result-title').textContent = item.title || item.url;
-                row.querySelector('.search-result-url').textContent = item.url;
-                list.appendChild(row);
-            });
-
-            const updateCount = () => {
-                const boxes = Array.from(card.querySelectorAll('.search-result-checkbox'));
-                const checked = boxes.filter((box) => box.checked).length;
-                card.querySelector('.search-result-count').textContent = `已选 ${checked}/${boxes.length}`;
-                const selectAll = card.querySelector('.search-select-all');
-                selectAll.checked = checked === boxes.length;
-                selectAll.indeterminate = checked > 0 && checked < boxes.length;
-                card.querySelector('.search-fetch-btn').disabled = checked === 0;
-            };
-            card.querySelectorAll('.search-result-checkbox').forEach((box) => {
-                box.addEventListener('change', updateCount);
-            });
-            card.querySelector('.search-select-all').addEventListener('change', function() {
-                card.querySelectorAll('.search-result-checkbox').forEach((box) => {
-                    box.checked = this.checked;
-                });
-                updateCount();
-            });
-            card.querySelector('.search-fetch-btn').addEventListener('click', () => {
-                processSearchSelection(card, searchData);
-            });
-            updateCount();
-            container.appendChild(card);
-            return card;
-        }
-
-        function getSearchSelectionUrls(card, searchData) {
-            return Array.from(card.querySelectorAll('.search-result-checkbox'))
-                .filter((box) => box.checked)
-                .map((box) => searchData.results[Number(box.dataset.index)].url);
-        }
-
-        async function processSearchSelection(card, searchData) {
-            const urls = getSearchSelectionUrls(card, searchData);
-            if (!urls.length) {
-                return;
-            }
-            const fetchBtn = card.querySelector('.search-fetch-btn');
-            const submitBtn = document.getElementById('submitBtn');
-            fetchBtn.disabled = true;
-            fetchBtn.innerHTML = '<span class="spinner"></span>获取中...';
-            submitBtn.disabled = true;
-            currentResults = [];
-            const container = document.getElementById('resultsContainer');
-            container.querySelectorAll('.result-card:not(.search-preview-card)').forEach((el) => el.remove());
-            const data = getCurrentFormData('');
-            data.search_mode = false;
-            data.search_query = searchData.keywords;
-            data.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
-            data.save_full_text = false;
-            try {
-                const successCount = await processInputList(urls, data);
-                showStatus(
-                    successCount ? 'success' : 'error',
-                    `获取完成：成功 ${successCount}/${urls.length}`
-                );
-            } catch (error) {
-                showStatus('error', '获取失败: ' + error.message);
-            } finally {
-                fetchBtn.disabled = false;
-                fetchBtn.textContent = '获取选中';
-                submitBtn.disabled = false;
-                submitBtn.textContent = '开始获取';
-            }
-        }
-
-        async function processInputList(inputs, data) {
-            let successCount = 0;
-            for (let i = 0; i < inputs.length; i += 1) {
-                const input = inputs[i];
-                showStatus('processing', `正在处理 ${i + 1}/${inputs.length}: ${input}`);
-                const itemData = { ...data, url: input };
-                const response = await fetch(API_BASE + '/api/process', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(itemData)
-                });
-
-                const result = await parseJsonResponse(response);
-                if (result.success) {
-                    result.input_url = input;
-                    currentResults.push(result);
-                    window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
-                    if (data.save_full_text) {
-                        showStatus('processing', '全文保存模式，正在直接保存...');
-                        const fileType = getCheckedRadioValue('format') || 'md';
-                        const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
-                        const autoTitle = (result.defaultSaveTitle || '').trim();
-                        const saveBody = {
-                            fileType,
-                            saveDir,
-                            customTitle: autoTitle,
-                            data: result,
-                            formData: data,
-                            speak: false
-                        };
-                        try {
-                            const saveResp = await fetch(API_BASE + '/api/save-async', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(saveBody)
-                            });
-                            const saveResult = await parseJsonResponse(saveResp);
-                            if (saveResult.success && saveResult.job_id) {
-                                showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
-                                notifySaveJobState(saveResult.job_id, 'pending');
-                                pollSaveJob(saveResult.job_id);
-                            } else {
-                                showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
-                            }
-                        } catch (saveErr) {
-                            showStatus('error', '全文保存请求失败: ' + saveErr.message);
-                        }
-                    } else {
-                        const card = renderResultCard(result, i, inputs.length);
-                        if (result.translation_pending && result.translation_job_id) {
-                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
-                        }
-                    }
-                    successCount += 1;
-                } else {
-                    renderErrorCard(input, result.error, i, inputs.length);
-                }
-            }
-            refreshAggregateCard();
-            return successCount;
-        }
-
-        // Form submission
-        document.getElementById('surfForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-
-            const submitBtn = document.getElementById('submitBtn');
-            const resultsContainer = document.getElementById('resultsContainer');
-
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
-            currentResults = [];
-            resultsContainer.innerHTML = '';
-
-            const formData = new FormData(this);
-            const data = Object.fromEntries(formData.entries());
-            if (!data.proxy) {
-                data.proxy = getCheckedRadioValue('proxy') || 'no';
-            }
-
-            // Convert checkboxes to booleans
-            data.browser = data.browser === 'on';
-            data.podcast_transcribe = data.podcast_transcribe === 'on';
-            data.lang_touched = langModeTouched;
-            data.html_inline = data.html_inline === 'on';
-            data.no_front_matter = data.no_front_matter === 'on';
-            data.archive_source = data.archive_source === 'on';
-            data.save_full_text = data.save_full_text === 'on';
-            data.search_mode = data.search_mode === 'on';
-            const rawInput = (data.url || '').trim();
-
-            try {
-                if (data.search_mode) {
-                    if (!rawInput) {
-                        showStatus('error', '请输入搜索关键词');
-                        return;
-                    }
-                    showStatus('processing', `正在搜索: ${rawInput}`);
-                    const searchData = await requestSearch(rawInput, data);
-                    renderSearchPreviewCard(searchData);
-                    showStatus('success', `找到 ${searchData.results.length} 条结果，请勾选后点击“获取选中”。`);
-                    return;
-                }
-
-                const inputs = data.save_full_text
-                    ? (rawInput ? [rawInput] : [])
-                    : (() => {
-                        const urls = extractUrlsFromInput(rawInput);
-                        return urls.length ? urls : (rawInput ? [rawInput] : []);
-                    })();
-
-                if (!inputs.length) {
-                    showStatus('error', '请输入 URL 或文本');
-                    return;
-                }
-
-                showStatus('processing', '正在获取网页内容...');
-                const successCount = await processInputList(inputs, data);
-                showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
-            } catch (error) {
-                showStatus('error', '请求失败: ' + error.message);
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.textContent = '开始获取';
-            }
-        });
-
-        async function queueDirectSaves(inputs, formData) {
-            const fileType = getCheckedRadioValue('format') || 'md';
-            const queuedJobs = [];
-            for (let i = 0; i < inputs.length; i += 1) {
-                const input = inputs[i];
-                showStatus('processing', `正在获取并保存 ${i + 1}/${inputs.length}: ${input}`);
-                const itemFormData = { ...formData, url: input };
-                const response = await fetch(API_BASE + '/api/save-async', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        fileType,
-                        saveDir: '',
-                        customTitle: '',
-                        data: {},
-                        formData: itemFormData,
-                        speak: false,
-                    }),
-                });
-                const result = await parseJsonResponse(response);
-                if (!result.success || !result.job_id) {
-                    throw new Error(result.error || '保存提交失败');
-                }
-                queuedJobs.push({ jobId: result.job_id, url: input });
-                pollSaveJob(result.job_id);
-            }
-            if (!queuedJobs.length) {
-                throw new Error('没有可保存的内容');
-            }
-            let message;
-            if (queuedJobs.length === 1) {
-                message = `已将 1 个${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
-            } else {
-                const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
-                message = `已将 ${queuedJobs.length} 个${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px; text-align: left;">${urlList}</ul>`;
-            }
-            showStatus('success', message);
-            queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
-            return queuedJobs;
-        }
-
-        async function directSave() {
-            const directSaveBtn = document.getElementById('directSaveBtn');
-            const rawInput = (urlInput?.value || '').trim();
-            const formData = getCurrentFormData('');
-            let inputs = formData.save_full_text
-                ? (rawInput ? [rawInput] : [])
-                : (() => {
-                    const urls = extractUrlsFromInput(rawInput);
-                    return urls.length ? urls : (rawInput ? [rawInput] : []);
-                })();
-
-            directSaveBtn.disabled = true;
-            try {
-                if (formData.search_mode) {
-                    if (!rawInput) {
-                        showStatus('error', '请输入搜索关键词');
-                        return;
-                    }
-                    showStatus('processing', `正在搜索: ${rawInput}`);
-                    const searchData = await requestSearch(rawInput, formData);
-                    inputs = searchData.results.map((item) => item.url);
-                    formData.search_mode = false;
-                    formData.save_full_text = false;
-                    formData.search_query = searchData.keywords;
-                    formData.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
-                    if (!inputs.length) {
-                        throw new Error('没有可保存的搜索结果');
-                    }
-                } else if (!inputs.length) {
-                    showStatus('error', '请输入 URL 或文本');
-                    return;
-                }
-                showStatus('processing', '正在获取并保存...');
-                await queueDirectSaves(inputs, formData);
-            } catch (error) {
-                showStatus('error', '直接保存失败: ' + error.message);
-            } finally {
-                directSaveBtn.disabled = false;
-            }
-        }
-
-        document.getElementById('directSaveBtn').addEventListener('click', directSave);
-
-        function createStatusDiv() {
-            const div = document.createElement('div');
-            div.id = 'status';
-            div.className = 'card';
-            div.style.display = 'none';
-            document.querySelector('.card').after(div);
-            return div;
-        }
-        
-        function showStatus(type, message) {
-            let statusDiv = document.getElementById('status');
-            if (!statusDiv) {
-                statusDiv = createStatusDiv();
-            }
-
-            statusDiv.className = 'card status status-' + type + ' show';
-            statusDiv.innerHTML = message;
-            statusDiv.style.display = 'block';
-        }
-
-        function escapeHtml(value) {
-            return String(value ?? '')
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#39;');
-        }
-
-        const SAVE_QUEUE_STATUS_LABELS = {
-            pending: '排队中',
-            running: '保存中',
-            done: '已完成',
-            error: '失败'
-        };
-        const knownSaveJobStates = new Map();
-
-        function notifySaveJobState(jobId, status) {
-            if (!jobId || !status) {
-                return;
-            }
-            if (knownSaveJobStates.get(jobId) === status) {
-                return;
-            }
-            knownSaveJobStates.set(jobId, status);
-            refreshSaveQueuePanel();
-        }
-
-        async function refreshSaveQueuePanel() {
-            let panel = document.getElementById('saveQueuePanel');
-            if (!panel) {
-                panel = document.createElement('div');
-                panel.id = 'saveQueuePanel';
-                panel.className = 'card';
-                panel.style.display = 'none';
-                const statusDiv = document.getElementById('status') || createStatusDiv();
-                statusDiv.after(panel);
-            }
-
-            try {
-                const response = await fetch(API_BASE + '/api/save-jobs?limit=20');
-                const payload = await parseJsonResponse(response);
-                if (!payload.success) {
-                    return;
-                }
-                const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
-                const hasActiveJobs = jobs.some(job => job.status === 'pending' || job.status === 'running');
-                if (!hasActiveJobs) {
-                    // Hide the queue card only when every queued item has finished
-                    panel.style.display = 'none';
-                    panel.innerHTML = '';
-                    return;
-                }
-
-                const items = jobs.map(job => {
-                    const statusLabel = SAVE_QUEUE_STATUS_LABELS[job.status] || job.status;
-                    const fileTypeLabel = (job.fileType || '?').toUpperCase();
-                    let detailHtml = '';
-                    if (job.status === 'done' && job.savePath) {
-                        detailHtml = `<span class="save-queue-detail">${escapeHtml(job.savePath)}</span>`;
-                    } else if (job.status === 'error' && job.error) {
-                        detailHtml = `<span class="save-queue-detail">错误: ${escapeHtml(job.error)}</span>`;
-                    }
-                    return `<li class="save-queue-item">
-                        <span class="save-queue-type">${escapeHtml(fileTypeLabel)}</span>
-                        <span class="save-queue-url">${escapeHtml(job.url || '(未知 URL)')}</span>
-                        <span class="save-queue-status save-queue-status-${escapeHtml(job.status)}">${escapeHtml(statusLabel)}</span>
-                        ${detailHtml}
-                    </li>`;
-                }).join('');
-
-                panel.innerHTML = `
-                    <div class="save-queue-title">保存队列</div>
-                    <ul class="save-queue-list">${items}</ul>
-                `;
-                panel.style.display = 'block';
-            } catch (error) {
-                // Silently ignore queue panel refresh failures
-            }
-        }
-
-
-        function showToast(type, message, duration = 5000) {
-            const container = document.getElementById('toastContainer');
-            if (!container) return;
-            const toast = document.createElement('div');
-            toast.className = 'toast toast-' + type;
-            toast.textContent = message;
-            toast.addEventListener('click', () => {
-                toast.classList.add('fade-out');
-                setTimeout(() => toast.remove(), 300);
-            });
-            container.appendChild(toast);
-            if (duration > 0) {
-                setTimeout(() => {
-                    toast.classList.add('fade-out');
-                    setTimeout(() => toast.remove(), 300);
-                }, duration);
-            }
-        }
-        // Store result data for saving
-        let currentResults = [];
-        const translationJobIds = new Set();
-        const saveJobIds = new Set();
 
         function refreshAggregateCard() {
             renderAggregateSaveCard(currentResults);
-        }
-
-        function updateResultCard(card, result, index, total) {
-            if (!card) {
-                return;
-            }
-            populateResultCard(card, result, index, total);
-        }
-
-        async function pollTranslationJob(jobId, card, resultIndex, total) {
-            if (!jobId || translationJobIds.has(jobId)) {
-                return;
-            }
-            translationJobIds.add(jobId);
-
-            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-            while (true) {
-                await delay(2000);
-                try {
-                    const response = await fetch(API_BASE + `/api/translation-jobs/${encodeURIComponent(jobId)}`);
-                    const job = await parseJsonResponse(response);
-                    if (!job.success) {
-                        showStatus('error', '翻译任务失败: ' + (job.error || 'unknown error'));
-                        translationJobIds.delete(jobId);
-                        return;
-                    }
-                    if (job.status === 'done' && job.result) {
-                        const updated = job.result;
-                        updated.input_url = card.dataset.inputUrl || updated.input_url || '';
-                        updated.translation_pending = false;
-                        updated.translation_job_id = jobId;
-                        currentResults[resultIndex] = updated;
-                        updateResultCard(card, updated, resultIndex, total);
-                        refreshAggregateCard();
-                        translationJobIds.delete(jobId);
-                        showStatus('success', `翻译完成：${updated.title || 'Untitled'}`);
-                        return;
-                    }
-                    if (job.status === 'error') {
-                        showStatus('error', '翻译失败: ' + (job.error || 'unknown error'));
-                        translationJobIds.delete(jobId);
-                        return;
-                    }
-                    showStatus('processing', '翻译处理中...');
-                } catch (error) {
-                    showStatus('processing', '翻译处理中...');
-                }
-            }
-        }
-
-        async function pollSaveJob(jobId) {
-            if (!jobId || saveJobIds.has(jobId)) {
-                return;
-            }
-            saveJobIds.add(jobId);
-
-            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-            while (true) {
-                await delay(2000);
-                try {
-                    const response = await fetch(API_BASE + `/api/save-jobs/${encodeURIComponent(jobId)}`);
-                    const job = await parseJsonResponse(response);
-                    notifySaveJobState(jobId, job.status);
-                    if (!job.success) {
-                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
-                        saveJobIds.delete(jobId);
-                        return;
-                    }
-                    if (job.status === 'done') {
-                        const fileTypeLabel = (job.fileType || '').toUpperCase();
-                        if (job.fileType === 'publish') {
-                            showToast('success', `已发布到: ${job.savePath}`, 8000);
-                        } else {
-                            showToast('success', `${fileTypeLabel} 已保存到: ${job.savePath}`, 8000);
-                        }
-                        saveJobIds.delete(jobId);
-                        return;
-                    }
-                    if (job.status === 'error') {
-                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
-                        saveJobIds.delete(jobId);
-                        return;
-                    }
-                } catch (error) {
-                    // Silently retry
-                }
-            }
-        }
-
-        function getCurrentFormData(inputUrl) {
-            // Collect all current form field values as a plain dict matching /api/process contract
-            const form = document.getElementById('surfForm');
-            const fd = new FormData(form);
-            const data = Object.fromEntries(fd.entries());
-            if (!data.proxy) {
-                data.proxy = getCheckedRadioValue('proxy') || 'no';
-            }
-            data.url = inputUrl || (data.url || '').trim();
-            data.lang_touched = langModeTouched;
-            data.browser = data.browser === 'on';
-            data.podcast_transcribe = data.podcast_transcribe === 'on';
-            data.html_inline = data.html_inline === 'on';
-            data.no_front_matter = data.no_front_matter === 'on';
-            data.archive_source = data.archive_source === 'on';
-            data.save_full_text = data.save_full_text === 'on';
-            data.search_mode = data.search_mode === 'on';
-            return data;
         }
 
         async function saveFile(container, resultData, options = {}) {
@@ -2250,7 +2229,7 @@ HTML_TEMPLATE = """
                 showStatus('error', '没有可保存的内容');
                 return;
             }
-            const fileType = getCheckedRadioValue('format') || 'md';
+            const fileType = options.fileType || getSaveFormat();
             const speak = !!options.speak;
             const { saveDir, customTitle } = getSaveFormState(container, fileType);
             const inputUrl = container.dataset.inputUrl || '';
@@ -2316,6 +2295,531 @@ HTML_TEMPLATE = """
                 showStatus('error', '请求失败: ' + error.message);
             }
         }
+
+        // ------------------------------------------------------ save queue UI
+        const SAVE_QUEUE_STATUS_LABELS = {
+            pending: '排队中',
+            running: '保存中',
+            done: '已完成',
+            error: '失败'
+        };
+
+        function notifySaveJobState(jobId, status) {
+            if (!jobId || !status) {
+                return;
+            }
+            if (knownSaveJobStates.get(jobId) === status) {
+                return;
+            }
+            knownSaveJobStates.set(jobId, status);
+            refreshSaveQueuePanel();
+        }
+
+        function updateQueueBadge(activeCount) {
+            const badge = document.getElementById('queueBadge');
+            const text = document.getElementById('queueBadgeText');
+            if (!badge || !text) {
+                return;
+            }
+            text.textContent = activeCount ? `${activeCount} 个任务` : '';
+            badge.classList.toggle('show', activeCount > 0);
+        }
+
+        async function refreshSaveQueuePanel() {
+            const panel = document.getElementById('saveQueuePanel');
+            if (!panel) {
+                return;
+            }
+
+            try {
+                const response = await fetch(API_BASE + '/api/save-jobs?limit=20');
+                const payload = await parseJsonResponse(response);
+                if (!payload.success) {
+                    return;
+                }
+                const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+                const activeJobs = jobs.filter(job => job.status === 'pending' || job.status === 'running');
+                updateQueueBadge(activeJobs.length);
+                if (!jobs.length) {
+                    panel.classList.remove('show');
+                    panel.innerHTML = '';
+                    return;
+                }
+
+                const items = jobs.map(job => {
+                    const statusLabel = SAVE_QUEUE_STATUS_LABELS[job.status] || job.status;
+                    const fileTypeLabel = (job.fileType || '?').toUpperCase();
+                    let detailHtml = '';
+                    if (job.status === 'done' && job.savePath) {
+                        detailHtml = `<span class="save-queue-detail">${escapeHtml(job.savePath)}</span>`;
+                    } else if (job.status === 'error' && job.error) {
+                        detailHtml = `<span class="save-queue-detail">${escapeHtml(job.error)}</span>`;
+                    }
+                    return `<li class="save-queue-item">
+                        <span class="save-queue-type">${escapeHtml(fileTypeLabel)}</span>
+                        <span class="save-queue-url">${escapeHtml(job.url || '(未知 URL)')}</span>
+                        <span class="save-queue-status save-queue-status-${escapeHtml(job.status)}">${escapeHtml(statusLabel)}</span>
+                        ${detailHtml}
+                    </li>`;
+                }).join('');
+
+                panel.innerHTML = `
+                    <div class="save-queue-title">保存队列 · ${jobs.length}</div>
+                    <ul class="save-queue-list">${items}</ul>
+                `;
+                panel.classList.add('show');
+            } catch (error) {
+                // Silently ignore queue panel refresh failures
+            }
+        }
+
+        // -------------------------------------------------------- form data
+        function getCurrentFormData(inputUrl) {
+            const form = document.getElementById('surfForm');
+            const fd = new FormData(form);
+            const data = Object.fromEntries(fd.entries());
+            if (!data.proxy) {
+                data.proxy = getCheckedRadioValue('proxy') || 'no';
+            }
+            data.url = inputUrl || (data.url || '').trim();
+            data.lang_touched = langModeTouched;
+            data.browser = data.browser === 'on';
+            data.podcast_transcribe = data.podcast_transcribe === 'on';
+            data.html_inline = data.html_inline === 'on';
+            data.no_front_matter = data.no_front_matter === 'on';
+            data.archive_source = data.archive_source === 'on';
+            data.save_full_text = data.save_full_text === 'on';
+            data.search_mode = data.search_mode === 'on';
+            return data;
+        }
+
+        function collectInputs(rawInput, formData) {
+            if (formData.save_full_text) {
+                return rawInput ? [rawInput] : [];
+            }
+            const urls = extractUrlsFromInput(rawInput);
+            return urls.length ? urls : (rawInput ? [rawInput] : []);
+        }
+
+        // ------------------------------------------------------------ search
+        async function requestSearch(keywords, data) {
+            const payload = {
+                keywords,
+                search_engine: data.search_engine || '',
+                search_limit: data.search_limit || '',
+                search_prefix: data.search_prefix || '',
+                proxy: data.proxy || 'no',
+                custom_proxy: data.custom_proxy || '',
+            };
+            const response = await fetch(API_BASE + '/api/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const result = await parseJsonResponse(response);
+            if (!result.success) {
+                throw new Error(result.error || '搜索失败');
+            }
+            return result;
+        }
+
+        function renderSearchPreviewCard(searchData) {
+            resultsContainer.querySelectorAll('.search-preview-card').forEach((el) => el.remove());
+            const card = document.createElement('div');
+            card.className = 'panel result-card search-preview-card';
+            card.dataset.keywords = searchData.keywords || '';
+            card.dataset.prefix = searchData.prefix || '';
+            card.innerHTML = `
+                <div class="result-head">
+                    <div class="result-title-wrap">
+                        <h2 class="result-title"></h2>
+                        <div class="result-meta">
+                            <span class="badge badge-accent">${escapeHtml(searchData.engine)}</span>
+                            <span>${searchData.results.length} 条检索结果</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="search-toolbar">
+                    <div class="search-toolbar-left">
+                        <label class="check">
+                            <input type="checkbox" class="search-select-all" checked>
+                            <span>全选</span>
+                        </label>
+                        <span class="search-result-count"></span>
+                    </div>
+                    <button type="button" class="btn btn-primary btn-sm search-fetch-btn">提取选中</button>
+                </div>
+                <div class="search-result-list"></div>
+            `;
+            card.querySelector('.result-title').textContent = `搜索结果：${searchData.keywords}`;
+
+            const list = card.querySelector('.search-result-list');
+            searchData.results.forEach((item, index) => {
+                const row = document.createElement('label');
+                row.className = 'search-result-item';
+                row.innerHTML = `
+                    <input type="checkbox" class="search-result-checkbox" data-index="${index}" checked>
+                    <span class="search-result-text">
+                        <span class="search-result-title"></span>
+                        <span class="search-result-url"></span>
+                    </span>
+                `;
+                row.querySelector('.search-result-title').textContent = item.title || item.url;
+                row.querySelector('.search-result-url').textContent = item.url;
+                list.appendChild(row);
+            });
+
+            const updateCount = () => {
+                const boxes = Array.from(card.querySelectorAll('.search-result-checkbox'));
+                const checked = boxes.filter((box) => box.checked).length;
+                card.querySelector('.search-result-count').textContent =
+                    `已选 ${checked}/${boxes.length} · 文件名前缀 ${searchData.prefix || '(无)'}`;
+                const selectAll = card.querySelector('.search-select-all');
+                selectAll.checked = checked === boxes.length;
+                selectAll.indeterminate = checked > 0 && checked < boxes.length;
+                card.querySelector('.search-fetch-btn').disabled = checked === 0;
+            };
+            card.querySelectorAll('.search-result-checkbox').forEach((box) => {
+                box.addEventListener('change', updateCount);
+            });
+            card.querySelector('.search-select-all').addEventListener('change', function() {
+                card.querySelectorAll('.search-result-checkbox').forEach((box) => {
+                    box.checked = this.checked;
+                });
+                updateCount();
+            });
+            card.querySelector('.search-fetch-btn').addEventListener('click', () => {
+                processSearchSelection(card, searchData);
+            });
+            updateCount();
+            resultsContainer.appendChild(card);
+            updateResultsMeta();
+            revealResults();
+            return card;
+        }
+
+        function getSearchSelectionUrls(card, searchData) {
+            return Array.from(card.querySelectorAll('.search-result-checkbox'))
+                .filter((box) => box.checked)
+                .map((box) => searchData.results[Number(box.dataset.index)].url);
+        }
+
+        async function processSearchSelection(card, searchData) {
+            const urls = getSearchSelectionUrls(card, searchData);
+            if (!urls.length) {
+                return;
+            }
+            const fetchBtn = card.querySelector('.search-fetch-btn');
+            const submitBtn = document.getElementById('submitBtn');
+            fetchBtn.disabled = true;
+            fetchBtn.innerHTML = '<span class="spinner"></span>提取中...';
+            submitBtn.disabled = true;
+            currentResults = [];
+            resultsContainer.querySelectorAll('.result-card:not(.search-preview-card)').forEach((el) => el.remove());
+            updateResultsMeta();
+            const data = getCurrentFormData('');
+            data.search_mode = false;
+            data.search_query = searchData.keywords;
+            data.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
+            data.save_full_text = false;
+            try {
+                const successCount = await processInputList(urls, data);
+                showStatus(
+                    successCount ? 'success' : 'error',
+                    `提取完成：成功 ${successCount}/${urls.length}`
+                );
+            } catch (error) {
+                showStatus('error', '提取失败: ' + error.message);
+            } finally {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = '提取选中';
+                submitBtn.disabled = false;
+                submitBtn.textContent = '提取';
+            }
+        }
+
+        // -------------------------------------------------------- processing
+        async function processInputList(inputs, data) {
+            let successCount = 0;
+            for (let i = 0; i < inputs.length; i += 1) {
+                const input = inputs[i];
+                showStatus('processing', `正在处理 ${i + 1}/${inputs.length}：<b>${escapeHtml(input)}</b>`);
+                const itemData = { ...data, url: input };
+                const response = await fetch(API_BASE + '/api/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(itemData)
+                });
+
+                const result = await parseJsonResponse(response);
+                if (result.success) {
+                    result.input_url = input;
+                    currentResults.push(result);
+                    window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
+                    if (data.save_full_text) {
+                        showStatus('processing', '全文保存模式，正在直接保存...');
+                        const fileType = getSaveFormat();
+                        const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
+                        const autoTitle = (result.defaultSaveTitle || '').trim();
+                        const saveBody = {
+                            fileType,
+                            saveDir,
+                            customTitle: autoTitle,
+                            data: result,
+                            formData: data,
+                            speak: false
+                        };
+                        try {
+                            const saveResp = await fetch(API_BASE + '/api/save-async', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify(saveBody)
+                            });
+                            const saveResult = await parseJsonResponse(saveResp);
+                            if (saveResult.success && saveResult.job_id) {
+                                showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
+                                notifySaveJobState(saveResult.job_id, 'pending');
+                                pollSaveJob(saveResult.job_id);
+                            } else {
+                                showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
+                            }
+                        } catch (saveErr) {
+                            showStatus('error', '全文保存请求失败: ' + saveErr.message);
+                        }
+                    } else {
+                        const card = renderResultCard(result, i, inputs.length);
+                        if (result.translation_pending && result.translation_job_id) {
+                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
+                        }
+                    }
+                    successCount += 1;
+                } else {
+                    renderErrorCard(input, result.error, i, inputs.length);
+                }
+            }
+            refreshAggregateCard();
+            revealResults();
+            return successCount;
+        }
+
+        async function pollTranslationJob(jobId, card, resultIndex, total) {
+            if (!jobId || translationJobIds.has(jobId)) {
+                return;
+            }
+            translationJobIds.add(jobId);
+
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            while (true) {
+                await delay(2000);
+                try {
+                    const response = await fetch(API_BASE + `/api/translation-jobs/${encodeURIComponent(jobId)}`);
+                    const job = await parseJsonResponse(response);
+                    if (!job.success) {
+                        showStatus('error', '翻译任务失败: ' + (job.error || 'unknown error'));
+                        translationJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'done' && job.result) {
+                        const updated = job.result;
+                        updated.input_url = card.dataset.inputUrl || updated.input_url || '';
+                        updated.translation_pending = false;
+                        updated.translation_job_id = jobId;
+                        currentResults[resultIndex] = updated;
+                        updateResultCard(card, updated, resultIndex, total);
+                        refreshAggregateCard();
+                        translationJobIds.delete(jobId);
+                        showStatus('success', `翻译完成：${escapeHtml(updated.title || 'Untitled')}`);
+                        return;
+                    }
+                    if (job.status === 'error') {
+                        showStatus('error', '翻译失败: ' + (job.error || 'unknown error'));
+                        translationJobIds.delete(jobId);
+                        return;
+                    }
+                    showStatus('processing', '翻译处理中...');
+                } catch (error) {
+                    showStatus('processing', '翻译处理中...');
+                }
+            }
+        }
+
+        async function pollSaveJob(jobId) {
+            if (!jobId || saveJobIds.has(jobId)) {
+                return;
+            }
+            saveJobIds.add(jobId);
+
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+            while (true) {
+                await delay(2000);
+                try {
+                    const response = await fetch(API_BASE + `/api/save-jobs/${encodeURIComponent(jobId)}`);
+                    const job = await parseJsonResponse(response);
+                    notifySaveJobState(jobId, job.status);
+                    if (!job.success) {
+                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'done') {
+                        const fileTypeLabel = (job.fileType || '').toUpperCase();
+                        if (job.fileType === 'publish') {
+                            showToast('success', `已发布到: ${job.savePath}`, 8000);
+                        } else {
+                            showToast('success', `${fileTypeLabel} 已保存到: ${job.savePath}`, 8000);
+                        }
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                    if (job.status === 'error') {
+                        showToast('error', '保存失败: ' + (job.error || 'unknown error'));
+                        saveJobIds.delete(jobId);
+                        return;
+                    }
+                } catch (error) {
+                    // Silently retry
+                }
+            }
+        }
+
+        function resetBeforeRun() {
+            currentResults = [];
+            resultsContainer.innerHTML = '';
+            updateResultsMeta();
+            collapseOptions();
+        }
+
+        document.getElementById('surfForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            const submitBtn = document.getElementById('submitBtn');
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
+            resetBeforeRun();
+
+            const data = getCurrentFormData('');
+            const rawInput = (data.url || '').trim();
+
+            try {
+                if (data.search_mode) {
+                    if (!rawInput) {
+                        showStatus('error', '请输入搜索关键词');
+                        return;
+                    }
+                    showStatus('processing', `正在搜索：<b>${escapeHtml(rawInput)}</b>`);
+                    const searchData = await requestSearch(rawInput, data);
+                    renderSearchPreviewCard(searchData);
+                    showStatus('success', `找到 ${searchData.results.length} 条结果，勾选后点击“提取选中”。`);
+                    return;
+                }
+
+                const inputs = collectInputs(rawInput, data);
+                if (!inputs.length) {
+                    showStatus('error', '请输入 URL 或文本');
+                    return;
+                }
+
+                showStatus('processing', '正在抓取网页内容...');
+                const successCount = await processInputList(inputs, data);
+                showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
+            } catch (error) {
+                showStatus('error', '请求失败: ' + error.message);
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = '提取';
+            }
+        });
+
+        async function queueDirectSaves(inputs, formData) {
+            const fileType = getSaveFormat();
+            const queuedJobs = [];
+            for (let i = 0; i < inputs.length; i += 1) {
+                const input = inputs[i];
+                showStatus('processing', `正在抓取并保存 ${i + 1}/${inputs.length}：<b>${escapeHtml(input)}</b>`);
+                const itemFormData = { ...formData, url: input };
+                const response = await fetch(API_BASE + '/api/save-async', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileType,
+                        saveDir: '',
+                        customTitle: '',
+                        data: {},
+                        formData: itemFormData,
+                        speak: false,
+                    }),
+                });
+                const result = await parseJsonResponse(response);
+                if (!result.success || !result.job_id) {
+                    throw new Error(result.error || '保存提交失败');
+                }
+                queuedJobs.push({ jobId: result.job_id, url: input });
+                pollSaveJob(result.job_id);
+            }
+            if (!queuedJobs.length) {
+                throw new Error('没有可保存的内容');
+            }
+            let message;
+            if (queuedJobs.length === 1) {
+                message = `已将 1 个 ${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
+            } else {
+                const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
+                message = `已将 ${queuedJobs.length} 个 ${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px;">${urlList}</ul>`;
+            }
+            showStatus('success', message);
+            queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
+            return queuedJobs;
+        }
+
+        async function directSave() {
+            const directSaveBtn = document.getElementById('directSaveBtn');
+            const rawInput = (urlInput?.value || '').trim();
+            const formData = getCurrentFormData('');
+            let inputs = collectInputs(rawInput, formData);
+
+            directSaveBtn.disabled = true;
+            try {
+                if (formData.search_mode) {
+                    if (!rawInput) {
+                        showStatus('error', '请输入搜索关键词');
+                        return;
+                    }
+                    showStatus('processing', `正在搜索：<b>${escapeHtml(rawInput)}</b>`);
+                    const searchData = await requestSearch(rawInput, formData);
+                    inputs = searchData.results.map((item) => item.url);
+                    formData.search_mode = false;
+                    formData.save_full_text = false;
+                    formData.search_query = searchData.keywords;
+                    formData.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
+                    if (!inputs.length) {
+                        throw new Error('没有可保存的搜索结果');
+                    }
+                } else if (!inputs.length) {
+                    showStatus('error', '请输入 URL 或文本');
+                    return;
+                }
+                showStatus('processing', '正在抓取并保存...');
+                await queueDirectSaves(inputs, formData);
+            } catch (error) {
+                showStatus('error', '直接保存失败: ' + error.message);
+            } finally {
+                directSaveBtn.disabled = false;
+            }
+        }
+
+        document.getElementById('directSaveBtn').addEventListener('click', directSave);
+
+        // Ctrl/Cmd + Enter submits the composer.
+        document.getElementById('surfForm').addEventListener('keydown', function(event) {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                this.requestSubmit();
+            }
+        });
     </script>
 </body>
 </html>
@@ -3765,20 +4269,60 @@ def run_server(host="127.0.0.1", port=18473, debug=False, root=""):
 def main():
     parser = argparse.ArgumentParser(
         prog="python surf_web.py",
-        description="Surf Web Interface - A web interface for URL to Markdown/PDF/HTML/Audio converter",
+        usage="%(prog)s [options]",
+        description=(
+            "Serve the Surf web interface: paste a URL or text, preview the extracted\n"
+            "document, then save it as Markdown, HTML, PDF, audio, or a Pastebin post."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  python surf_web.py                          http://127.0.0.1:18473
+  python surf_web.py --port 8080              pick another port
+  python surf_web.py --host 0.0.0.0           listen on every interface
+  python surf_web.py --root /surf             serve under a reverse-proxy prefix
+  python surf_web.py --debug                  Flask debug mode with reloader
+
+deployment:
+  The built-in server is Flask's development server. For anything long-running,
+  point a WSGI server at surf_web:app instead:
+
+    uv run waitress-serve --listen=0.0.0.0:18473 --threads=4 surf_web:app
+
+  When a reverse proxy forwards the prefix as-is (proxy_pass without a trailing
+  slash), start Surf with the same prefix via --root.
+""",
     )
 
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)"
+    group = parser.add_argument_group("server")
+    group.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="ADDR",
+        help="Interface to bind (default: 127.0.0.1, local access only)",
     )
-    parser.add_argument(
-        "--port", type=int, default=18473, help="Port to bind (default: 18473)"
+    group.add_argument(
+        "--port",
+        type=int,
+        default=18473,
+        metavar="PORT",
+        help="Port to bind (default: 18473)",
     )
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
-    parser.add_argument("--bind", help="Bind address (deprecated, use --host)")
-    parser.add_argument(
-        "--root", default="", help="URL path prefix for reverse proxy (e.g. /surf)"
+    group.add_argument(
+        "--root",
+        default="",
+        metavar="PATH",
+        help="URL path prefix when running behind a reverse proxy, e.g. /surf",
+    )
+    group.add_argument(
+        "--bind",
+        metavar="ADDR",
+        help="Deprecated alias for --host",
+    )
+    group.add_argument(
+        "--debug",
+        action="store_true",
+        help="Run Flask in debug mode (never expose this publicly)",
     )
 
     args = parser.parse_args()

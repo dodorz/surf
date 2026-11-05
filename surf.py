@@ -8932,6 +8932,72 @@ class Fetcher:
             return None
 
     @staticmethod
+    def _fetch_foreignaffairs_article(url, config, proxy_mode_override=None, custom_proxy_override=None):
+        """Fetch a Foreign Affairs article and strip its reading chrome.
+
+        Many Foreign Affairs essays are readable for free, but the page wraps the
+        body in paywall scaffolding: a "Subscribe to unlock this feature" tools
+        bar (Listen / Share / Print / Save), a share & citation modal that
+        repeats the headline and byline, and a "You are reading a free article"
+        subscription pitch. Readability keeps all of it, so drop those blocks
+        before extraction and record the free-access state for paywall detection.
+        """
+        logger.info(f"Fetching Foreign Affairs article: {url}")
+
+        req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        }
+
+        try:
+            response = _requests_get_with_system_trust_interruptibly(
+                url,
+                headers=headers,
+                proxies=req_proxies,
+                timeout=20,
+            )
+            response.raise_for_status()
+            html_content = Fetcher._decode_response_text(response)
+        except Exception as e:
+            logger.warning(f"Foreign Affairs requests fetch failed: {e}")
+            return None
+
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+            free_banner = soup.select_one(".paywall-free-article")
+            article = soup.select_one("article.article") or soup.select_one("article")
+            if article is None:
+                return html_content
+
+            # NOTE: ``.article__content-tools-wrapper`` is the *content* column
+            # (it also holds the tools bar and the share modal), so only the
+            # child blocks are removed here.
+            for element in article.select(
+                ".article-tools, .js--article-tools, "
+                ".js--modal, .wrapper__modal, "
+                ".paywall-free-article, .newsletter-signup, "
+                "[id^='js-dfp-tag'], .dfp-slot, .ad-slot"
+            ):
+                element.decompose()
+
+            # Tell the paywall detector the page is readable. The banner that
+            # carried this information has just been removed.
+            if free_banner is not None:
+                head = soup.find("head")
+                if head is not None and soup.find("meta", attrs={"name": "surf-free-article"}) is None:
+                    marker = soup.new_tag("meta")
+                    marker.attrs["name"] = "surf-free-article"
+                    marker.attrs["content"] = "true"
+                    head.append(marker)
+
+            return str(soup)
+        except Exception as e:
+            logger.warning(f"Foreign Affairs cleanup failed: {e}")
+            return html_content
+
+    @staticmethod
     def _fetch_wikipedia(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Wikipedia article with content optimization.
@@ -10832,11 +10898,13 @@ class Fetcher:
         "caixinglobal.com", "thepaper.cn", "jiemian.com",
         "wired.com",
     }
+    # Strong markers: an element that *is* a wall/overlay/gate. These are
+    # reliable even on a page that also contains real article text.
     _PAYWALL_CSS_PATTERNS = re.compile(
-        r"(paywall|paywall-content|paywall-overlay|paywall-banner|paywall-modal|"
+        r"(paywall-overlay|paywall-banner|paywall-modal|paywall-gate|paywall-lock|"
         r"metered-content|metered-paywall|meter-wall|meter_overlay|meter-modal|"
         r"article-blur|article-locked|article-gated|content-gate|content-locked|"
-        r"premium-content|premium-article|premium-wall|premium-gate|"
+        r"premium-wall|premium-gate|premium-locked|premium-lock|"
         r"subscriber-content|subscriber-only|subscriber-wall|subscription-wall|"
         r"register-wall|sign-in-wall|login-wall|login-required|"
         r"hard-paywall|soft-paywall|dynamic-paywall|regwall|reg-wall|"
@@ -10849,6 +10917,29 @@ class Fetcher:
         r"wall\.paywall|wall-paywall|content-gating)",
         re.IGNORECASE,
     )
+    # Weak/ambiguous markers. Some sites name the real article container
+    # ``paywall-content`` (Foreign Affairs) or add a bare ``paywall`` class to
+    # wrapper elements, so these only count when the extracted body is short.
+    _PAYWALL_CSS_WEAK_PATTERNS = re.compile(
+        r"(?<![\w-])(?:paywall(?:-content)?|premium(?:-content|-article)?)(?![\w-])",
+        re.IGNORECASE,
+    )
+    # Explicit "this page is readable" markers. These outrank the generic
+    # wall/text heuristics because the site itself tells us the article is free.
+    _FREE_CONTENT_CSS_PATTERNS = re.compile(
+        r"(paywall[-_ ]?free|free[-_]article|article[-_]free|free[-_]content|"
+        r"no[-_]paywall|paywall[-_]unlocked|unlocked[-_]article|unlocked[-_]content)",
+        re.IGNORECASE,
+    )
+    _FREE_CONTENT_TEXT_PATTERNS = [
+        re.compile(r"you\s+are\s+reading\s+(a|this)\s+free\s+article", re.IGNORECASE),
+        re.compile(r"this\s+(article|story|content|post)\s+is\s+(free|not\s+paywalled)", re.IGNORECASE),
+        re.compile(r"paywall[-\s]free\s+(reading|access)", re.IGNORECASE),
+        re.compile(r"no\s+paywall", re.IGNORECASE),
+    ]
+    # A paywall turns an article into a teaser; a long body means the page is
+    # readable, so generic markers should not dominate the decision.
+    _PAYWALL_SUBSTANTIAL_BODY_CHARS = 3000
     _PAYWALL_TEXT_PATTERNS = [
         re.compile(r"To\s+(continue\s+)?read(ing)?\s+(this\s+)?(article|story|content)", re.IGNORECASE),
         re.compile(r"Subscribe\s+(to|for|now)\s+(continue|read|unlock|access)", re.IGNORECASE),
@@ -11040,6 +11131,26 @@ class Fetcher:
 
         soup = BeautifulSoup(html_content, "html.parser")
 
+        # ── Extractable body length ──
+        # Measured up front because it decides how much weight the generic
+        # markers deserve: a long body means the reader actually got the text.
+        # Different selectors can point at different nodes (e.g. a tiny download
+        # card inside <article> and the real body inside <main>), so take the
+        # longest candidate instead of the first one.
+        body_text = ""
+        for sel in ("article", "[role='main']", "main",
+                    ".post-content", ".article-content", ".story-content",
+                    ".article-body", ".post-body", ".entry-content"):
+            for element in soup.select(sel):
+                candidate = element.get_text(" ", strip=True)
+                if len(candidate) > len(body_text):
+                    body_text = candidate
+        text_content = soup.get_text(" ", strip=True)
+        if not body_text:
+            body_text = text_content
+        body_len = len(body_text)
+        substantial_body = body_len >= Fetcher._PAYWALL_SUBSTANTIAL_BODY_CHARS
+
         # ── Anti-bot CAPTCHA on known domain ──
         if confidence >= 0.3:
             captcha_detected = False
@@ -11056,9 +11167,8 @@ class Fetcher:
                 if captcha_detected:
                     break
             if not captcha_detected:
-                text_raw = soup.get_text(" ", strip=True)
                 for ap in Fetcher._ANTI_BOT_TEXT_PATTERNS:
-                    if ap.search(text_raw):
+                    if ap.search(text_content):
                         captcha_detected = True
                         signals.append("anti-bot text pattern matched")
                         break
@@ -11087,44 +11197,50 @@ class Fetcher:
         # React's ``$tsr-stream-barrier``; they are not page content and must
         # never count as paywall markers.
         ignored_tags = {"script", "style", "noscript", "template", "meta", "link"}
-        paywall_elements = []
-        for element in soup.select(
-            "[class*='paywall'], [id*='paywall'], "
-            "[class*='metered'], [class*='meter-'], "
-            "[class*='register-wall'], [class*='sign-in-wall'], [class*='login-wall'], "
-            "[class*='content-gate'], [class*='content-locked'], "
-            "[class*='article-locked'], [class*='article-gated'], "
-            "[data-paywall], [data-metered], "
-            "[class*='tp-modal'], [class*='tp-container'], [class*='tp-backdrop'], "
-            "[class*='fc-ab-root'], [class*='fc-dialog'], "
-            "[class*='piano-paywall'], [class*='pelcro'], [class*='zephr']"
-        ):
-            if element.name not in ignored_tags:
-                paywall_elements.append(element)
+        wall_elements = []
+        weak_elements = []
+        free_elements = []
         for tag in soup.find_all(True):
             if tag.name in ignored_tags:
                 continue
-            cls = (tag.get("class") or [])
+            cls = tag.get("class") or []
             cls_str = " ".join(cls) if isinstance(cls, list) else str(cls)
-            elem_id = str(tag.get("id") or "")
-            if Fetcher._PAYWALL_CSS_PATTERNS.search(f"{cls_str} {elem_id}"):
-                if tag not in paywall_elements:
-                    paywall_elements.append(tag)
-        if paywall_elements:
-            signals.append(f"paywall CSS elements: {len(paywall_elements)} found")
+            marker = f"{cls_str} {tag.get('id') or ''}"
+            if not marker.strip():
+                continue
+            if Fetcher._FREE_CONTENT_CSS_PATTERNS.search(marker):
+                free_elements.append(tag)
+            elif Fetcher._PAYWALL_CSS_PATTERNS.search(marker):
+                wall_elements.append(tag)
+            elif Fetcher._PAYWALL_CSS_WEAK_PATTERNS.search(marker):
+                weak_elements.append(tag)
+
+        if wall_elements:
+            signals.append(f"paywall CSS elements: {len(wall_elements)} found")
             confidence += 0.50
+        if weak_elements and not substantial_body:
+            # Ambiguous markers only matter while the body still looks like a
+            # teaser, otherwise they are just container naming (Foreign Affairs
+            # calls the real article body ``paywall-content``).
+            signals.append(f"ambiguous paywall CSS: {len(weak_elements)} found")
+            confidence += 0.15
 
         # ── Paywall text snippets ──
-        text_content = soup.get_text(" ", strip=True).lower()
         text_matches = 0
         for pattern in Fetcher._PAYWALL_TEXT_PATTERNS:
-            if pattern.search(text_content):
+            if pattern.search(text_content.lower()):
                 text_matches += 1
-        if text_matches >= 2:
+        if text_matches and substantial_body:
+            # Long, readable bodies usually carry these strings inside toolbars
+            # ("Subscribe to unlock this feature", "Already a subscriber? Sign
+            # in"), so they are weak evidence at best.
+            signals.append(f"paywall text patterns (readable body): {text_matches} matched")
+            confidence += 0.10
+        elif text_matches >= 2:
             signals.append(f"paywall text patterns: {text_matches} matched")
             confidence += 0.35
         elif text_matches == 1:
-            signals.append(f"paywall text pattern: 1 matched")
+            signals.append("paywall text pattern: 1 matched")
             confidence += 0.20
 
         # ── Meta tag keywords ──
@@ -11145,39 +11261,52 @@ class Fetcher:
         # metered/locked article typically serves only a short teaser. On known
         # domains we weight it heavily enough to trigger the archive.is fallback
         # even when no other paywall marker is present.
-        if confidence >= 0.3:
-            # Different selectors can point at different nodes (e.g. a tiny
-            # download card inside <article> and the real body inside <main>).
-            # Use the longest candidate so a small side card is not mistaken
-            # for paywall-truncated article content.
-            article_text = ""
-            for sel in ("article", "[role='main']", "main",
-                        ".post-content", ".article-content", ".story-content",
-                        ".article-body", ".post-body"):
-                for article_el in soup.select(sel):
-                    candidate = article_el.get_text(" ", strip=True)
-                    if len(candidate) > len(article_text):
-                        article_text = candidate
-            if not article_text:
-                article_text = text_content
-            if len(article_text) < 800:
-                signals.append(f"truncated content: {len(article_text)} chars")
-                confidence += 0.30 if known_paywall_domain else 0.15
+        if confidence >= 0.3 and body_len < 800:
+            signals.append(f"truncated content: {body_len} chars")
+            confidence += 0.30 if known_paywall_domain else 0.15
 
         # ── Explicit free-content signals ──
-        # Some sites (e.g. Wired) mark articles as free via meta tags.
-        # Respect these to avoid false positives on mixed free/paid domains.
+        # Sites sometimes state outright that the current page is readable,
+        # either through meta tags (Wired's article:content_tier=free), CSS
+        # classes (Foreign Affairs' "paywall-free-article" banner) or a visible
+        # notice. Respect these: mixed free/paid domains otherwise look like
+        # paywalls because of their shared paywall scaffolding.
+        free_signal = None
+        free_signal_is_authoritative = False
         for meta in soup.find_all("meta"):
             prop = (meta.get("property") or meta.get("name") or "").lower()
             content = (meta.get("content") or "").lower()
             if prop == "article:content_tier" and content in ("free", "non-subscriber", "non-subscription"):
-                signals.append(f"explicit free tier: {prop}={content}")
-                confidence -= 0.60
+                free_signal = f"explicit free tier: {prop}={content}"
+                free_signal_is_authoritative = True
                 break
             if prop == "article:access" and content == "public":
-                signals.append(f"explicit free tier: {prop}={content}")
-                confidence -= 0.60
+                free_signal = f"explicit free tier: {prop}={content}"
+                free_signal_is_authoritative = True
                 break
+            if prop == "surf-free-article" and content == "true":
+                free_signal = "explicit free article markup"
+                free_signal_is_authoritative = True
+                break
+        if not free_signal and free_elements:
+            marker = free_elements[0].get("class") or free_elements[0].get("id")
+            free_signal = f"explicit free-content element: {marker}"
+        if not free_signal:
+            lowered = text_content.lower()
+            for pattern in Fetcher._FREE_CONTENT_TEXT_PATTERNS:
+                match = pattern.search(lowered)
+                if match:
+                    free_signal = f"explicit free-content text: {match.group(0)!r}"
+                    break
+        if free_signal:
+            signals.append(free_signal)
+            # A visible "free article" notice is only trustworthy when the body
+            # really is there; a short teaser carrying a stray free badge must
+            # not disable the paywall path. Meta tags are authoritative.
+            if free_signal_is_authoritative or substantial_body:
+                confidence -= 0.60
+            else:
+                confidence -= 0.20
 
         detected = confidence >= 0.50
         return {
@@ -12002,6 +12131,17 @@ SPECIAL_SITE_HANDLERS = {
         ],
         "handler": Fetcher._fetch_bbc,
         "default_no_proxy": True,
+    },
+    "foreignaffairs": {
+        # Article URLs are /<region-or-section>/<slug>, e.g.
+        # /china/empires-artificial-intelligence-niall-ferguson-eric-schmidt
+        # Listing pages (authors, topics, regions, tags, issues, ...) are skipped.
+        "patterns": [
+            r"^https?://(www\.)?foreignaffairs\.com/"
+            r"(?!(?:authors|topics|regions|tags|issues|user|subscribe|search)/)"
+            r"[a-z0-9-]+/[a-z0-9-]+",
+        ],
+        "handler": Fetcher._fetch_foreignaffairs_article,
     },
 }
 
@@ -14364,9 +14504,11 @@ class OutputHandler:
             search_query: Search keywords that produced this document (default: None)
             filename_prefix: Prefix prepended to the generated filename (default: "")
         """
+        # Only touch the configured directory when it is actually the target;
+        # an explicit -o path must keep working even if md_dir is not writable.
         md_dir = config.get_path("Output", "md_dir", fallback="./notes")
-        if not os.path.exists(md_dir):
-            os.makedirs(md_dir)
+        if not output_path and not os.path.exists(md_dir):
+            os.makedirs(md_dir, exist_ok=True)
 
         filename_title = OutputHandler._get_filename_title(title, source_url=source_url, html_content=html_content)
         if filename_prefix:
@@ -15370,9 +15512,11 @@ class OutputHandler:
             base_url: Base URL for converting relative URLs (used when inline=False)
             filename_prefix: Prefix prepended to the generated filename (default: "")
         """
+        # Only touch the configured directory when it is actually the target;
+        # an explicit -o path must keep working even if html_dir is not writable.
         html_dir = config.get_path("Output", "html_dir", fallback=".")
-        if not os.path.exists(html_dir):
-            os.makedirs(html_dir)
+        if not output_path and not os.path.exists(html_dir):
+            os.makedirs(html_dir, exist_ok=True)
 
         # Sanitize filename
         safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=100)
@@ -17113,401 +17257,383 @@ def main():
     _install_interrupt_handler()
     parser = argparse.ArgumentParser(
         prog="uv run surf",
-        description="Surf - Convert URL or local file to Markdown/PDF/HTML/Audio",
+        usage="%(prog)s [options] <url|path|keywords>",
+        description=(
+            "Surf - turn a web page, a local file, or a search query into a clean document.\n"
+            "Fetch, strip clutter, optionally translate, then write Markdown, HTML, PDF,\n"
+            "audio, or a Pastebin post."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
         epilog="""
-Examples:
-  surf https://example.com                      # Translate to Chinese
-  surf -p https://example.com                   # Generate PDF
-  surf -h https://example.com                   # Save as HTML
-  surf -a https://example.com                   # Save as audio
-  surf -r https://example.com                   # Keep original language
-  surf -b https://example.com                   # Bilingual output
-  surf -x win https://example.com               # Use Windows proxy
-  surf -x env https://example.com               # Use proxy from environment variables
-  surf -c http://127.0.0.1:7890 https://example.com
-  surf -n https://example.com                   # No proxy
-  surf -hrn https://example.com                 # Combined short flags
-  surf -t https://x.com/user/status/123         # Fetch later replies in the thread
-  surf --thread before https://x.com/user/status/123
-  surf --thread both --thread-author same https://x.com/user/status/123
+examples:
+  convert
+    surf https://example.com                  page -> Markdown, translated to Chinese
+    surf https://example.com -r               keep the original language
+    surf https://example.com -b               bilingual (original + translation)
+    surf https://example.com -h               save HTML instead of Markdown
+    surf https://example.com -p               render a PDF
+    surf https://example.com -a               text-to-speech audio
+    surf https://example.com -P               publish to Pastebin
+    surf https://example.com -o ~/notes/a.md  write to an explicit path
+    surf https://example.com -O               print Markdown to stdout
+    surf "分享文案 https://x.com/..."          the first URL inside pasted text is used
+    surf -hrn https://example.com             combined short flags (-h -r -n)
 
-Extractor:
-  surf -e trafilatura https://example.com        # Use Trafilatura extraction
-  surf -T https://example.com                    # Shorthand for trafilatura
-  surf -e readability https://example.com        # Use Readability only
-  surf -R https://example.com                    # Shorthand for readability
-  surf -e raw https://example.com                # Skip extraction, return original HTML
-  surf -U https://example.com                    # Shorthand for raw
+  local input
+    surf ~/docs/article.html                  HTML, Markdown, text, local PDF
+    surf file:///tmp/article.html             file:// URI
+    surf ~/docs/paper.pdf -p                  keep the original PDF unchanged
 
-Search:
-  surf -S "asyncio tutorial"                    # Search, pick results interactively, then fetch/save
-  surf -S "asyncio tutorial" --search-top 3     # Save the first 3 results without prompting
-  surf -S "asyncio tutorial" --feel-lucky       # Save only the first result
-  surf -S "asyncio tutorial" --search-merge     # Save the selected results as one merged file
-  surf -S "asyncio tutorial" --search-prefix "asyncio-"
-  surf -S "asyncio tutorial" --search-engine bing --search-limit 10
+  search
+    surf -S "python asyncio tutorial"         search, then pick results interactively
+    surf -S "python asyncio" --search-top 3   save the first 3 hits without prompting
+    surf -S "python asyncio" --feel-lucky     save only the first hit
+    surf -S "python asyncio" --search-merge   save all selected hits as one document
+    surf -S "python asyncio" --search-prefix asyncio --search-engine bing
 
-TTS:
-  surf -a https://example.com                    # Save as audio
-  surf -a https://example.com --tts-voice en-US-AriaNeural
-  surf -a https://example.com --tts-rate +10% --tts-volume -20%
+  social threads
+    surf -t https://x.com/user/status/123     also fetch later posts in the thread
+    surf --thread before https://x.com/user/status/123
+    surf --thread both --thread-author same https://x.com/user/status/123
 
-Local Files:
-  surf /tmp/article.html                        # Read local HTML file
-  surf ~/docs/readme.md                         # Read local Markdown file
-  surf C:\\Temp\\notes.txt                      # Windows path
-  surf file:///tmp/article.html                 # file:// URI
-  surf /tmp/article.md -r                       # Local file, keep original language
-  surf /tmp/article.html -p                     # Local HTML to PDF
-  surf ~/docs/paper.pdf                         # Extract text from a local PDF
-  surf ~/docs/paper.pdf -p                      # Copy the local PDF unchanged
+  authentication
+    surf --login xiaohongshu                  interactive login (needs a desktop session)
+    surf --export-auth xiaohongshu state.json
+    surf --import-auth xiaohongshu state.json
+    surf --set-cf-clearance example.com "cf_clearance=VALUE"
 
-PDF URLs:
-  surf https://example.com/paper.pdf            # Extract text, then save Markdown
-  surf https://example.com/paper.pdf -h         # Extract text, then save HTML
-  surf https://example.com/paper.pdf -p         # Download and keep the original PDF
-  PDF text extraction uses pypdf. Scanned/image-only PDFs are not OCR'd;
-  use -p to save the original file instead. If a .pdf host is unreachable,
-  Surf retries with a Wayback Machine snapshot when one exists.
+behaviour notes:
+  formats        -f md|html|pdf|audio|publish; -p on a PDF URL keeps the original
+                 file, every other format uses the extracted text.
+  language       -l trans|raw|both; "trans" is the default and only runs when the
+                 detected language differs from the target.
+  proxy          env (environment variables), win (Windows Internet Settings),
+                 custom (--set-proxy or [Network] custom_proxy), no. Without a
+                 flag the CLI resolves a proxy implicitly; the Web UI starts at no.
+  site defaults  WeChat, Zhihu, Xiaohongshu, NCPSSD, V2EX and BBC default to no
+                 proxy and no translation; Xiaohongshu also enables image OCR.
+                 Twitter/X, Bluesky, Weibo and Threads default to --thread after
+                 with --thread-author all. Every default can be overridden by an
+                 explicit flag.
+  podcasts       -a saves the original episode audio; -w transcribes it locally
+                 (needs [Transcription] model_path and ffmpeg).
+  failures       A URL that cannot be fetched, converted, or saved is written to
+                 [Output] md_dir as 获取失败_<title>.md so you can retry it later.
+  config         ./config.ini, then $XDG_CONFIG_HOME/surf/config.ini
+                 (default ~/.config/surf/config.ini).
+  web ui         uv run python surf_web.py --host 127.0.0.1 --port 18473
+  docs           README.md (English) / README_zh.md (中文)
+                 SPECIAL_SITES.md / SPECIAL_SITES_zh.md for per-site rules
 
-Special Sites:
-  WeChat & Xiaohongshu: Default to no proxy and no translation.
-                        Override with -x/--proxy and -l/--lang if needed.
-  Twitter/X:           Uses the same proxy order as Surf.
-                        If the proxy path fails, Surf retries direct access automatically.
-                        Default backend prefers `uvx --from twitter-cli twitter`.
-                        `auto` backend tries CLI first, then native fallback.
-  Twitter/X, Bluesky, Weibo, Threads: thread expansion defaults to `after`
-                        with `--thread-author all`.
-  Twitter/X, Bluesky, Weibo, Threads: short-post titles and default filenames
-                        use `First sentence - Author on Site`.
-  Pocket Casts, Xiaoyuzhou:
-                        `-w/--transcribe` downloads the episode audio and
-                        transcribes it locally with transcribe.cpp. Configure
-                        `[Transcription].model_path` with a GGUF model file.
-                        Transcripts are plain paragraphs by default; pass
-                        `--transcript-timestamps segment` for `[HH:MM:SS]`
-                        prefixes (config: `[Transcription].timestamps`).
-
-Authentication:
-  surf --login xiaohongshu                   # Login to Xiaohongshu
-  surf --export-auth xiaohongshu STATE.json  # Export saved auth state
-  surf --import-auth xiaohongshu STATE.json  # Import auth state on another machine
-  surf --login ncpssd                        # Login to NCPSSD (for full-text PDF download)
-  surf --login twitter                       # Login to Twitter/X
-  surf --login reddit                        # Login to Reddit
-  surf --login douban                        # Login to Douban
-  surf --clear-auth xiaohongshu              # Clear auth for Xiaohongshu
-  surf --clear-auth ncpssd                   # Clear auth for NCPSSD
-  surf --clear-auth twitter                  # Clear auth for Twitter/X
-  surf --clear-auth reddit                   # Clear auth for Reddit
-  surf --clear-auth douban                   # Clear auth for Douban
-
-OCR:
-  surf --ocr URL                             # Run local OCR on article images
-  surf --ocr /path/to/image.png              # OCR a local image directly
-  surf --no-ocr URL                          # Disable OCR, including Xiaohongshu default
-  surf --ocr-engine rapidocr URL             # Prefer RapidOCR, fallback to Tesseract
-  surf --ocr-engine tesseract URL            # Force Tesseract only
-  surf --ocr-engine paddleocr URL            # Force PaddleOCR only
-  Xiaohongshu:                              OCR on images is enabled by default
-
-Twitter/X Backend:
-  surf --twitter-backend cli URL             # Prefer uvx --from twitter-cli twitter
-  surf --twitter-backend auto URL            # CLI first, then native fallback
-  surf --twitter-browser chrome URL          # Prefer Chrome cookies for twitter-cli
-
-Browser Backend:
-  surf -B auto URL                           # Follow [Browser] backend from config (default)
-  surf -B obscura URL                        # Force the Obscura headless backend
-  surf -B playwright URL                     # Force the Playwright backend
-        """,
+Exit status is 0 on success and non-zero when the input could not be processed.
+""",
     )
-    # Position argument
-    parser.add_argument(
+
+    # ---------------------------------------------------------------- input
+    group = parser.add_argument_group("input")
+    group.add_argument(
         "url",
         nargs="?",
-        help="URL, local file path, image path to process (supports http(s)://, file://, OS paths; --ocr with image paths enables direct OCR), or search keywords when -S/--search is used. Not required for auth-management commands.",
+        help="URL, local file path, image path, or search keywords when -S/--search is "
+        "used. Accepts http(s)://, file://, OS paths and Windows-style paths. Not "
+        "required for the --login/--export-auth/--import-auth/--clear-auth commands.",
     )
 
-    # Output format
-    format_group = parser.add_mutually_exclusive_group()
-    format_group.add_argument(
+    # --------------------------------------------------------------- output
+    group = parser.add_argument_group("output")
+    group.add_argument(
         "-f",
         "--format",
         choices=["md", "pdf", "html", "audio", "publish"],
-        help="Output format: md/pdf/html/audio/publish (default: md). For a PDF URL, "
-        "pdf keeps the original file while other formats use extracted text",
+        help="Output format (default: md)",
     )
-    format_group.add_argument("-h", action="store_true", help="Shorthand for --format html")
-    format_group.add_argument("-p", action="store_true", help="Shorthand for --format pdf")
-    format_group.add_argument("-a", action="store_true", help="Shorthand for --format audio")
-    format_group.add_argument("-P", action="store_true", help="Shorthand for --format publish")
-
-    # Output path
-    parser.add_argument(
+    group.add_argument("-h", action="store_true", help="HTML instead of Markdown (same as -f html)")
+    group.add_argument("-p", action="store_true", help="PDF instead of Markdown (same as -f pdf)")
+    group.add_argument("-a", action="store_true", help="Audio instead of Markdown (same as -f audio)")
+    group.add_argument("-P", action="store_true", help="Publish instead of saving (same as -f publish)")
+    group.add_argument(
         "-o",
         "--output",
-        help="Output file path (use '-' for stdout, overrides config; on Windows, accepts '~/Note' and '/' and maps '~' to %%USERPROFILE%%)",
+        help="Output file path; overrides the configured directory. Use '-' for stdout. "
+        "On Windows, '~/...' and '/' are mapped into %%USERPROFILE%%.",
     )
-    parser.add_argument("-O", action="store_true", help="Shorthand for --output - (output to stdout)")
+    group.add_argument("-O", action="store_true", help="Print to stdout (same as -o -)")
+    group.add_argument(
+        "--html-inline",
+        action="store_true",
+        help="Inline CSS/JS into the HTML output (default: [Output] html_inline)",
+    )
+    group.add_argument(
+        "--no-front-matter",
+        action="store_true",
+        help="Omit YAML front matter from Markdown (default: [Output] no_front_matter)",
+    )
+    group.add_argument(
+        "--archive",
+        action="store_true",
+        help="Submit the final source URL to the Wayback Machine and record the snapshot "
+        "in front matter (default: [Output] archive)",
+    )
 
-    # Language mode
-    lang_group = parser.add_mutually_exclusive_group()
-    lang_group.add_argument(
+    # --------------------------------------------------- language and audio
+    group = parser.add_argument_group("language and audio")
+    group.add_argument(
         "-l",
         "--lang",
         choices=["trans", "raw", "both"],
-        help="Language mode: trans=translate, raw=original, both=bilingual (default: trans)",
+        help="trans = translate (default), raw = original, both = bilingual",
     )
-    lang_group.add_argument("-r", action="store_true", help="Shorthand for --lang raw")
-    lang_group.add_argument("-b", action="store_true", help="Shorthand for --lang both")
-
-    # TTS
-    parser.add_argument("-s", "--speak", action="store_true", help="Speak the content")
-    parser.add_argument(
+    group.add_argument("-r", action="store_true", help="Keep the original language (same as -l raw)")
+    group.add_argument("-b", action="store_true", help="Bilingual output (same as -l both)")
+    group.add_argument("--llm", help="LLM provider to use for this run (case-insensitive)")
+    group.add_argument("-s", "--speak", action="store_true", help="Read the result aloud")
+    group.add_argument(
         "--tts-voice",
-        help="Override [TTS] voice for this run (edge-tts voice name, e.g. zh-CN-XiaoxiaoNeural)",
+        help="edge-tts voice for this run, e.g. zh-CN-XiaoxiaoNeural (default: [TTS] voice)",
     )
-    parser.add_argument(
-        "--tts-rate",
-        help="Override [TTS] rate for this run (e.g. +10%%, -10%%)",
-    )
-    parser.add_argument(
-        "--tts-volume",
-        help="Override [TTS] volume for this run (e.g. +10%%, -10%%)",
-    )
-
-    # Authentication
-    parser.add_argument(
-        "--login",
-        metavar="SITE",
-        help="Interactive login for a site (e.g., xiaohongshu, twitter/x, reddit, zhihu, douban, ncpssd). Opens a browser for manual login on machines with a desktop session.",
-    )
-    parser.add_argument(
-        "--clear-auth",
-        metavar="SITE",
-        help="Clear saved authentication for a site (use 'all' to clear all)",
-    )
-    # Cloudflare cookies
-    parser.add_argument(
-        "--set-cf-clearance",
-        nargs=2,
-        metavar=("DOMAIN", "COOKIE"),
-        help="Set Cloudflare cf_clearance cookie for a domain (e.g., --set-cf-clearance example.com 'cf_clearance=VALUE')",
-    )
-    parser.add_argument(
-        "--clear-cf-clearance",
-        metavar="DOMAIN",
-        help="Clear Cloudflare cookies for a domain (use 'all' to clear all)",
-    )
-    parser.add_argument(
-        "--export-auth",
-        nargs=2,
-        metavar=("SITE", "FILE"),
-        help="Export saved authentication state to a JSON file for transfer to another machine",
-    )
-    parser.add_argument(
-        "--import-auth",
-        nargs=2,
-        metavar=("SITE", "FILE"),
-        help="Import authentication state from a JSON file exported on another machine",
-    )
-    parser.add_argument(
-        "--twitter-backend",
-        choices=["auto", "cli", "native"],
-        help="Twitter/X backend: cli=prefer uvx --from twitter-cli twitter, auto=CLI first then native fallback, native=surf built-in only",
-    )
-    parser.add_argument(
-        "--twitter-cli-bin",
-        help="Deprecated; ignored because Surf always invokes uvx --from twitter-cli twitter",
-    )
-    parser.add_argument(
-        "--twitter-browser",
-        choices=["arc", "chrome", "edge", "firefox", "brave"],
-        help="Preferred browser cookie source for twitter-cli",
-    )
-    parser.add_argument(
-        "--twitter-profile",
-        help="Preferred browser profile for twitter-cli (for example: Default or Profile 2)",
-    )
-
-    # HTML options
-    parser.add_argument("--html-inline", action="store_true", help="Inline CSS/JS in HTML output (default: [Output] html_inline from config)")
-
-    ocr_group = parser.add_mutually_exclusive_group()
-    ocr_group.add_argument(
-        "--ocr",
-        action="store_true",
-        help="Run local OCR on article images; also enables direct OCR when followed by a local image path",
-    )
-    ocr_group.add_argument(
-        "--no-ocr",
-        action="store_true",
-        help="Disable image OCR, including sites that enable it by default",
-    )
-    parser.add_argument(
-        "--ocr-lang",
-        help="OCR language(s) for Tesseract OCR, e.g. chi_sim+eng",
-    )
-    parser.add_argument(
-        "--ocr-engine",
-        choices=["rapidocr", "tesseract", "paddleocr", "auto"],
-        help="OCR engine: auto (default; paddleocr > rapidocr > tesseract), paddleocr, rapidocr, tesseract",
-    )
-    parser.add_argument(
-        "-e",
-        "--extractor",
-        choices=["auto", "readability", "trafilatura", "raw"],
-        help="Content extractor: auto=readability then trafilatura fallback, readability=Readability only, "
-        "trafilatura=Trafilatura only, raw=skip extraction (default: [Content] extractor from config, auto)",
-    )
-    parser.add_argument("-R", action="store_true", help="Shorthand for --extractor readability")
-    parser.add_argument("-T", action="store_true", help="Shorthand for --extractor trafilatura")
-    parser.add_argument("-U", action="store_true", help="Shorthand for --extractor raw")
-
-    # Network
-    proxy_choices = ["env", "custom", "no"]
-    if Fetcher._is_windows():
-        proxy_choices.insert(1, "win")
-    parser.add_argument(
-        "-x",
-        "--proxy",
-        choices=proxy_choices,
-        help="Proxy mode: env=environment vars, custom=use --set-proxy or config custom_proxy, no=no proxy"
-        + (", win=Windows Internet Settings" if Fetcher._is_windows() else ""),
-    )
-    parser.add_argument(
-        "-c",
-        nargs="?",
-        const="",
-        metavar="PROXY",
-        help="Shorthand for --proxy custom; optionally provide PROXY to override config custom_proxy",
-    )
-    parser.add_argument("-n", action="store_true", help="Shorthand for --proxy no")
-    parser.add_argument("--set-proxy", help="Custom proxy URL for --proxy custom (overrides config custom_proxy)")
-
-    # LLM
-    parser.add_argument("--llm", help="Override the default LLM provider (case-insensitive)")
-
-    # Podcast transcription
-    parser.add_argument(
+    group.add_argument("--tts-rate", help="Speech rate, e.g. +10%% or -10%% (default: [TTS] rate)")
+    group.add_argument("--tts-volume", help="Speech volume, e.g. +10%% (default: [TTS] volume)")
+    group.add_argument(
         "-w",
         "--transcribe",
         action="store_true",
-        help="Transcribe a Pocket Casts or Xiaoyuzhou episode locally with transcribe.cpp (requires [Transcription].model_path)",
+        help="Transcribe a Pocket Casts or Xiaoyuzhou episode locally with transcribe.cpp "
+        "(needs [Transcription] model_path)",
     )
-    parser.add_argument(
+    group.add_argument(
         "--transcript-timestamps",
         choices=["none", "segment"],
-        help="Transcript timestamp style for -w/--transcribe: segment=[HH:MM:SS] per line, none=plain paragraphs (default: [Transcription].timestamps, none)",
+        help="Transcript timestamps for -w: segment = [HH:MM:SS] per line, none = plain "
+        "paragraphs (default: [Transcription] timestamps)",
     )
 
-    # Other options
-    parser.add_argument(
+    # -------------------------------------------------------- extraction
+    group = parser.add_argument_group("content extraction and rendering")
+    group.add_argument(
+        "-e",
+        "--extractor",
+        choices=["auto", "readability", "trafilatura", "raw"],
+        help="auto = Readability then Trafilatura fallback (default), readability = "
+        "Readability only, trafilatura = Trafilatura only, raw = skip extraction",
+    )
+    group.add_argument("-R", action="store_true", help="Readability only (same as -e readability)")
+    group.add_argument("-T", action="store_true", help="Trafilatura only (same as -e trafilatura)")
+    group.add_argument("-U", action="store_true", help="Keep the original HTML (same as -e raw)")
+    group.add_argument(
         "--browser",
         action="store_true",
-        help="Force browser rendering (headless backend follows -B/--browser-backend or [Browser] backend)",
+        help="Always render through a headless browser instead of plain HTTP",
     )
-    parser.add_argument(
+    group.add_argument(
         "-B",
         "--browser-backend",
         choices=["auto", "obscura", "playwright"],
         default="auto",
-        help="Headless browser backend: auto=follow [Browser] backend from config (default), obscura, playwright",
+        help="Headless backend: auto = follow [Browser] backend (default), obscura, playwright",
     )
-    thread_group = parser.add_mutually_exclusive_group()
+
+    # ------------------------------------------------------------- network
+    proxy_choices = ["env", "custom", "no"]
+    if Fetcher._is_windows():
+        proxy_choices.insert(1, "win")
+    group = parser.add_argument_group("network")
+    group.add_argument(
+        "-x",
+        "--proxy",
+        choices=proxy_choices,
+        help="env = http_proxy/https_proxy, custom = --set-proxy or [Network] custom_proxy, "
+        "no = direct connection" + (", win = Windows Internet Settings" if Fetcher._is_windows() else ""),
+    )
+    group.add_argument(
+        "-c",
+        nargs="?",
+        const="",
+        metavar="PROXY",
+        help="Use a custom proxy (same as -x custom); the optional value overrides the "
+        "configured custom_proxy",
+    )
+    group.add_argument("-n", action="store_true", help="Bypass any proxy (same as -x no)")
+    group.add_argument(
+        "--set-proxy",
+        help="Proxy URL for -x custom, overriding [Network] custom_proxy",
+    )
+
+    # ------------------------------------------------------------- threads
+    group = parser.add_argument_group("threads and social sites")
+    thread_group = group.add_mutually_exclusive_group()
     thread_group.add_argument(
         "-t",
         "--thread",
         nargs="?",
         const="after",
         choices=["after", "before", "both", "off"],
-        help="Thread range: after=later posts (default), before=earlier posts, both=both directions, off=disabled",
+        help="Thread range: after = later posts (default when enabled), before = earlier "
+        "posts, both = both directions, off = disabled. V2EX uses it to include replies.",
     )
     thread_group.add_argument(
         "--no-thread",
         action="store_true",
         help="Disable thread expansion for supported social sites",
     )
-    parser.add_argument(
+    group.add_argument(
         "--thread-author",
         choices=["same", "all"],
         default="all",
-        help="Thread author scope: all=all authors (default), same=only the current post author",
+        help="Thread author scope: all = every author (default), same = current post author only",
     )
-    parser.add_argument(
-        "--config",
-        help="Path to config file (on Windows, accepts '~/Note' and '/' and maps '~' to %%USERPROFILE%%)",
+    group.add_argument(
+        "--twitter-backend",
+        choices=["auto", "cli", "native"],
+        help="Twitter/X backend: cli = prefer uvx --from twitter-cli twitter, auto = CLI "
+        "then native fallback, native = Surf built-in only",
     )
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument(
-        "--no-front-matter",
+    group.add_argument(
+        "--twitter-cli-bin",
+        help="Deprecated and ignored; Surf always runs uvx --from twitter-cli twitter",
+    )
+    group.add_argument(
+        "--twitter-browser",
+        choices=["arc", "chrome", "edge", "firefox", "brave"],
+        help="Browser to read cookies from for twitter-cli",
+    )
+    group.add_argument(
+        "--twitter-profile",
+        help="Browser profile for twitter-cli, e.g. Default or 'Profile 2'",
+    )
+
+    # ----------------------------------------------------------------- OCR
+    group = parser.add_argument_group("image OCR")
+    ocr_group = group.add_mutually_exclusive_group()
+    ocr_group.add_argument(
+        "--ocr",
         action="store_true",
-        help="Disable YAML front matter in markdown output (default: [Output] no_front_matter from config)",
+        help="Run local OCR on article images; with a local image path it OCRs that file directly",
     )
-    parser.add_argument(
-        "--archive",
+    ocr_group.add_argument(
+        "--no-ocr",
         action="store_true",
-        help="Save the final source URL to the Wayback Machine and write the snapshot URL to front matter (default: [Output] archive from config)",
+        help="Disable OCR even on sites that enable it by default",
     )
-    # Search
-    parser.add_argument(
+    group.add_argument(
+        "--ocr-engine",
+        choices=["rapidocr", "tesseract", "paddleocr", "auto"],
+        help="auto = paddleocr > rapidocr > tesseract (default), or force one engine",
+    )
+    group.add_argument("--ocr-lang", help="Tesseract language(s), e.g. chi_sim+eng")
+
+    # -------------------------------------------------------------- search
+    group = parser.add_argument_group("keyword search (-S/--search)")
+    group.add_argument(
         "-S",
         "--search",
         action="store_true",
-        help="Treat the positional input as search keywords: run a web search, then fetch, convert, and save the selected results",
+        help="Treat the positional input as keywords: search, then fetch, convert, and save "
+        "the selected results",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-engine",
         choices=list(SearchHandler.ENGINE_CHOICES),
-        help="Search engine for -S/--search: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso), duckduckgo, bing, searxng, metaso, deepseek (config: [Search] engine)",
+        help="auto = DuckDuckGo, then Bing, then the configured DeepSeek/SearXNG/Metaso; or "
+        "force one engine (default: [Search] engine)",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-limit",
         type=int,
         metavar="N",
-        help=f"Number of search results to retrieve and offer with -S/--search (default: [Search] limit from config, {SearchHandler.DEFAULT_LIMIT}; max {SearchHandler.MAX_LIMIT})",
+        help=f"Results to retrieve (default: [Search] limit, {SearchHandler.DEFAULT_LIMIT}; "
+        f"max {SearchHandler.MAX_LIMIT})",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-preview",
         type=int,
         metavar="N",
-        help=f"Number of results to print in the interactive picker (default: [Search] preview from config, {SearchHandler.DEFAULT_PREVIEW})",
+        help=f"Results shown in the interactive picker (default: [Search] preview, "
+        f"{SearchHandler.DEFAULT_PREVIEW})",
     )
-    search_auto_group = parser.add_mutually_exclusive_group()
+    search_auto_group = group.add_mutually_exclusive_group()
     search_auto_group.add_argument(
         "--search-top",
         type=int,
         metavar="N",
-        help="Skip the interactive picker and save the first N results",
+        help="Skip the picker and save the first N results",
     )
     search_auto_group.add_argument(
         "--feel-lucky",
         action="store_true",
-        help="Skip the interactive picker and save only the first search result",
+        help="Skip the picker and save only the first result",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-merge",
         action="store_true",
-        help="Save all selected search results as one merged document instead of one file per result",
+        help="Save all selected results as one merged document instead of one file per result",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-prefix",
         metavar="PREFIX",
-        help="Prefix for filenames generated by -S/--search (default: the search keywords; truncated to 40 chars). Files are named '[<prefix>]<title>' and no search subdirectory is created",
+        help="Filename prefix for saved results, written as '[<prefix>]<title>'. Defaults to "
+        "the search keywords (truncated to 40 characters).",
     )
-    parser.add_argument(
+    group.add_argument(
         "--search-delay",
         type=float,
         metavar="SECONDS",
         default=None,
-        help="Delay between fetching consecutive search results in seconds (default: 0)",
+        help="Wait this long between fetching consecutive results (default: 0)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--help", action="help", help="Show this help message")
+
+    # ---------------------------------------------------- authentication
+    group = parser.add_argument_group("authentication and cookies")
+    group.add_argument(
+        "--login",
+        metavar="SITE",
+        help="Interactive login (xiaohongshu, twitter, reddit, zhihu, douban, ncpssd). "
+        "Needs a desktop session.",
+    )
+    group.add_argument(
+        "--clear-auth",
+        metavar="SITE",
+        help="Delete saved authentication for a site, or 'all'",
+    )
+    group.add_argument(
+        "--export-auth",
+        nargs=2,
+        metavar=("SITE", "FILE"),
+        help="Write a site's saved authentication state to a JSON file",
+    )
+    group.add_argument(
+        "--import-auth",
+        nargs=2,
+        metavar=("SITE", "FILE"),
+        help="Load authentication state from a JSON file exported elsewhere",
+    )
+    group.add_argument(
+        "--set-cf-clearance",
+        nargs=2,
+        metavar=("DOMAIN", "COOKIE"),
+        help="Store a Cloudflare cf_clearance cookie for a domain",
+    )
+    group.add_argument(
+        "--clear-cf-clearance",
+        metavar="DOMAIN",
+        help="Delete stored Cloudflare cookies for a domain, or 'all'",
+    )
+
+    # --------------------------------------------------------- diagnostics
+    group = parser.add_argument_group("runtime")
+    group.add_argument(
+        "--config",
+        help="Config file to use instead of the default lookup. On Windows, '~/...' and "
+        "'/' are mapped into %%USERPROFILE%%.",
+    )
+    group.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    group.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show the Surf version and exit",
+    )
+    group.add_argument("--help", action="help", help="Show this help message and exit")
 
     args = parser.parse_args(_normalize_thread_argv(sys.argv[1:]))
     _raise_if_interrupted()

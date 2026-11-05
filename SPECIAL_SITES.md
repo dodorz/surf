@@ -22,7 +22,7 @@ Each site entry may define:
 
 ### Paywalled Articles
 
-When Surf detects a paywall, it looks up an existing archive snapshot before failing the extraction. The archive domains are attempted in this order: `archive.is`, `archive.ph`, `archive.today`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md`. Each domain is tried through the configured proxy and then directly. If no headless attempt succeeds, Surf cycles through the same domains in visible browsers for manual CAPTCHA completion. The successful snapshot URL is written to front matter `archive`.
+When Surf detects a paywall, it looks up an existing archive snapshot before failing the extraction. The archive domains are attempted in this order: `archive.ph`, `archive.today`, `archive.is`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md`. Each domain is tried through the configured proxy and then directly. If no headless attempt succeeds, Surf cycles through the same domains in visible browsers for manual CAPTCHA completion. The successful snapshot URL is written to front matter `archive`.
 
 ---
 
@@ -45,6 +45,7 @@ When Surf detects a paywall, it looks up an existing archive snapshot before fai
 - NCPSSD
 - Douban
 - BBC
+- Foreign Affairs
 
 ### Pocket Casts Episodes
 
@@ -242,6 +243,38 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 
 **Default policies**:
 - `default_no_proxy`: True (BBC is accessible without proxy in most regions)
+
+**Fallback behavior**:
+- If the special handler fails, Surf falls back to the generic fetch flow which may use the browser backend.
+
+### Foreign Affairs
+
+**Domains**:
+- `foreignaffairs.com`
+
+**Matching patterns**:
+```regex
+^https?://(www\.)?foreignaffairs\.com/(?!(?:authors|topics|regions|tags|issues|user|subscribe|search)/)[a-z0-9-]+/[a-z0-9-]+
+```
+
+**Handler**: `Fetcher._fetch_foreignaffairs_article`
+
+**Processing flow**:
+1. Fetch the article page with a regular HTTP request (requests library).
+2. Remove the reading chrome from `<article>`:
+   - `.article-tools` / `.js--article-tools` (the "Listen / Share / Print / Save" bar whose tooltips say "Subscribe to unlock this feature"),
+   - `.js--modal` / `.wrapper__modal` (the share & citation dialog that repeats the headline, byline and citation tabs),
+   - `.paywall-free-article` (the "You are reading a free article" subscription pitch),
+   - newsletter sign-up blocks and DFP ad slots.
+3. Return the cleaned HTML for the generic extraction pipeline (Readability/trafilatura).
+4. When the page carried the "free article" banner, inject `<meta name="surf-free-article" content="true">` so the paywall detector knows the essay is readable.
+
+**Default policies**:
+- None. Chinese/English detection, proxy mode and translation behave like a regular page.
+
+**Notes**:
+- Foreign Affairs names the real article body `paywall-content`, and its pages include a `Subscribe to unlock this feature` tooltip plus the "You are reading a free article" banner. Both used to look like a paywall even though the full text was already present, which made Surf take the archive-snapshot path (and emit `archive.ph`-rewritten links). Only `.paywall-free-article` is stripped, so genuinely locked essays keep their paywall markers and still trigger the archive fallback.
+- Paywall detection treats an explicit free signal (`article:content_tier=free`, `article:access=public`, `surf-free-article=true`, or a visible "free article" notice on a page with a substantial body) as authoritative, and only lets ambiguous CSS names such as `paywall-content` count while the extracted body still looks like a teaser.
 
 **Fallback behavior**:
 - If the special handler fails, Surf falls back to the generic fetch flow which may use the browser backend.

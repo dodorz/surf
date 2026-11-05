@@ -42,12 +42,14 @@
 - **命令行参数变更**：当添加、修改或删除命令行参数时，必须同步更新所有 README 文件和 `--help` 帮助文本
 - **特殊网站处理**：当修改 `SPECIAL_SITE_HANDLERS` 配置、添加新的特殊网站处理、或修改现有网站的处理逻辑时，必须同步更新 `SPECIAL_SITES_zh.md` 与 `SPECIAL_SITES.md` 文档
 - **新增功能**：任何新增功能都需要在英文和中文 README 中添加相应的说明和使用示例
+- **Web 界面**：`surf_web.py` 的 `HTML_TEMPLATE` 是单文件模板。新增或调整表单项时，要同时确认 `get_web_ui_context()` 提供的默认值、前端 `getCurrentFormData()` 收集的字段名，以及 `/api/process`、`/api/save-async` 消费的键名一致；`tests/` 中有若干用例直接断言模板中的 `id`/`name`，改动后需同步
 - **代码变更检查清单**：
   - [ ] 更新 `README.md` 英文文档
   - [ ] 更新 `README_zh.md` 中文文档
-  - [ ] 更新 `--help` 帮助文本（如有参数变更）
+  - [ ] 更新 `--help` 帮助文本（`surf.py` 与 `surf_web.py` 都要检查）
   - [ ] 更新相关技术文档（如 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`）
   - [ ] 如影响开发流程，更新 `AGENTS.md`
+  - [ ] 运行 `uv run --with pytest python -m pytest tests/ -q`
 
 ## 通用配置
 
