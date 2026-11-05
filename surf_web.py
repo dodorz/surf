@@ -409,6 +409,8 @@ HTML_TEMPLATE = """
 
         .composer-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
+        .composer-hint-inline { font-size: 13px; color: var(--ink-3); }
+
         .btn {
             display: inline-flex;
             align-items: center;
@@ -429,10 +431,16 @@ HTML_TEMPLATE = """
 
         .btn:disabled { opacity: .55; cursor: not-allowed; transform: none; }
 
+        /* The primary action is the one people press all day: make it big,
+           accent-filled and rightmost so it sits under the thumb / cursor. */
         .btn-primary {
             background: var(--accent);
             color: #fff;
-            box-shadow: 0 6px 18px -10px rgba(14, 116, 144, .8);
+            font-size: 15.5px;
+            font-weight: 680;
+            padding: 13px 34px;
+            min-width: 124px;
+            box-shadow: 0 10px 24px -14px rgba(14, 116, 144, .95);
         }
 
         .btn-primary:hover:not(:disabled) { background: var(--accent-ink); }
@@ -1145,18 +1153,15 @@ HTML_TEMPLATE = """
                       placeholder="粘贴一个或多个链接，或直接输入一段文字"></textarea>
 
             <div class="composer-row">
-                <label class="check" id="saveFullTextWrap">
-                    <input type="checkbox" id="saveFullText" name="save_full_text">
-                    <span>全文保存（不提取链接）</span>
-                </label>
+                <span class="composer-hint-inline" id="composerModeHint"></span>
                 <div class="composer-actions">
-                    <button type="button" class="btn btn-ghost" id="directSaveBtn" title="抓取后直接进入后台保存队列，不生成预览卡片">直接保存</button>
-                    <button type="submit" class="btn btn-primary" id="submitBtn">提取</button>
+                    <button type="button" class="btn btn-ghost" id="previewBtn" title="先抓取并预览，再决定保存格式">预览</button>
+                    <button type="button" class="btn btn-ghost" id="fullTextSaveBtn" title="保留整段文字（含其中的链接），直接按帖子保存">全文保存</button>
+                    <button type="submit" class="btn btn-primary" id="submitBtn">保存</button>
                 </div>
             </div>
 
             <p class="hint" id="urlHint">输入里包含链接时只抓取第一个 <code>http/https</code> URL；不含链接时，这段文字会作为一篇帖子保存，第一句作为标题。</p>
-            <p class="hint" id="saveFullTextHint">“全文保存”会保留整段文字（包含其中链接），直接按帖子处理。</p>
 
             <div class="search-fields" id="searchOptionsGroup">
                 <label class="field">
@@ -1175,7 +1180,6 @@ HTML_TEMPLATE = """
                     <span class="field-label">文件名前缀</span>
                     <input type="text" id="searchPrefix" name="search_prefix" class="input" placeholder="留空则用关键词">
                 </label>
-                <p class="hint" style="grid-column: 1 / -1; margin: 0;">先检索，再勾选要抓取的条目。“直接保存”会保存本次检索返回的全部结果。</p>
             </div>
         </form>
 
@@ -1455,7 +1459,7 @@ HTML_TEMPLATE = """
             <div id="resultsContainer"></div>
             <div class="empty-state" id="emptyState">
                 <strong>还没有结果</strong>
-                提取完成后，每份内容会生成一张卡片，可预览并分别保存为多种格式。
+                点「预览」后，每份内容会生成一张卡片，可预览并分别保存为多种格式。
             </div>
         </section>
 
@@ -1466,7 +1470,7 @@ HTML_TEMPLATE = """
             <span>·</span>
             <span>本地服务，内容不离开你的机器</span>
             <span>·</span>
-            <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 提取</span>
+            <span><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 保存</span>
         </footer>
     </main>
 
@@ -1496,8 +1500,9 @@ HTML_TEMPLATE = """
 
         const urlInput = document.getElementById('url');
         const searchModeCheckbox = document.getElementById('searchMode');
-        const saveFullTextCheckbox = document.getElementById('saveFullText');
-        const saveFullTextWrap = document.getElementById('saveFullTextWrap');
+        const previewBtn = document.getElementById('previewBtn');
+        const fullTextSaveBtn = document.getElementById('fullTextSaveBtn');
+        const composerModeHint = document.getElementById('composerModeHint');
         const resultsContainer = document.getElementById('resultsContainer');
         const emptyState = document.getElementById('emptyState');
         const resultCount = document.getElementById('resultCount');
@@ -1598,22 +1603,22 @@ HTML_TEMPLATE = """
                     ? '输入搜索关键词，例如：python asyncio tutorial'
                     : '粘贴一个或多个链接，或直接输入一段文字';
             }
-            if (saveFullTextCheckbox) {
-                if (enabled) {
-                    saveFullTextCheckbox.checked = false;
-                }
-                saveFullTextCheckbox.disabled = enabled;
+            // Full-text mode only makes sense for pasted text, so the button
+            // steps aside while searching.
+            if (fullTextSaveBtn) {
+                fullTextSaveBtn.style.display = enabled ? 'none' : 'inline-flex';
             }
-            if (saveFullTextWrap) {
-                saveFullTextWrap.style.opacity = enabled ? '0.5' : '1';
+            if (previewBtn) {
+                previewBtn.textContent = enabled ? '搜索' : '预览';
+            }
+            if (composerModeHint) {
+                composerModeHint.textContent = enabled
+                    ? '搜索后勾选条目；「保存」直接保存全部结果'
+                    : '';
             }
             const urlHint = document.getElementById('urlHint');
             if (urlHint) {
                 urlHint.style.display = enabled ? 'none' : 'block';
-            }
-            const saveFullTextHint = document.getElementById('saveFullTextHint');
-            if (saveFullTextHint) {
-                saveFullTextHint.style.display = enabled ? 'none' : 'block';
             }
         }
 
@@ -2374,6 +2379,21 @@ HTML_TEMPLATE = """
         }
 
         // -------------------------------------------------------- form data
+        // "Full text" is a mode of the composer, not a checkbox: picking the
+        // 全文保存 button sets it, pressing 保存 clears it again.
+        let fullTextMode = false;
+
+        function setFullTextMode(enabled) {
+            fullTextMode = !!enabled;
+            const hint = document.getElementById('urlHint');
+            if (hint) {
+                hint.textContent = fullTextMode
+                    ? '全文保存模式：整段文字原样作为一篇帖子保存，其中的链接不会被抓取；第一句作为标题。'
+                    : '输入里包含链接时只抓取第一个 http/https URL；不含链接时，这段文字会作为一篇帖子保存，第一句作为标题。';
+                hint.style.display = isSearchMode() ? 'none' : 'block';
+            }
+        }
+
         function getCurrentFormData(inputUrl) {
             const form = document.getElementById('surfForm');
             const fd = new FormData(form);
@@ -2388,7 +2408,7 @@ HTML_TEMPLATE = """
             data.html_inline = data.html_inline === 'on';
             data.no_front_matter = data.no_front_matter === 'on';
             data.archive_source = data.archive_source === 'on';
-            data.save_full_text = data.save_full_text === 'on';
+            data.save_full_text = fullTextMode;
             data.search_mode = data.search_mode === 'on';
             return data;
         }
@@ -2447,7 +2467,7 @@ HTML_TEMPLATE = """
                         </label>
                         <span class="search-result-count"></span>
                     </div>
-                    <button type="button" class="btn btn-primary btn-sm search-fetch-btn">提取选中</button>
+                    <button type="button" class="btn btn-primary btn-sm search-fetch-btn">预览选中</button>
                 </div>
                 <div class="search-result-list"></div>
             `;
@@ -2512,7 +2532,7 @@ HTML_TEMPLATE = """
             const fetchBtn = card.querySelector('.search-fetch-btn');
             const submitBtn = document.getElementById('submitBtn');
             fetchBtn.disabled = true;
-            fetchBtn.innerHTML = '<span class="spinner"></span>提取中...';
+            fetchBtn.innerHTML = '<span class="spinner"></span>预览中...';
             submitBtn.disabled = true;
             currentResults = [];
             resultsContainer.querySelectorAll('.result-card:not(.search-preview-card)').forEach((el) => el.remove());
@@ -2526,15 +2546,15 @@ HTML_TEMPLATE = """
                 const successCount = await processInputList(urls, data);
                 showStatus(
                     successCount ? 'success' : 'error',
-                    `提取完成：成功 ${successCount}/${urls.length}`
+                    `预览完成：成功 ${successCount}/${urls.length}`
                 );
             } catch (error) {
-                showStatus('error', '提取失败: ' + error.message);
+                showStatus('error', '预览失败: ' + error.message);
             } finally {
                 fetchBtn.disabled = false;
-                fetchBtn.textContent = '提取选中';
+                fetchBtn.textContent = '预览选中';
                 submitBtn.disabled = false;
-                submitBtn.textContent = '提取';
+                submitBtn.textContent = '保存';
             }
         }
 
@@ -2558,41 +2578,9 @@ HTML_TEMPLATE = """
                     result.input_url = input;
                     currentResults.push(result);
                     window.defaultDirs = result.defaultDirs || window.defaultDirs || {};
-                    if (data.save_full_text) {
-                        showStatus('processing', '全文保存模式，正在直接保存...');
-                        const fileType = getSaveFormat();
-                        const saveDir = (result.defaultDirs && result.defaultDirs[fileType]) || '';
-                        const autoTitle = (result.defaultSaveTitle || '').trim();
-                        const saveBody = {
-                            fileType,
-                            saveDir,
-                            customTitle: autoTitle,
-                            data: result,
-                            formData: data,
-                            speak: false
-                        };
-                        try {
-                            const saveResp = await fetch(API_BASE + '/api/save-async', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify(saveBody)
-                            });
-                            const saveResult = await parseJsonResponse(saveResp);
-                            if (saveResult.success && saveResult.job_id) {
-                                showStatus('success', `全文保存已加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(input)}</span>`);
-                                notifySaveJobState(saveResult.job_id, 'pending');
-                                pollSaveJob(saveResult.job_id);
-                            } else {
-                                showStatus('error', '全文保存失败: ' + (saveResult.error || 'unknown error'));
-                            }
-                        } catch (saveErr) {
-                            showStatus('error', '全文保存请求失败: ' + saveErr.message);
-                        }
-                    } else {
-                        const card = renderResultCard(result, i, inputs.length);
-                        if (result.translation_pending && result.translation_job_id) {
-                            pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
-                        }
+                    const card = renderResultCard(result, i, inputs.length);
+                    if (result.translation_pending && result.translation_job_id) {
+                        pollTranslationJob(result.translation_job_id, card, currentResults.length - 1, inputs.length);
                     }
                     successCount += 1;
                 } else {
@@ -2693,47 +2681,6 @@ HTML_TEMPLATE = """
             collapseOptions();
         }
 
-        document.getElementById('surfForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-
-            const submitBtn = document.getElementById('submitBtn');
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<span class="spinner"></span>处理中...';
-            resetBeforeRun();
-
-            const data = getCurrentFormData('');
-            const rawInput = (data.url || '').trim();
-
-            try {
-                if (data.search_mode) {
-                    if (!rawInput) {
-                        showStatus('error', '请输入搜索关键词');
-                        return;
-                    }
-                    showStatus('processing', `正在搜索：<b>${escapeHtml(rawInput)}</b>`);
-                    const searchData = await requestSearch(rawInput, data);
-                    renderSearchPreviewCard(searchData);
-                    showStatus('success', `找到 ${searchData.results.length} 条结果，勾选后点击“提取选中”。`);
-                    return;
-                }
-
-                const inputs = collectInputs(rawInput, data);
-                if (!inputs.length) {
-                    showStatus('error', '请输入 URL 或文本');
-                    return;
-                }
-
-                showStatus('processing', '正在抓取网页内容...');
-                const successCount = await processInputList(inputs, data);
-                showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
-            } catch (error) {
-                showStatus('error', '请求失败: ' + error.message);
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.textContent = '提取';
-            }
-        });
-
         async function queueDirectSaves(inputs, formData) {
             const fileType = getSaveFormat();
             const queuedJobs = [];
@@ -2765,53 +2712,112 @@ HTML_TEMPLATE = """
             }
             let message;
             if (queuedJobs.length === 1) {
-                message = `已将 1 个 ${fileType.toUpperCase()} 保存任务加入后台队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
+                message = `已加入 ${fileType.toUpperCase()} 后台保存队列：<br><span style="word-break: break-all;">${escapeHtml(queuedJobs[0].url)}</span>`;
             } else {
                 const urlList = queuedJobs.map(job => `<li>${escapeHtml(job.url)}</li>`).join('');
-                message = `已将 ${queuedJobs.length} 个 ${fileType.toUpperCase()} 保存任务加入后台队列：<ul style="margin: 8px 0 0; padding-left: 20px;">${urlList}</ul>`;
+                message = `已加入 ${queuedJobs.length} 个 ${fileType.toUpperCase()} 后台保存任务：<ul style="margin: 8px 0 0; padding-left: 20px;">${urlList}</ul>`;
             }
             showStatus('success', message);
             queuedJobs.forEach(job => notifySaveJobState(job.jobId, 'pending'));
             return queuedJobs;
         }
 
-        async function directSave() {
-            const directSaveBtn = document.getElementById('directSaveBtn');
-            const rawInput = (urlInput?.value || '').trim();
-            const formData = getCurrentFormData('');
-            let inputs = collectInputs(rawInput, formData);
+        // The composer has three actions over one pipeline:
+        //   previewBtn       fetch and render result cards
+        //   fullTextSaveBtn  keep the pasted text verbatim and save it directly
+        //   submitBtn        fetch and save with the current default format
+        async function runComposer(action) {
+            const buttons = [submitBtn, previewBtn, fullTextSaveBtn].filter(Boolean);
+            if (action === 'fullText') {
+                setFullTextMode(true);
+            } else if (action === 'link') {
+                setFullTextMode(false);
+            }
+            buttons.forEach((button) => { button.disabled = true; });
+            const busyLabel = action === 'preview' ? '预览中...' : '保存中...';
+            const labelOf = (button) => (button === previewBtn
+                ? (isSearchMode() ? '搜索' : '预览')
+                : button.textContent);
+            const labels = new Map(buttons.map((button) => [button, labelOf(button)]));
+            const activeBtn = action === 'preview' ? previewBtn : submitBtn;
+            if (activeBtn) {
+                activeBtn.innerHTML = `<span class="spinner"></span>${busyLabel}`;
+            }
+            if (action !== 'preview') {
+                resetBeforeRun();
+            }
 
-            directSaveBtn.disabled = true;
+            const data = getCurrentFormData('');
+            const rawInput = (data.url || '').trim();
+
             try {
-                if (formData.search_mode) {
+                if (data.search_mode) {
                     if (!rawInput) {
                         showStatus('error', '请输入搜索关键词');
                         return;
                     }
                     showStatus('processing', `正在搜索：<b>${escapeHtml(rawInput)}</b>`);
-                    const searchData = await requestSearch(rawInput, formData);
-                    inputs = searchData.results.map((item) => item.url);
-                    formData.search_mode = false;
-                    formData.save_full_text = false;
-                    formData.search_query = searchData.keywords;
-                    formData.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
-                    if (!inputs.length) {
+                    const searchData = await requestSearch(rawInput, data);
+                    if (action === 'preview') {
+                        renderSearchPreviewCard(searchData);
+                        showStatus('success', `找到 ${searchData.results.length} 条结果，勾选后点击“预览选中”。`);
+                        return;
+                    }
+                    const urls = searchData.results.map((item) => item.url);
+                    if (!urls.length) {
                         throw new Error('没有可保存的搜索结果');
                     }
-                } else if (!inputs.length) {
-                    showStatus('error', '请输入 URL 或文本');
+                    data.search_mode = false;
+                    data.save_full_text = false;
+                    data.search_query = searchData.keywords;
+                    data.search_prefix = (document.getElementById('searchPrefix')?.value || '').trim();
+                    showStatus('processing', '正在抓取并保存全部检索结果...');
+                    await queueDirectSaves(urls, data);
                     return;
                 }
-                showStatus('processing', '正在抓取并保存...');
-                await queueDirectSaves(inputs, formData);
+
+                const inputs = collectInputs(rawInput, data);
+                if (!inputs.length) {
+                    showStatus('error', action === 'fullText' ? '请输入要保存的文字' : '请输入 URL 或文本');
+                    return;
+                }
+
+                if (action === 'preview') {
+                    showStatus('processing', '正在抓取网页内容...');
+                    const successCount = await processInputList(inputs, data);
+                    showStatus(successCount ? 'success' : 'error', `处理完成：成功 ${successCount}/${inputs.length}`);
+                    return;
+                }
+
+                showStatus('processing', action === 'fullText' ? '正在保存全文...' : '正在抓取并保存...');
+                await queueDirectSaves(inputs, data);
             } catch (error) {
-                showStatus('error', '直接保存失败: ' + error.message);
+                const prefix = action === 'preview' ? '请求失败: ' : '保存失败: ';
+                showStatus('error', prefix + error.message);
             } finally {
-                directSaveBtn.disabled = false;
+                buttons.forEach((button) => {
+                    button.disabled = false;
+                    button.textContent = labels.get(button);
+                });
+                // A one-shot 全文保存 press should not stick for the next run.
+                if (fullTextMode && action !== 'preview') {
+                    setFullTextMode(false);
+                }
             }
         }
 
-        document.getElementById('directSaveBtn').addEventListener('click', directSave);
+        document.getElementById('surfForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            runComposer('save');
+        });
+
+        if (previewBtn) {
+            previewBtn.addEventListener('click', () => runComposer('preview'));
+        }
+
+        if (fullTextSaveBtn) {
+            fullTextSaveBtn.addEventListener('click', () => runComposer('fullText'));
+        }
 
         // Ctrl/Cmd + Enter submits the composer.
         document.getElementById('surfForm').addEventListener('keydown', function(event) {
@@ -4271,8 +4277,9 @@ def main():
         prog="python surf_web.py",
         usage="%(prog)s [options]",
         description=(
-            "Serve the Surf web interface: paste a URL or text, preview the extracted\n"
-            "document, then save it as Markdown, HTML, PDF, audio, or a Pastebin post."
+            "Serve the Surf web interface: paste a URL or text and press 保存 to fetch\n"
+            "and save it as Markdown, HTML, PDF, audio, or a Pastebin post, or press\n"
+            "预览 first to read the result and pick a format per document."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""

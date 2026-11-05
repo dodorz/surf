@@ -553,10 +553,14 @@ def test_web_form_has_direct_save_without_clipboard_button():
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert 'id="directSaveBtn"' in html
+    # The composer saves by default; 全文保存 is a one-shot mode beside it.
+    assert 'id="submitBtn"' in html
+    assert 'id="fullTextSaveBtn"' in html
+    assert 'id="previewBtn"' in html
     assert 'id="pasteBtn"' not in html
     assert "navigator.clipboard" not in html
-    assert "直接保存" in html
+    assert ">保存</button>" in html
+    assert "全文保存" in html
 
 
 def test_web_site_defaults_exposes_podcast_transcription_only_for_supported_sites():

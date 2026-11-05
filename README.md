@@ -583,10 +583,14 @@ lives in the collapsible options panel, whose header summarises the current choi
 - **Two input modes.** *Link / text* fetches URLs or saves pasted text as a post;
   *keyword search* runs the same search pipeline as `-S` and shows a checkbox list of
   hits, from which you fetch only what you want.
-- **Extract, or extract and save.** *提取* renders preview cards. *直接保存* skips the
-  preview and queues the file in the background.
-- **Full-text mode.** With *全文保存* enabled, pasted text is kept intact even when it
-  contains URLs.
+- **One primary action: 保存.** The large accent button at the right of the composer is
+  the everyday path — it fetches with the current options and queues the file in the
+  chosen format, without rendering anything first. Two quieter buttons sit beside it.
+- **预览 (preview).** Renders result cards so you can read the content and pick a format
+  per document. In search mode the same button becomes 搜索 and lists hits to select.
+- **全文保存 (save as-is).** Keeps the pasted text intact even when it contains URLs, and
+  saves it directly as a post — the shortcut for "this is my note, do not fetch anything".
+  It is a one-shot mode: the next 保存 press goes back to normal link behaviour.
 - **One card per document.** Each card has an editable save directory and filename, then
   format buttons (MD / HTML / PDF / 音频 / Pastebin) so you can export the same result in
   any format without re-fetching. A 朗读 button generates speech on the spot.
