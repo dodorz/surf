@@ -136,6 +136,11 @@ def test_process_url_full_text_save_accepts_windows_newlines(monkeypatch):
 def test_processed_markdown_strips_leading_blank_lines(monkeypatch):
     monkeypatch.setattr(surf_web, "get_config", lambda: _FakeConfig())
     monkeypatch.setattr(
+        surf_web.Fetcher,
+        "fetch",
+        lambda *args, **kwargs: "<html><body><article><p>Hello.</p></article></body></html>",
+    )
+    monkeypatch.setattr(
         surf_web.OcrHandler,
         "annotate_html_with_ocr",
         lambda cleaned_html, **kwargs: cleaned_html,
