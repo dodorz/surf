@@ -1,200 +1,486 @@
-# Surf - 网页转 Markdown/PDF/HTML/Audio 转换器
+# Surf
 
-**Surf** 是一个强大的 Python 命令行工具，可将网页转换为整洁的 Markdown、PDF、HTML 文件或音频。它能处理动态内容，移除杂乱信息（广告、侧边栏），并根据需要使用大语言模型（LLM）翻译内容。
+**一个链接，一份干净的文档。**
+
+Surf 把一个网页、一个本地文件或一句搜索词，变成一份去掉噪音、按需翻译的文档：Markdown、HTML、PDF、音频，或者一个 Pastebin 帖子。同一套流水线有两个前端——给脚本用的命令行，和给交互操作用的本地网页。
+
+```
+输入 ─▶ 抓取 ─▶ 正文提取 ─▶ (OCR) ─▶ 翻译 ─▶ 渲染 ─▶ 保存
+```
+
+- **一条命令就是一份文档。** `surf https://example.com` 直接写出 Markdown 笔记。
+- **静态 HTML 到重 JavaScript 页面。** 默认走普通 HTTP，需要时自动（或手动）启用无头浏览器（Obscura，或 Playwright）。
+- **真正的翻译。** 检测语言，调用兼容 OpenAI 的 LLM 翻译，并把实际发生了什么写进 front matter。
+- **一套流程五种产物。** Markdown、HTML、PDF、音频、Pastebin，PDF 甚至可以不依赖浏览器。
+- **认识站点。** Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙、GitHub、Wikipedia、Foreign Affairs。
+- **失败不会凭空消失。** 抓不下来的 URL 会写到磁盘，之后可以重试。
 
 ---
 
-## 功能
+## 安装
 
-- **智能抓取**：针对动态 JavaScript 网站，自动在 `requests` 与无头浏览器（默认 Obscura，可选 Playwright）之间切换。
-- **本地文件支持**：直接读取和处理本地 HTML、Markdown、文本和 PDF 文件。支持操作系统路径、Windows 下 Unix 风格路径和 `file://` URI。文件经过与网页内容相同的翻译/输出流程处理（本地 PDF 使用 `-p` 时按原样复制）。
-- **失败 URL 记录**：CLI 或 Web UI 获取/转换/保存网页 URL（包括搜索结果）失败时，会把该 URL 本身写入 `[Output] md_dir`，文件名为 `获取失败_<标题>.md`（没有标题时用域名/路径生成），方便之后重试。不会覆盖同名的无关文件；同一 URL 的已有记录会复用。
-- **关键词搜索**：`-S/--search` 会把位置参数当作搜索关键词而不是 URL。Surf 先调用搜索引擎（`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek、SearXNG 或 Metaso；也可强制 `duckduckgo`/`bing`/`searxng`/`metaso`/`deepseek`），打印前 `--search-preview` 条「标题 + URL」编号列表供选择，再把选中的 URL 走完整的获取 → 转换 → 翻译 → 保存流程。`--search-top N` 跳过选择直接处理前 N 条，`--feel-lucky` 只保存第一条，`--search-merge` 把选中的结果合并为一个文档。不会新建搜索专用目录；每个文件名固定带中括号前缀（`[<前缀>]<标题>`），默认前缀为搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖，front matter 会记录 `search_query`；结果 URL 和 front matter 的 `source` 会去掉 `utm_*`、`fbclid`、`gclid` 等跟踪参数。
-- **特殊网站处理**：针对 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙等网站优化处理，支持复用已保存的登录态。
-- **Podcast 音频**：Pocket Casts 和小宇宙剧集可以使用 `-a/--format audio` 保存 RSS/页面中的原始音频文件（保留 `.m4a` 等源格式）；使用 `-w/--transcribe` 可以通过可选的 `transcribe-cpp` 后端在本地下载并转写。
-- **X/Twitter 提取增强**：默认优先使用 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，自动识别更多 X 登录引导占位文案变体、解析 `t.co` 跳转到真实 Article 链接，并将 `/<user>/article/<id>` 这类直链规范化为 `/i/article/<id>` 后再抓取；优先保留主 tweet/article 的 DOM，从而尽量保住粗体等行内样式和插图；仅在必要时再回退到结构化元数据提取；当 `x.com` 本身连不通时，会优先尝试基于 status id 的 syndication/fxTwitter 兜底；当 X 被登录墙拦截时会进一步回退到 `api.fxtwitter.com`。
-- **Thread 抓取**：对 Twitter/X、Bluesky、微博、Threads，Surf 默认等价于 `--thread after --thread-author all`，向后抓取当前贴文之后的后续帖文；可用 `--thread before|both|off` 调整方向，用 `--thread-author same` 只保留当前贴文作者。V2EX 默认只保存主贴，使用 `-t/--thread` 时会包含回帖。
-- **短网址规范化**：收到 `https://t.co/...`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...` 等常见短网址时，Surf 会先解析为最终长网址，再应用特殊网站规则，并在 front matter 的 `source` 中写入长网址。若输入不是裸 URL 而是包含 URL 的分享文本（如小红书分享消息），会自动提取其中的第一个 URL。
-- **GitHub Markdown 来源保留**：GitHub 仓库页和不带分支的 Markdown 文件 URL 可以从实际 README/blob 文件抓取内容，但 front matter 的 `source` 会保留用户输入的页面 URL。
-- **翻译元数据更准确**：只有正文或标题实际被翻译改写时，front matter 才写入 `translator`；单纯语言判断不计入翻译器记录。
-- **Front Matter 单行规范**：`title` 和 `description` 会被压成单行；换行、制表符、不换行空格和连续空白会合并，中文字符之间的空格会被移除，确保 YAML front matter 始终有效。`title` 末尾的句号会被删除，GitHub 自动生成的“Contribute to ... development by creating an account on GitHub.”句子会在翻译前从 `title` 和 `description` 中移除，避免译文里出现被翻译过的这句话。
-- **可选 Wayback 快照**：CLI 使用 `--archive` 或在 Web 勾选对应选项后，会把最终写入 front matter `source` 的 URL 提交到 Internet Archive，并将快照地址写入 `archive` 字段；默认开关由 config.ini 的 `[Output] archive` 控制。
-- **付费墙 Archive 回退**：检测到付费墙文章时，Surf 会先用普通 HTTP 请求 archive.today 的 `/newest/<url>` 端点，直接 302 跳到最新快照；若 archive.today 没有快照，则通过 Wayback Machine 的 availability API 查询并下载无工具栏的 `id_` 文档。两者都失败后，再依次通过浏览器流程查询 `archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn` 和 `archive.md`，每个域名均先按已配置代理尝试、再直连尝试，全部失败后打开可见浏览器窗口等待人工完成 CAPTCHA。查询快照时会自动去掉跟踪参数和 fragment。若 Readability 从归档页只抓到短摘要，Surf 还会运行 Trafilatura 并保留正文更长的结果。
-- **Web 批量处理**：Web 输入框包含多条 URL 时会逐一抓取并在下方生成独立结果卡，每个网页都有自己的保存按钮；不含 URL 时仍将全文作为单条帖子保存，第一句作为默认标题。
-- **短帖子标题规范化**：对 Twitter/X、Bluesky、微博、Threads 这类短帖子，Surf 会将标题、front matter 中的 `title` 以及默认 Markdown 文件名统一生成为“第一句 - 作者名 on 站点”；长文（例如 X 的 `/article/...`）会保留文章自身标题。
-- **文件名保留更多信息**：当标题被用于文件名时，Surf 会尽量保留合法字符（包括中文标点和可用西文符号），仅过滤文件系统不允许的非法字符。
-- **Web 纯文本帖子**：在 `surf_web.py` 里，如果直接输入一段不包含 URL 的文字，Surf 会把它当成帖子处理，使用第一句作为标题，并继续走正常的翻译/导出流程。
-- **纯净提取**：使用 `readability` 仅提取主要文章内容。
-- **多格式输出**：支持 Markdown、PDF、HTML 和音频。PDF 可用 Playwright 浏览器、本机 Chrome/Chromium 命令行、WeasyPrint、Typst 或 pandoc 渲染（可完全不需要浏览器），由 `[Output] pdf_engine` 指定引擎链。
-- **PDF 输入**：URL 返回 PDF 时，`-p/--format pdf` 会直接保存原始 PDF；Markdown、HTML、音频或发布输出则先用 `pypdf` 提取文本，再走正常的翻译/保存流程。暂不支持扫描版 PDF 的 OCR。
-- **自动翻译**：检测非中文内容并使用配置的 LLM（如 OpenAI, DeepSeek）自动翻译。支持**长文智能分段**翻译，避免上下文限制。
-- **灵活代理**：统一代理模式：CLI 默认使用隐式 `auto` 代理解析，Surf Web 面向服务器部署默认使用 `no`（不使用代理）。在支持的环境中仍可显式选择 `auto`、`env`（环境变量）、`win`（Windows Internet Settings）、`custom`（自定义）、`no`（不使用）。
-- **TTS 支持**：使用 `edge-tts` 进行文本转语音。支持保存为音频文件或朗读；语音、语速、音量可通过 `--tts-voice` / `--tts-rate` / `--tts-volume`（CLI）或 Web TTS 选项单次覆盖。
-- **认证管理**：支持交互式登录，以及登录态的导出/导入，方便在无界面服务器上复用，也适用于 Reddit 等需要 Cookie 的站点。
-- **实验性插图 OCR**：可选地对文章插图执行本地 OCR。默认使用 auto 链（PaddleOCR > RapidOCR > Tesseract），可通过 `[OCR] engine` / `--ocr-engine` 选择 paddleocr、rapidocr、tesseract 或 auto。小红书默认开启，其它网站需显式传 `--ocr` 或在 `[OCR].enabled = true` 中开启。
-- **内嵌 SVG 插图保留**：会将正文中的内嵌 SVG 图表转换为 Markdown 图片引用，同时过滤装饰性图标。
-
-### Pocket Casts 剧集
-
-可以直接粘贴 Pocket Casts 的分享链接。Surf 会解析剧集页面，并在页面或 RSS 可用时提取 Show Notes；如果页面被拦截，也会保留分享链接中的基本信息：
+Surf 是一个 Python 包，用 [uv](https://github.com/astral-sh/uv) 运行最省心。
 
 ```bash
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -r
+git clone https://github.com/dodorz/surf.git && cd surf
+uv sync
 ```
 
-Markdown front matter 的 title 使用 `剧集标题 - 播客名称`；默认文件名会增加 `[播客]` 前缀，例如 `[播客] 剧集标题 - 播客名称`。翻译 Show Notes 时，`Podcast`、`Podcast ID` 和 `Episode ID` 这些元信息标签保持不变；如果能取得发布日期，Surf 会尽量将其写入 `created`；只有实际发生翻译变化时才写入 `translator`。
+这会装上核心依赖，包含 OCR 引擎（PaddleOCR、RapidOCR、pytesseract；Tesseract 二进制本身属于系统包）。
 
-本地转写需要先安装可选后端并配置 GGUF 模型：
+只有确实需要时才装可选 extra：
+
+| Extra | 提供 | 安装 |
+| --- | --- | --- |
+| `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium` |
+| `pdf` | WeasyPrint：不依赖浏览器的 PDF 渲染 | `uv sync --extra pdf` |
+| `transcribe` | 通过 transcribe.cpp 在本地转写播客 | `uv sync --extra transcribe` |
+| `curlcffi` | 模拟浏览器 TLS 指纹，绕过部分 Cloudflare 拦截 | `uv sync --extra curlcffi` |
+
+Surf 默认的无头后端是 **Obscura**，它是一个独立二进制。请从
+[Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 安装并确保它在 `PATH` 中（或设置 `[Browser] obscura_executable`）。Surf 会按需启动并复用受管理的 `obscura serve` 进程，通过 Chrome DevTools Protocol 通信，因此普通动态页面不需要安装 Playwright。
+
+然后准备配置并至少填一个 LLM provider：
+
+```bash
+cp config.ini.example config.ini
+```
+
+Surf 先找脚本同目录的 `config.ini`，找不到再回退到 `$XDG_CONFIG_HOME/surf/config.ini`（默认 `~/.config/surf/config.ini`）。
+
+---
+
+## 快速开始
+
+```bash
+uv run surf "https://example.com"                  # Markdown，翻译为中文
+uv run surf "https://example.com" -r               # 保留原文
+uv run surf "https://example.com" -b               # 双语对照
+uv run surf "https://example.com" -h               # HTML
+uv run surf "https://example.com" -p               # PDF
+uv run surf "https://example.com" -a               # 文本转语音音频
+uv run surf "https://example.com" -P               # 发布到 Pastebin
+uv run surf "https://example.com" -o ~/note.md     # 指定输出路径
+uv run surf "https://example.com" -O               # 打印到 stdout
+```
+
+短参数可以连写：`surf -hrn URL` 等价于 `-h -r -n`（HTML、保留原文、不使用代理）。
+
+Web 界面跑的是同一条流水线：
+
+```bash
+uv run python surf_web.py                # http://127.0.0.1:18473
+```
+
+---
+
+## 输入
+
+Surf 只有一个位置参数，它是什么由内容本身决定。
+
+### 链接
+
+```bash
+uv run surf "https://example.com/article"
+```
+
+参数是带有 URL 的说明文字（比如小红书分享文案）时，会提取其中第一个 `http(s)` URL。常见短链（`t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...`）会先解析成最终地址，front matter 里记录的也是解析后的地址。
+
+命令行一次只处理一个 URL；批量请用 shell 循环或 `-S/--search`。Web 界面可以一次输入多个 URL，并为每个 URL 生成一张卡片。
+
+完全没有 URL 的纯文字只在 Web 界面里有意义：它会被当成一篇帖子保存，第一句作为标题，这是随手记笔记的常规方式。命令行要求输入 URL、本地路径，或者配合 `-S` 的关键词。
+
+### 本地文件
+
+本地 HTML、Markdown、文本和 PDF 文件与网页走同一条流水线。
+
+```bash
+uv run surf /tmp/article.html          # 操作系统路径
+uv run surf ~/docs/readme.md           # 和其它文档一样会被翻译
+uv run surf file:///tmp/article.html   # file:// URI
+uv run surf "C:\Temp\notes.txt"        # Windows 路径
+```
+
+识别类型：`.html`、`.htm`、`.md`、`.txt`、`.rst`、`.adoc`、`.pdf`，其它一律按纯文本读取。在 Windows 上，参数和配置中的 Unix 风格路径会被接受并归一化（`~/Note/x.md` 解析到 `%USERPROFILE%` 下）。
+
+### PDF
+
+输入指向 PDF 时（URL、`file://` 或本地路径皆可），由输出格式决定行为：
+
+```bash
+uv run surf "https://example.com/paper.pdf"        # 提取文本 → Markdown
+uv run surf "https://example.com/paper.pdf" -h     # 提取文本 → HTML
+uv run surf "https://example.com/paper.pdf" -p     # 原样保留 PDF，逐字节一致
+```
+
+判断依据是 `Content-Type`、响应体与 `Content-Disposition`，所以 URL 不必以 `.pdf` 结尾。文本提取使用 `pypdf`；扫描版 PDF 不做 OCR，需要时用 `-p` 保留原文件。若 PDF 站点已失效，Surf 会向 Wayback Machine 查询快照并使用归档的原始 PDF，同时把快照写入 front matter 的 `archive` 字段。
+
+### 搜索词
+
+配合 `-S/--search` 时，参数是查询词而不是 URL：
+
+```bash
+uv run surf -S "python asyncio 教程"
+```
+
+Surf 先搜索，打印带编号的「标题 + URL」列表，只抓取你选中的条目。详见[关键词搜索](#关键词搜索)。
+
+### 社交线程
+
+```bash
+uv run surf -t               "https://x.com/user/status/123"   # 后续帖文（默认方向）
+uv run surf --thread before  "https://x.com/user/status/123"
+uv run surf --thread both --thread-author same "https://x.com/user/status/123"
+uv run surf --no-thread "https://bsky.app/profile/user.bsky.social/post/abc123"
+```
+
+Twitter/X、Bluesky、微博、Threads 默认展开线程（`after`，所有作者）。V2EX 默认只保存主贴，只有传 `-t/--thread` 才包含回帖。
+
+---
+
+## 输出
+
+`-f/--format` 决定输出类型，单字母参数是它的简写。
+
+| 格式 | 参数 | 简写 |
+| --- | --- | --- |
+| Markdown | `-f md` | 默认 |
+| HTML | `-f html` | `-h` |
+| PDF | `-f pdf` | `-p` |
+| 音频 | `-f audio` | `-a` |
+| Pastebin | `-f publish` | `-P` |
+
+### Markdown
+
+默认格式。文件写入 `[Output] md_dir`，以标题命名，并带一段 YAML front matter，记录 `title`、`source`、`created`、`description`，以及——仅在翻译确实改动了内容时——`translator`。
+
+```bash
+uv run surf "https://example.com" --no-front-matter   # 不写 front matter
+uv run surf "https://example.com" --archive           # 同时归档原始链接
+```
+
+标题作为文件名时保留中文标点和合法符号，只过滤文件系统不允许的字符。`--archive` 会把最终的 `source` URL 提交到 Internet Archive，并把快照写进 front matter；默认值来自 `[Output] archive`。
+
+### HTML
+
+```bash
+uv run surf "https://example.com" -h
+uv run surf "https://example.com" -h --html-inline     # 自包含单文件
+```
+
+`--html-inline` 会把外部 CSS/JS 内联进文件，离线也能独立打开（默认值由 `[Output] html_inline` 控制）。
+
+### PDF
+
+PDF 由文档的 HTML 渲染而来，因此并不强制需要浏览器。`[Output] pdf_engine` 引擎链按顺序尝试：
+
+| 引擎 | 使用什么 | 依赖 |
+| --- | --- | --- |
+| `playwright` | 通过 Playwright 调用已安装的 Chromium | `--extra browser` |
+| `chrome` | 本机 `google-chrome` / `chromium` / Edge 的 `--headless=new --print-to-pdf` | 一个 Chrome 二进制 |
+| `weasyprint` | 纯 Python 的 HTML/CSS 渲染器，远程图片会下载后内嵌 | `--extra pdf`、系统 Pango |
+| `typst` | 把 HTML 转成 Typst 标记后调用 `typst` | `typst` 二进制 |
+| `pandoc` | 把 HTML 交给 `pandoc`，由它驱动 typst/weasyprint/xelatex… | `pandoc` 加一个引擎 |
+
+```ini
+[Output]
+pdf_engine = auto          ; playwright, chrome, weasyprint, typst, pandoc
+typst_executable = typst   ; 环境变量: SURF_TYPST_EXECUTABLE
+typst_fonts =              ; 追加字体目录，逗号或 ':' 分隔
+pandoc_executable = pandoc ; 环境变量: SURF_PANDOC_EXECUTABLE
+pandoc_pdf_engine =        ; 留空 = 自动探测
+pandoc_args =              ; 例如 --toc -V CJKmainfont="Noto Serif CJK SC"
+```
+
+引擎可用逗号列表挑选或排序，例如 `pdf_engine = typst,weasyprint`。Chrome 会自动探测，也可以用 `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE` 指定。CommonMark 表格与围栏代码块可以正确渲染；中文只要系统装了任一 CJK 字体即可。
+
+### 音频与朗读
+
+```bash
+uv run surf "https://example.com" -a                              # 保存 MP3
+uv run surf "https://example.com" -s                              # 直接朗读
+uv run surf "https://example.com" -a --tts-voice en-US-AriaNeural
+uv run surf "https://example.com" -a --tts-rate +10% --tts-volume -20%
+```
+
+语音由 `edge-tts` 提供；语音、语速、音量默认取 `[TTS]` 小节，可按次覆盖。对 Pocket Casts 和小宇宙剧集，`-a` 改为下载原始音频（保留 `.m4a` 等源扩展名），受 `[Transcription] max_audio_mb` 与 `audio_timeout` 限制。
+
+### Pastebin
+
+```bash
+uv run surf "https://example.com" -P
+```
+
+发布不写本地文件，成功后打印 paste 链接。需要在 `[publish.pastebin] api_dev_key` 填好 key；`api_paste_expire_date` 和 `api_paste_private` 可选。
+
+### 决定存到哪里
+
+```bash
+uv run surf "https://example.com" -o output.md      # 指定文件
+uv run surf "https://example.com" -o ~/Note/out.md  # ~ 在 Windows 上同样有效
+uv run surf "https://example.com" -o -              # 标准输出
+uv run surf "https://example.com" -O                # 等价于 -o -
+uv run surf -p "https://example.com" -o out.pdf
+```
+
+`-o` 会覆盖配置目录。不给 `-o` 时，各格式分别使用 `md_dir`、`html_dir`、`pdf_dir`、`audio_dir`。
+
+---
+
+## 翻译
+
+```bash
+uv run surf "https://example.com"          # -l trans（默认）
+uv run surf "https://example.com" -r       # -l raw，不翻译
+uv run surf "https://example.com" -b       # -l both，原文 + 译文
+uv run surf "https://example.com" --llm l2 # 换一个已配置的 provider
+```
+
+只有当检测到的语言与 `[Output] target_language` 不同时才会翻译；长文会切分成段以适配模型上下文。只有正文或标题真的被改写时，front matter 才写入 `translator`；单纯的语言判断不算翻译。
+
+`title` 和 `description` 会被压成单行——换行、制表符、不换行空格与连续空白合并，中文字符之间的空格去掉——保证 YAML 始终有效。`title` 末尾的句号会被删除；GitHub 自动生成的 "Contribute to … development by creating an account on GitHub." 会在翻译前从 `title` 和 `description` 中移除，避免译文里出现被翻译过的这句话。
+
+---
+
+## 抓取
+
+### 代理
+
+```bash
+uv run surf "https://example.com" -x env               # http_proxy / https_proxy / no_proxy
+uv run surf "https://example.com" -x win               # Windows Internet Settings（仅 Windows）
+uv run surf "https://example.com" -c http://127.0.0.1:7890
+uv run surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890
+uv run surf "https://example.com" -n                   # 直连
+```
+
+模式有 `env`、`win`、`custom`、`no`；`-c` 就是带可选内联地址的 `-x custom`，`-n` 就是 `-x no`。不传参数时，CLI 会隐式解析代理——这在很多站点都需要本地代理的 Windows 桌面上是合理的。如果隐式代理因代理/TLS 握手失败，Surf 会先不带代理重试一次，再回退到浏览器；显式指定的模式绝不会被悄悄改掉。
+
+[Web 界面](#web-界面)则默认 `no`，因为它通常跑在公网可直连的服务器上。
+
+### 正文提取
+
+```bash
+uv run surf "https://example.com" -e trafilatura   # -T
+uv run surf "https://example.com" -e readability   # -R
+uv run surf "https://example.com" -e raw           # -U，保留原始 HTML
+```
+
+`auto`（默认，`[Content] extractor`）先试 Readability，失败再回退 Trafilatura，两者都会去掉广告、侧边栏和导航。带内容语义的内嵌 SVG 图表会转成 Markdown 图片引用，装饰性图标会被丢弃。
+
+### 无头浏览器
+
+```bash
+uv run surf "https://example.com" --browser
+uv run surf "https://example.com" -B playwright
+uv run surf "https://example.com" -B obscura
+uv run surf "https://example.com" -B auto          # 跟随 [Browser] backend
+```
+
+`--browser` 强制用无头浏览器渲染而不是普通 HTTP，`-B/--browser-backend` 选择用哪一个。Obscura 是默认后端，不需要任何 Python extra：
+
+- `[Browser] obscura_fetch = auto` 走原生 CDP，协议出错时回退 Playwright 客户端；`native` 从不回退；`playwright` 使用旧版客户端。
+- 配置的 CDP endpoint 若已在运行，会被视为外部服务：只连接，不启动也不停止。
+- Web 服务器不同线程会协调访问；代理变化时，受管理的 Obscura 服务会被安全替换。
+- Bloomberg 系列站点即使 `obscura_stealth = false` 也会强制开启 Obscura 隐身模式，因为默认无头配置过不了 PerimeterX。
+- 知乎是例外：它的浏览器兜底始终打开可见的 Playwright 窗口，因为 `zse-ck` 挑战在无头会话中无法通过，Linux 上需要图形会话。
+
+如果根本无法启动有头浏览器，archive.today 的 CAPTCHA 兜底现在会快速失败，而不是启动一个注定失败的浏览器。
+
+### 插图 OCR
+
+```bash
+uv run surf "https://example.com/article" --ocr
+uv run surf "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
+uv run surf "https://www.xiaohongshu.com/explore/..." --no-ocr
+uv run surf --ocr /path/to/image.png                 # 直接对本地图片 OCR
+```
+
+OCR 会把识别文本附在每张插图下方。默认引擎是 `auto`（PaddleOCR → RapidOCR → Tesseract）；`--ocr-engine` 可强制其中一个——即使选 `rapidocr`，Tesseract 仍是回退项。`--ocr-lang` 只对 Tesseract 生效。小红书默认开启 OCR，其它站点需要 `--ocr` 或 `[OCR] enabled = true`。单张图片失败只会跳过它，不会中断抓取；引擎在短生命周期子进程中运行，内存不会被 Web worker 长期占住。
+
+---
+
+## 播客与转写
+
+Pocket Casts 和小宇宙的剧集链接会解析出 Show Notes、发布时间、时长与音频地址：
+
+```bash
+uv run surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -r
+uv run surf "https://www.xiaoyuzhoufm.com/episode/69018660740634ca4785c3b8" -a
+```
+
+front matter 的标题是 `剧集标题 - 播客名称`，默认文件名带 `[播客]` 前缀。Show Notes 输出在 `## Show Notes` 下；能取到日期时写入 `created`。即使 Show Notes 被翻译，播客元信息标签也保持不变。若剧集页面被拦截，分享链接里的基本信息仍会被保留。
+
+本地转写需要可选后端和 GGUF 模型：
 
 ```bash
 uv sync --extra transcribe
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -w
+uv run surf "https://pca.st/episode/..." -w
+uv run surf "https://pca.st/episode/..." -w --transcript-timestamps segment
 ```
 
-默认输出不带时间戳的纯文本段落（`[Transcription].timestamps = none`）；如需每行带 `[HH:MM:SS]` 时间戳，使用 `--transcript-timestamps segment` 或在 config.ini 中设置 `[Transcription].timestamps = segment`。
+```ini
+[Transcription]
+backend = auto
+model_path = /path/to/whisper-small-Q8_0.gguf
+language = auto
+timestamps = none        ; none = 纯段落，segment = 每行 [HH:MM:SS]
+ffmpeg_path = ffmpeg
+max_audio_mb = 2048
+audio_timeout = 120
+```
 
-Web 界面提供相同的 `transcribe.cpp` 选项；请配置 `[Transcription].model_path` 并确保系统安装了 `ffmpeg`。转写文本遵循当前语言模式（`trans` / `raw` / `both`）；Show Notes 与 Transcript 会分别翻译。
+转写文本遵循当前语言模式；Show Notes 与转写稿分别独立翻译。
 
-### 小宇宙剧集
+---
 
-可以直接粘贴小宇宙分享的剧集链接。Surf 会解析剧集页面的内嵌数据，提取 Show Notes、发布时间、时长和音频地址：
+## 特殊站点
+
+Surf 内置 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙、GitHub、Wikipedia 和 Foreign Affairs 的处理器。要点：
+
+站点默认值也是同一套机制的一部分：微信、知乎、小红书、NCPSSD、V2EX、BBC 默认不使用代理、不翻译（小红书还默认开启插图 OCR），这些默认值都可以被显式参数覆盖。
+
+- **Twitter/X** 优先 `uvx --from twitter-cli twitter` 并复用本机浏览器 Cookie，解析 `t.co` 链接，把 `/user/article/<id>` 规范化为 `/i/article/<id>`，尽量保留主 tweet 的 DOM 以留住行内样式与媒体，X 本身连不通时依次回退 syndication、fxTwitter 和 `api.fxtwitter.com`。
+- **短帖子**（Twitter/X、Bluesky、微博、Threads）标题为 `第一句 - 作者名 on 站点`；长文保留文章自身标题。
+- **Reddit** 读 JSON 评论端点并复用已保存 Cookie；只有显式传 `--thread after|both` 或 `-t` 才包含回复。
+- **小红书** 先用已保存 Cookie 抓服务端渲染的笔记页，失败才回退浏览器；登录态过期与风控响应会作为错误报告，而不会被当作正文输出。
+- **GitHub** 从解析后的 README/blob 文件取内容，但 front matter 的 `source` 保留你输入的页面 URL；Markdown 里内嵌的 HTML 片段会转回 Markdown，围栏代码示例原样保留。
+- **Foreign Affairs** 会移除分享/引用弹窗和订阅推销，避免可免费阅读的文章被误判为付费墙。
+- **付费墙** 触发归档优先的回退：先试 `archive.today/newest/<url>` 的普通 HTTP 跳转，再查 Wayback availability API 并下载无工具栏的 `id_` 文档，最后通过浏览器依次尝试 `archive.ph` / `archive.is` / `archive.fo` / …，仍失败则打开可见窗口等待人工过 CAPTCHA。查询快照时会去掉跟踪参数与 fragment；若 Readability 只抓到摘要，还会再跑一次 Trafilatura。
+
+完整的匹配规则、处理动作和维护要求见 `SPECIAL_SITES_zh.md`（中文）与 `SPECIAL_SITES.md`（English），请与代码保持同步。
+
+---
+
+## 认证
+
+有些站点需要登录。Surf 按站点保存一份 Playwright 登录态并复用。
 
 ```bash
-surf "https://www.xiaoyuzhoufm.com/episode/69018660740634ca4785c3b8" -r
+uv run surf --login xiaohongshu
+uv run surf --export-auth xiaohongshu ~/Note/xhs_state.json   # 搬到另一台机器
+uv run surf --import-auth xiaohongshu ~/Note/xhs_state.json
+uv run surf --clear-auth xiaohongshu
+uv run surf --clear-auth all
 ```
 
-输出结构与 Pocket Casts 剧集一致：front matter 的 title 使用 `剧集标题 - 播客名称`，默认文件名增加 `[播客]` 前缀，作者写入 front matter 的 `author`，Show Notes 放在 `## Show Notes` 小节下。使用 `-a/--format audio` 可下载原始剧集音频（例如 `.m4a`），而不是生成 TTS；可用 `-o/--output` 指定精确保存路径。同样支持 `-w/--transcribe` 本地转写。
+支持的站点：`xiaohongshu`、`twitter`（别名 `x`）、`reddit`、`zhihu`、`douban`、`ncpssd`。登录态在 Windows 上位于 `%LOCALLAPPDATA%\surf\`，在 Linux/macOS 上位于 `~/.local/cache/surf/`。
 
-### 特殊网站策略
+`--login` 需要图形会话。在无头 Linux 上它会快速失败而不是尝试打开浏览器——请在桌面机器登录，再用 `--export-auth` / `--import-auth` 迁移登录态。
 
-Surf 内置了多个特殊网站处理器（如 Twitter/X、Reddit、微信、知乎、小红书、Bluesky、微博、Threads、V2EX、NCPSSD、Pocket Casts、小宇宙、GitHub、Wikipedia）。
+各站点说明：
 
-完整的匹配规则、处理流程、默认策略和维护要求统一维护在：
-- `SPECIAL_SITES_zh.md`（中文）
-- `SPECIAL_SITES.md`（English）
+- **Twitter/X** 先通过 `twitter-cli` 从真实浏览器（或 `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`）导入 Cookie，这通常比 X 的自动登录页可靠；不可用时才打开可见的 Playwright 窗口并保留持久 profile。
+- **Twitter/X** 还接受 `--twitter-backend auto|cli|native`、`--twitter-browser`、`--twitter-profile` 控制 Cookie 导入；`--twitter-cli-bin` 已废弃并被忽略。
+- **知乎** 的 Cookie 会用于 API 与镜像请求，并帮助通过浏览器验证。
+- **NCPSSD** 的部分安全全文 PDF 下载必须登录。
 
-## 安装
+### Cloudflare Cookie
 
-我们推荐使用 `uv` 保持环境整洁。
+被 Cloudflare WAF 拦截的站点，可以复用自己浏览器里的 `cf_clearance`：
 
-1.  **安装 uv**:
+1. 用 Chrome 打开目标站点并通过验证。
+2. DevTools → Application → Cookies → 选中该域名。
+3. 复制 `cf_clearance` 的值。
 
-    ```bash
-    pip install uv
-    # 或参考 https://github.com/astral-sh/uv
-    ```
+```bash
+uv run surf --set-cf-clearance example.com "cf_clearance=VALUE"
+uv run surf --clear-cf-clearance example.com
+uv run surf --clear-cf-clearance all
+```
 
-2.  **设置环境**:
-    ```bash
-    uv sync
-    # 可选：基于 Playwright 的浏览器自动化（见下文）
-    uv sync --extra browser
-    uv run playwright install chromium
-    ```
+也可以写进配置：
 
-    Playwright 现在是**可选依赖**（`browser` extra）：Surf 默认的无头抓取通过 `websockets` 直接使用 Chrome DevTools 协议驱动 Obscura，完全不需要 Playwright。只有以下场景需要安装该 extra：
-    - 有头交互式登录（`--login`）；
-    - 需要真实页面自动化的特殊站点处理器（archive.today、微信公众号、微博/Threads、小红书、NCPSSD、GitHub、Wikipedia、知乎）；
-    - NCPSSD 全文 PDF 下载；
-    - Playwright PDF 引擎（PDF 也可以用本机 Chrome/Chromium 或 WeasyPrint 渲染，见 `uv sync --extra pdf`）。
+```ini
+[Cloudflare]
+example.com = cf_clearance=VALUE
+```
 
-    不装该 extra 时其余功能照常工作：`requests`/`curl-cffi` 抓取、Obscura 动态页渲染，以及通过本机 `google-chrome`/`chromium`/Edge 生成 PDF。缺少 Playwright 的功能会打印可执行的安装提示，而不是只抛 `ModuleNotFoundError`。
+Cookie 必须来自 Chrome 或其它 Chromium 内核浏览器——Surf 模拟的是 Chrome 的 TLS 指纹，Firefox 和 Safari 的 Cookie 不会生效。这类 Cookie 通常在 30 分钟到 24 小时内失效，过期后由常规的挑战处理流程接管。
 
-    ```ini
-    [Browser]
-    ; Surf 与 Obscura 的通信方式: auto（原生 CDP，失败时回退 Playwright）、
-    ; native（仅原生 CDP）、playwright（旧版 Playwright 客户端）
-    obscura_fetch = auto
-    ; 无 Playwright 时用于生成 PDF 的 Chrome/Chromium（留空则自动探测）
-    chrome_executable =
+---
 
-    [Output]
-    ; PDF 引擎链，按顺序尝试直到成功
-    pdf_engine = auto
-    ```
-    环境变量 `SURF_CHROME_EXECUTABLE` 优先于 `chrome_executable`。
+## 关键词搜索
 
-    如果既没有浏览器也没有本机 Chrome，可 `uv sync --extra pdf` 安装 WeasyPrint（纯 Python，需要系统 Pango 库），详见「输出路径 (-o / -O)」一节的 PDF 说明。
+```bash
+uv run surf -S "python asyncio 教程"                        # 交互选择
+uv run surf -S "python asyncio 教程" --search-top 3         # 前 3 条，不询问
+uv run surf -S "python asyncio 教程" --feel-lucky           # 只要第一条
+uv run surf -S "python asyncio 教程" --search-merge         # 合并成一个文档
+uv run surf -S "python asyncio 教程" --search-prefix asyncio
+uv run surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
+```
 
-    Obscura 是 Surf 默认且推荐的浏览器后端。Surf 也支持 Playwright 作为备选。请先从 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 单独安装 Rust 二进制文件。Surf 会按需启动一个受管理的常驻 `obscura serve` 并通过 CDP 连接，后续请求复用该服务。通用无头抓取使用原生 Chrome DevTools 协议（`[Browser] obscura_fetch = auto|native|playwright`），因此不需要 Playwright：`auto`（默认）走原生 CDP，协议路径失败时回退到 Playwright 客户端；`native` 从不回退；`playwright` 使用旧版客户端。Web 服务器的线程之间会协调访问；如果请求代理发生变化，Surf 会在下一个请求前安全地替换受管理的服务。worker 退出时会清理自己启动的服务。若配置的 CDP endpoint 已经存活，则视为外部服务，只连接而不会启动或停止它。配置文件指定的后端会用于所有无头浏览器场景：通用动态页兜底，以及 Twitter/X、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads 和 archive 快照路径都遵循 `[Browser] backend`。对于 Bloomberg 系列站点，Surf 会强制启用 Obscura 隐身模式（即使 `obscura_stealth = false`），因为默认无头配置无法通过其 PerimeterX「Are you a robot?」验证页；若浏览器跳转后仍返回反爬挑战页，Surf 会先重试跳转，再考虑 archive/付费墙兜底。知乎是例外：即使 `backend = obscura`，其浏览器兜底也始终启动 Playwright 可见浏览器窗口，因为知乎的 `zse-ck` 挑战在无头会话中无法通过，因此 Linux 上需要图形会话（`DISPLAY`）。有头交互式登录、特殊站点的页面自动化处理器、NCPSSD 全文 PDF 下载和 Playwright PDF 引擎是仅有的需要可选 Playwright extra（`uv sync --extra browser`）的功能。若希望所有无头抓取也使用 Playwright 客户端，请在 `config.ini` 的 `[Browser]` 中设置 `backend = playwright` 并运行 `uv run playwright install`。`[Browser] obscura_navigation_timeout`（默认 60 秒）限制单次跳转时长；waitress 没有硬性请求超时，较慢的浏览器/archive 流程不会被中途杀掉。在无图形会话的主机上，archive 的可见浏览器 CAPTCHA 兜底现在会快速失败，而不是启动一个必然失败的浏览器。单次运行可用 `-B/--browser-backend {auto,obscura,playwright}` 覆盖配置文件的 `[Browser] backend`（`auto` 为默认，表示跟随配置）；Web 界面提供同样的「浏览器后端」选项。
+`-S` 把位置参数变成关键词。Surf 先搜索，把前 `--search-preview` 条结果打印成编号列表，再让选中的 URL 走完整的 抓取 → 提取 → 翻译 → 保存 流程。单条失败只记日志并跳过，不会中断整批。
 
-    Surf 默认仅输出 WARNING 级日志。可设置环境变量 `SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）以记录每次请求的后端选择与回退决策等细节；CLI 单次运行也可用 `--verbose` 达到同样效果。
+**引擎** —— `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek/SearXNG/Metaso API。
 
-3.  **可选：安装图片 OCR 引擎**：
-    `uv sync` 已随 `pyproject.toml` 安装 PaddleOCR、RapidOCR 和 `pytesseract`，无需额外安装 Python 包。通过 `config.ini` 的 `[OCR] engine` 或命令行 `--ocr-engine` 选择引擎：`auto`（默认；PaddleOCR > RapidOCR > Tesseract）、`paddleocr`、`rapidocr` 或 `tesseract`。
-    Tesseract 为可选项，需要本机二进制：请自行安装并确保 `tesseract` 在 `PATH` 中，或在 `config.ini` 的 `[OCR] tesseract_cmd` 中指定路径。仅在显式选择 `tesseract`，或 `rapidocr` / `auto` 链回退时才会用到。
+```ini
+[Search]
+engine = auto
+limit = 5             ; 每次获取的结果数，1-20
+preview = 5           ; 交互列表显示的行数
+searxng_url =         ; 已开启 JSON API 的自建实例
+metaso_api_key =      ; https://metaso.cn 开放 API
+deepseek_api_key =    ; POST https://api.deepseek.com/v1/tools/search
+deepseek_url =        ; 可选接口覆盖
+```
 
-4.  **可选：安装 curl-cffi 绕过 Cloudflare 防护**：
-    部分网站（如 ACM 数字图书馆）使用 Cloudflare 反爬虫保护。Surf 可以使用 `curl-cffi` 模拟浏览器 TLS 指纹来绕过这些挑战。安装方法：
-    ```bash
-    uv sync --extra curlcffi
-    ```
-    然后在 `config.ini` 中配置：
-    ```ini
-    [Browser]
-    ; 使用 curl-cffi TLS 指纹模拟绕过 Cloudflare 挑战
-    ; 可选值: false（默认）, true（始终使用）, auto（仅作为回退）
-    curlcffi_mode = auto
-    ```
-    设置为 `auto` 时，Surf 会先尝试标准 requests，然后尝试 curl-cffi，最后才回退到浏览器渲染。这种方式比启动完整浏览器更轻量。
+DeepSeek 搜索支持 `site:`、`lang:`、`after:`、`before:`、精确短语和排除语法。
+
+**选择** —— 输入 `1`、`1,3-5`、`1 3 5` 或 `all`；空行表示取消。非法输入最多重试三次。stdin 不是终端时（脚本、CI）会处理全部已获取结果；脚本里建议用 `--search-top N` 或 `--feel-lucky` 保证行为确定。
+
+**输出** —— 默认每条结果一个文件，`--search-merge` 合并成一个文档。不会创建搜索专用目录；文件进常规 `[Output]` 目录，名字固定为 `[<前缀>]<标题>`。前缀默认取关键词（超长截到 40 字符），`--search-prefix` 可覆盖，末尾分隔符会被规范化，已经带中括号的前缀不会重复包裹。搜索模式下 `-o/--output` 只接受 `-`（标准输出）。每个文件都会在 front matter 记录 `search_query`，结果 URL 在抓取前以及写入 front matter `source` 时会去掉 `utm_*`、`fbclid`、`gclid`、`dclid`、`spm` 等跟踪参数。
+
+其它选项（`-l`、`-p`、`-h`、`-a`、`-e`、代理相关、`--archive` 等）对每条结果均生效。
+
+---
 
 ## Web 界面
 
-`surf_web.py` 提供的是一个基于 Flask 的本地 Web 界面，适合开发和个人使用。它内部调用的 `app.run(...)` 是 Flask 自带的开发服务器，所以你看到“不要用于生产部署”的提示是正常的。
-
-Web 表单已经直接暴露了 Surf 最常用的一批选项，包括：
-- 语言模式（`trans` / `raw` / `both`）
-- 代理模式和自定义代理（Windows: `auto/win/env/custom/no`；非 Windows: `auto/env/custom/no`）
-- 浏览器渲染
-- 浏览器后端（跟随配置 / Obscura / Playwright，对应 CLI `-B/--browser-backend`）
-- 输出格式可选 Markdown / HTML / PDF / Audio / 发布到 Pastebin（发布对应 CLI `-P/--format publish`，需在 config.ini 的 `[publish.pastebin]` 配置 `api_dev_key`；发布不写本地文件，成功后展示 Pastebin 链接）
-- 选择 Audio 格式时显示 TTS 设置（语音下拉框、语速、音量），对应 CLI `--tts-voice` / `--tts-rate` / `--tts-volume`，默认值来自 config.ini 的 `[TTS]`
-- 图片 OCR 开关；OCR 引擎和 OCR 语言只在未关闭 OCR 时显示
-- Thread 抓取方向（`after` / `before` / `both` / `off`）和作者范围（`same` / `all`；V2EX 将 thread 方向用作是否包含回帖）
-- 翻译时可选的 LLM Provider 覆盖；语言模式不是 `raw` / 保留原文时才显示
-- Podcast 音频转写（`-w/--transcribe`）：识别到 Pocket Casts 或小宇宙剧集 URL 后才显示“转写 Podcast 音频（-w）”入口
-- 宽松 URL / 文本输入：可以直接粘贴带说明文字的分享文案，Surf 会自动提取其中第一个 `http/https` 链接；如果没有 URL，则会把这段文字直接当作帖子保存，并以第一句作为标题
-- 输入区额外提供“开始获取”和“全文保存”模式；开启“全文保存”后，即使文本里带有 URL，也会保留整段文本原样进入结果卡片
-- 关键词搜索模式（`-S/--search`）：勾选“关键词搜索 (-S)”后输入关键词，并选择搜索引擎 / 结果数量 / 文件名前缀。Surf 会获取搜索结果并以「标题 + URL」的可勾选列表预览；获取选中的结果后生成常规预览卡片，逐条保存和“合并保存全部结果”与普通网页结果完全一致。搜索保存的文件会写入 `search_query` front matter，并使用 `[前缀]文件名`；抓取或转换失败的 URL 会把 URL 本身写入 `[Output] md_dir` 的 `获取失败_<标题>.md`
-- “直接保存”会根据当前 URL/文本、输出格式和其他选项获取内容并加入后台保存队列，不生成预览卡片；成功提示会显示被加入队列的 URL，并在提示下方展示保存队列列表，实时跟踪每个后台保存任务（排队中 / 保存中 / 已完成 / 失败）；队列列表在连续入队时保持显示，只有当队列中的所有任务都结束后才会自动隐藏
-- 每个结果卡在预览区下方都会直接显示“保存文件夹”“文件标题”两个可编辑输入框，并预填默认值；点击保存按钮后会直接写入，不再额外弹框确认
-- 当一次提交生成多张结果卡时，Surf Web 还会额外显示一张“合并保存”结果卡，可将所有成功结果合并导出为一个 Markdown / HTML / PDF / Audio 文件
-- 开启翻译时，Surf Web 会先返回原文结果卡，再由后台任务继续完成翻译；翻译完成后会自动刷新同一张结果卡
-
-输入 URL 时，Web UI 会动态应用匹配到的特殊站点默认值。例如默认保留原文的站点会隐藏 LLM Provider，除非手动选择翻译或双语；当前有效 OCR 默认为关闭时会隐藏 OCR 引擎，除非手动选择启用 OCR；识别到 Pocket Casts 或小宇宙剧集 URL 时才会显示 Podcast 音频转写入口。
-
-GitHub 仓库页和 Markdown 文件 URL 在 Surf Web 中使用普通语言默认值：会先判别内容语言，非中文 Markdown 默认翻译为中文；如需保留原文，可手动选择原文模式。直接抓取到的 GitHub Markdown 仍会把内嵌 HTML 片段转换回 Markdown，并保留代码围栏中的 HTML 示例。
-
-Web 界面的代理默认值规则与 CLI 有意不同：
-- CLI 默认使用隐式 `auto` 代理解析，因为它通常运行在 Windows 客户端机器上，很多网站需要本地代理才能访问。
-- Surf Web 默认使用 `no`（不使用代理），因为它通常运行在服务器上，公网网站一般可直连，而且 Linux 服务器没有 Windows 注册表代理设置。只有当前部署确实需要代理时，才在 Web UI 中手动选择 `auto`、`env`、`custom` 等代理模式。
-
-本机访问时可以直接启动：
-
 ```bash
-uv run python surf_web.py --host 127.0.0.1 --port 18473
+uv run python surf_web.py                              # http://127.0.0.1:18473
+uv run python surf_web.py --port 8080
+uv run python surf_web.py --host 0.0.0.0 --root /surf
 ```
 
-如果要对外网或局域网正式部署，请改用真正的 WSGI 服务器，并让它加载 `surf_web:app`：
+整个页面就是一屏：顶部输入区，下面可折叠的选项面板，再往下是结果卡片。输入需要的东西都直接可见；每次运行才需要的偏好都在可折叠面板里，面板标题会实时汇总当前选择（语言 · 代理 · OCR · 格式）。
+
+### 页面能做什么
+
+- **两种输入模式。** *链接 / 文本* 抓取 URL，或把粘贴的文字当作帖子保存；*关键词搜索* 走和 `-S` 相同的搜索流程，列出可勾选的结果，只抓你要的。
+- **提取，或直接保存。** *提取* 生成预览卡片；*直接保存* 跳过预览，把文件放进后台队列。
+- **全文模式。** 勾选 *全文保存* 后，即使文字里含 URL 也会整段保留。
+- **每份文档一张卡片。** 卡片上有可编辑的保存目录和文件名，然后是格式按钮（MD / HTML / PDF / 音频 / Pastebin），同一份结果不用重新抓取就能导出成任意格式。*朗读* 按钮当场生成语音。
+- **三个预览页签。** Markdown、HTML 和原始提取文本并排。
+- **合并卡片。** 一次运行产生多份结果时，会多出一张卡片把它们合并成一个 Markdown/HTML/PDF/音频文档。
+- **实时翻译。** 开启翻译时卡片先显示原文，后台翻译任务完成后原地刷新。
+- **保存队列。** 后台保存任务列出状态（排队中 / 保存中 / 已完成 / 失败），顶栏有任务计数；队列清空后面板自动隐藏。
+- **站点感知默认值。** 输入 URL 会应用该站点默认值——默认保留原文的站点会隐藏 LLM provider，直达你手动选择翻译模式；有效 OCR 默认为关闭时隐藏引擎选择；播客转写开关只在 Pocket Casts 和小宇宙剧集 URL 下出现。
+- **代理默认值。** Web 界面默认 `no` 代理（见[代理](#代理)），部署确实需要时再切换。
+- **键盘。** `Ctrl`/`Cmd` + `Enter` 提交输入区。
+
+GitHub 仓库页和 Markdown 文件 URL 在 Web 界面上使用普通语言默认值：非中文内容默认翻译为中文，除非你选择原文模式。
+
+### 部署
+
+内置服务器是 Flask 的开发服务器，它提示不要用于生产是正常的。需要长期运行时，请让 WSGI 服务器加载 `surf_web:app`：
 
 ```bash
-# waitress：单进程、多线程的生产服务器（执行 `uv sync` 后会自动安装）
 uv run waitress-serve --listen=0.0.0.0:18473 --threads=4 surf_web:app
 ```
 
-waitress 在内存中只保留一份应用（线程池而非多进程 worker），这在小型主机上很重要：每个 gunicorn worker 都要各付一份约 70 MB 的 Python 基线内存。
+waitress 在内存里只保留一份应用（线程池而非多进程 worker）。这在小型主机上很关键：每个 gunicorn worker 都要各付一份约 70 MB 的 Python 基线内存。
 
-如果要暴露到公网，建议再前置反向代理并启用 HTTPS，同时只开放必要端口。
+如果暴露到公网，请在前面加一层带 HTTPS 的反向代理，并只开放必要端口。
 
-### 在反向代理（Nginx 等）后面运行
+### 反向代理后面运行
 
-如果把 Surf 放在 Nginx 反向代理后面并使用 URL 前缀（如 `http://IP:8000/surf`），需要用 `--root` 参数告诉 Surf 应用的路径前缀：
+需要在路径前缀下提供服务（`http://IP:8000/surf`）时，使用 `--root`：
 
 ```bash
 uv run python surf_web.py --host 127.0.0.1 --port 18473 --root /surf
 ```
-
-对应的 Nginx 配置示例：
 
 ```nginx
 location /surf/ {
@@ -206,496 +492,186 @@ location /surf/ {
 }
 ```
 
-> **注意**：`proxy_pass` 末尾的 `/` 会自动剥离 `/surf` 前缀，使请求路径直接转发到 Surf（如 `/surf/api/process` → `/api/process`）。此时 Surf 侧不需要 `--root`。如果 `proxy_pass` 末尾没有 `/`（路径原样转发），则必须使用 `--root /surf`。
+`proxy_pass` 末尾的 `/` 会在转发前剥掉前缀（`/surf/api/process` → `/api/process`），这种情况下不需要 `--root`。如果 `proxy_pass` 末尾没有 `/` 且路径原样转发，则必须 `--root /surf`。
+
+---
 
 ## 配置
 
-Surf 会先读取启动的可执行文件/脚本同目录下的 `config.ini`。如果那里没有，再回退到 `$XDG_CONFIG_HOME/surf/config.ini`；若未设置 `XDG_CONFIG_HOME`，则回退到 `~/.config/surf/config.ini`。
-
-复制 `config.ini.example` 为 `config.ini` 并编辑以设置您的 API 密钥和路径。
-
-在 Windows 上，Surf 支持在配置项和命令行路径参数里直接使用 Unix 风格路径。例如 `~/Note/article.md` 会解析到当前用户的 `%USERPROFILE%` 目录下，同时会自动把 `/` 规范化为 `\`。
-
-```bash
-cp config.ini.example config.ini
-```
+`config.ini.example` 记录了全部可选项，最常改的是这些：
 
 ```ini
 [LLM]
-; 默认 LLM 提供方名称
-provider = L1
+provider = LLM1                     ; 默认 provider 名称
 
-[LLM.L1]
-; OpenAI 兼容 API 配置
+[LLM.LLM1]
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
 
-[LLM.L2]
-; 备用 LLM 提供方示例 (DeepSeek)
-base_url = https://api.deepseek.com/v1
-api_key = your_deepseek_api_key
-model = deepseek-chat
-
 [Output]
-; Markdown 文件保存目录 (默认: ./notes)
+target_language = zh-cn             ; 翻译目标语言
 md_dir = ./notes
-; 目标翻译语言
-target_language = zh-cn
-; PDF 文件保存目录 (默认: 当前目录)
-pdf_dir = .
-; PDF 引擎链，按顺序尝试: auto | playwright | chrome | weasyprint | typst | pandoc（可用逗号组合）
-pdf_engine = auto
-; 音频文件保存目录 (默认: 当前目录)
-audio_dir = .
-; HTML 文件保存目录 (默认: 当前目录)
-html_dir = .
-; 默认保存 source 到 Internet Archive（CLI --archive 与 Web 勾选项可单次强制开启）
-archive = false
-; 默认禁用 YAML front matter（CLI --no-front-matter 与 Web 勾选项可单次强制开启）
-no_front_matter = false
-; 默认在 HTML 输出中内联 CSS/JS（CLI --html-inline 与 Web 勾选项可单次强制开启）
-html_inline = false
+pdf_dir = ./pdf
+html_dir = ./web
+audio_dir = ./audio
+pdf_engine = auto                   ; playwright, chrome, weasyprint, typst, pandoc
+archive = false                     ; --archive 的默认值
+no_front_matter = false             ; --no-front-matter 的默认值
+html_inline = false                 ; --html-inline 的默认值
 
 [Content]
-; 内容提取器: auto（readability 优先，失败回退 trafilatura）、readability、trafilatura、raw
-; CLI -e/--extractor / -R / -T / -U 与 Web 提取选项可单次覆盖
-extractor = auto
+extractor = auto                    ; auto, readability, trafilatura, raw
 
-[Search]
-; -S/--search 使用的搜索引擎：auto（DuckDuckGo、Bing，然后是已配置的 DeepSeek/SearXNG/Metaso）、
-; duckduckgo、bing、searxng、metaso、deepseek。CLI --search-engine 可单次覆盖
-engine = auto
-; 每次运行获取的搜索结果数量（1-20）
-; CLI --search-limit 可单次覆盖
-limit = 5
-; 未指定 --search-preview 时交互选择列表显示的数量
-preview = 5
-; SearXNG 实例地址；该实例需开启 JSON API
-searxng_url =
-; Metaso（秘塔搜索）开放平台 API Key
-metaso_api_key =
-; DeepSeek Search API Key（https://platform.deepseek.com）
-deepseek_api_key =
-; 可选的 DeepSeek Search 接口地址覆盖
-deepseek_url =
+[Network]
+proxy_mode = env                    ; env, win, custom, no
+custom_proxy =
 
 [TTS]
-engine = edge-tts
-; CLI --tts-voice / --tts-rate / --tts-volume 与 Web TTS 选项可单次覆盖
 voice = zh-CN-XiaoxiaoNeural
 rate = +0%
 volume = +0%
 
-[Network]
-; 代理模式: env (环境变量), win (Windows Internet Settings), custom (自定义地址), no (不使用)
-proxy_mode = env
-; 自定义代理地址 (例如 http://127.0.0.1:7890)
-custom_proxy =
-
-[Twitter]
-; 后端选择: cli（优先 uvx --from twitter-cli twitter）, auto（先 CLI，再 native 回退）, native（仅 Surf 内置实现）
-backend = cli
-; 已弃用：Surf 固定通过 `uvx --from twitter-cli twitter` 调用 twitter-cli
-cli_bin =
-; 可选：twitter-cli 读取 Cookie 时优先使用的浏览器：chrome、edge、brave、firefox、arc
-browser =
-; 可选：twitter-cli 的浏览器 profile，例如 Default 或 Profile 2
-profile =
+[Browser]
+backend = obscura                   ; obscura 或 playwright
+obscura_executable = obscura
+obscura_endpoint = http://127.0.0.1:9222
+obscura_fetch = auto                ; auto, native, playwright
+obscura_stealth = false
+obscura_navigation_timeout = 60
+chrome_executable =                 ; 无 Playwright 时的 PDF 回退
+curlcffi_mode = auto                ; false, true, auto
 
 [OCR]
-; 默认是否对文章插图执行 OCR（默认 false；小红书站点会覆盖为 true）
-enabled = false
-; OCR 引擎：auto（默认；paddleocr > rapidocr > tesseract）、paddleocr、rapidocr 或 tesseract
-engine = auto
-; Tesseract 语言，例如：chi_sim+eng、eng、jpn+eng
-; RapidOCR 与 PaddleOCR 不使用这个参数，仅在选择/回退到 Tesseract 时生效
+enabled = false                     ; 小红书会覆盖为 true
+engine = auto                       ; auto, paddleocr, rapidocr, tesseract
 lang = chi_sim+eng
-; 可选：本地 tesseract 可执行文件路径
-tesseract_cmd =
-; 每篇文章最多 OCR 这么多张图
 max_images = 8
+
+[publish.pastebin]
+api_dev_key = your_pastebin_api_key_here
 ```
 
-## 用法
+`SURF_LOG_LEVEL`（例如 `SURF_LOG_LEVEL=INFO`）可提高长期运行时的日志详细度；单次 CLI 运行可用 `--verbose`。默认只输出 WARNING 级日志。
+
+---
+
+## 命令行参考
+
+按 `--help` 的分组排列。
+
+**输入**
+
+| 参数 | 含义 |
+| --- | --- |
+| `URL \| PATH \| KEYWORDS` | 唯一的位置参数。认证类命令不需要它。 |
+
+**输出**
 
-### 基础
+| 参数 | 含义 |
+| --- | --- |
+| `-f, --format {md,pdf,html,audio,publish}` | 输出格式（默认 `md`） |
+| `-h` `-p` `-a` `-P` | `-f html/pdf/audio/publish` 的简写 |
+| `-o, --output PATH` | 输出路径，`-` 表示标准输出 |
+| `-O` | 等价于 `-o -` |
+| `--html-inline` | HTML 中内联 CSS/JS |
+| `--no-front-matter` | 不写 YAML front matter |
+| `--archive` | 把源链接提交到 Wayback Machine |
+
+**语言与音频**
+
+| 参数 | 含义 |
+| --- | --- |
+| `-l, --lang {trans,raw,both}` | 翻译模式（默认 `trans`） |
+| `-r` `-b` | `-l raw` / `-l both` 的简写 |
+| `--llm PROVIDER` | 本次运行使用的 LLM provider |
+| `-s, --speak` | 朗读结果 |
+| `--tts-voice` `--tts-rate` `--tts-volume` | 覆盖本次运行的 `[TTS]` |
+| `-w, --transcribe` | 本地转写播客剧集 |
+| `--transcript-timestamps {none,segment}` | 转写稿时间戳样式 |
+
+**提取与渲染**
+
+| 参数 | 含义 |
+| --- | --- |
+| `-e, --extractor {auto,readability,trafilatura,raw}` | 正文提取策略 |
+| `-R` `-T` `-U` | `readability` / `trafilatura` / `raw` 的简写 |
+| `--browser` | 强制无头浏览器渲染 |
+| `-B, --browser-backend {auto,obscura,playwright}` | 使用哪个无头后端 |
+
+**网络**
+
+| 参数 | 含义 |
+| --- | --- |
+| `-x, --proxy {env,win,custom,no}` | 代理模式（`win` 仅 Windows） |
+| `-c [PROXY]` | 自定义代理，可内联地址 |
+| `-n` | 不使用代理 |
+| `--set-proxy URL` | `-x custom` 使用的代理地址 |
+
+**线程与社交站点**
+
+| 参数 | 含义 |
+| --- | --- |
+| `-t, --thread [{after,before,both,off}]` | 线程范围 |
+| `--no-thread` | 关闭线程展开 |
+| `--thread-author {same,all}` | 作者范围（默认 `all`） |
+| `--twitter-backend {auto,cli,native}` | Twitter/X 后端 |
+| `--twitter-browser` `--twitter-profile` | `twitter-cli` 的 Cookie 来源 |
+
+**OCR**
+
+| 参数 | 含义 |
+| --- | --- |
+| `--ocr` / `--no-ocr` | 开启或关闭插图 OCR |
+| `--ocr-engine {rapidocr,tesseract,paddleocr,auto}` | 指定引擎或回退链 |
+| `--ocr-lang LANGS` | Tesseract 语言 |
+
+**搜索**（仅配合 `-S/--search`）
+
+| 参数 | 含义 |
+| --- | --- |
+| `-S, --search` | 把输入当作关键词 |
+| `--search-engine` | `auto`、`duckduckgo`、`bing`、`searxng`、`metaso`、`deepseek` |
+| `--search-limit N` | 获取的结果数（上限 20） |
+| `--search-preview N` | 交互列表显示的行数 |
+| `--search-top N` / `--feel-lucky` | 跳过交互选择 |
+| `--search-merge` | 合并为一个文档 |
+| `--search-prefix PREFIX` | 文件名前缀 |
+| `--search-delay SECONDS` | 两次抓取之间的等待 |
+
+**认证与 Cookie**
+
+| 参数 | 含义 |
+| --- | --- |
+| `--login SITE` | 交互式登录 |
+| `--clear-auth SITE` | 删除某站点登录态（`all` 表示全部） |
+| `--export-auth SITE FILE` / `--import-auth SITE FILE` | 在不同机器间迁移登录态 |
+| `--set-cf-clearance DOMAIN COOKIE` | 保存 Cloudflare 验证 Cookie |
+| `--clear-cf-clearance DOMAIN` | 删除它（`all` 表示全部域名） |
+
+**运行时**
+
+| 参数 | 含义 |
+| --- | --- |
+| `--config FILE` | 使用指定配置文件 |
+| `--verbose` | 详细日志 |
+| `--version` / `--help` | 版本 / 本参考 |
 
-转换 URL 并将 Markdown 打印到控制台（默认翻译为中文）：
+---
 
-```bash
-surf "https://example.com"
-```
+## 退出码与失败记录
 
-在 Windows 上，`--config`、`-o/--output`、`--export-auth`、`--import-auth` 等路径参数都支持这种写法，例如 `~/Note/out.md`。
+成功时退出码为 `0`；输入无法处理时非零（抓取/转换/保存失败为 `1`，Ctrl+C 为 `130`）。
 
-### 本地文件
+CLI 或 Web 界面无法抓取、转换或保存某个网页 URL（包括搜索结果）时，Surf 会把该 URL 本身写入 `[Output] md_dir`，文件名为 `获取失败_<标题>.md`（没有标题时用域名/路径生成的短标识）。同名的无关文件不会被覆盖；同一 URL 已有的记录会被复用，因此这些文件同时充当重试队列。
 
-Surf 可以直接读取和处理本地 HTML、Markdown、文本和 PDF 文件。支持的输入格式：
+---
 
-- **操作系统路径**：`/tmp/article.html`、`~/docs/readme.md`、`C:\Temp\notes.txt`
-- **Windows 下 Unix 风格路径**：`C:/Temp/article.md`（自动将 `/` 转换为 `\`）
-- **file:// URI**：`file:///tmp/article.html`
+## 更多文档
 
-支持的文件类型：`.html`、`.htm`、`.md`、`.txt`、`.rst`、`.adoc`、`.pdf`（其他类型按纯文本处理）。本地 PDF 与 PDF URL 使用相同的文本提取流程。
-
-```bash
-# 读取本地 HTML 文件
-surf /tmp/article.html
-
-# 读取本地 Markdown 文件（默认翻译）
-surf ~/docs/readme.md
-
-# Windows 路径
-surf "C:\Temp\notes.txt"
-
-# file:// URI
-surf file:///tmp/article.html
-
-# 保留原文（不翻译）
-surf /tmp/article.md -r
-
-# 从本地 HTML 生成 PDF
-surf /tmp/article.html -p
-
-# 提取本地 PDF 文本，或用 -p 原样复制
-surf ~/docs/paper.pdf
-surf ~/docs/paper.pdf -p
-```
-
-- `.html`/`.htm` 文件按原样处理。
-- `.md` 文件作为 Markdown 内容读取，经过标准翻译/输出流程处理。
-- `.txt` 和其他文件会先转换为 HTML 段落再处理。
-
-### 关键词搜索 (-S / --search)
-
-位置参数传入搜索关键词而不是 URL。Surf 先搜索网页，打印带编号的「标题 + URL」列表，询问要处理哪些结果；选中的每条结果都会走完整的获取、转换、翻译与保存流程并单独保存。某一条失败时只记录日志并跳过，不会中断整批处理。
-
-```bash
-# 交互选择（直接回车表示取消）
-surf -S "python asyncio 教程"
-
-# 跳过选择：直接保存前 3 条 / 只保存第一条
-surf -S "python asyncio 教程" --search-top 3
-surf -S "python asyncio 教程" --feel-lucky
-
-# 使用 DeepSeek Search（需配置 [Search] deepseek_api_key）
-surf -S "python asyncio 教程" --search-engine deepseek
-
-# 把选中的结果合并成一个文档
-surf -S "python asyncio 教程" --search-top 3 --search-merge
-
-# 覆盖默认前缀（默认使用搜索关键词，仍写入常规 [Output] 目录）
-surf -S "python asyncio 教程" --search-prefix "asyncio"
-# -> [asyncio]Async IO in Python.md
-
-# 选择列表只显示 3 条，并在两次抓取之间等待 2 秒
-surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
-```
-
-- 搜索引擎：`--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek/SearXNG/Metaso。
-- SearXNG：在 `[Search] searxng_url` 填入自建实例地址，并在该实例上开启 JSON API。
-- Metaso：在 `[Search] metaso_api_key` 填入秘塔开放平台 API Key。
-- DeepSeek：在 `[Search] deepseek_api_key` 填入 DeepSeek 平台 API Key，接口为 `POST https://api.deepseek.com/v1/tools/search`；可用 `[Search] deepseek_url` 覆盖接口地址。DeepSeek 搜索支持 `site:`、`lang:`、`after:`、`before:`、精确短语和排除语法。
-- 结果数量：`--search-limit N`（默认取 `[Search] limit`，即 5；上限 20）控制获取多少条结果；选择列表默认显示前 5 条，可用 `--search-preview N` 调整（配置项 `[Search] preview`）。
-- 选择输入：`1`、`1,3-5`、`1 3 5`、`all`，空行表示取消；非法输入最多重试三次。
-- 非交互 stdin（脚本/CI）会处理全部已获取结果；脚本中建议使用 `--search-top N` 或 `--feel-lucky` 保证行为确定。
-- 输出：默认每条结果一个文件；`--search-merge` 合并为一个文档（支持 md/html/pdf/audio/publish）。不会创建搜索专用目录，文件仍写入常规 `[Output]` 目录；文件名固定为 `[<前缀>]<标题>`，前缀默认取搜索关键词（超长截取到 40 字符），可用 `--search-prefix` 覆盖（末尾分隔符会被规范化，已带中括号的前缀不会重复包裹）；搜索模式下 `-o/--output` 只接受 `-`（标准输出）。
-- Front matter：每个保存的文件会记录 `search_query`，结果 URL 在抓取前以及写入 front matter `source` 时会去掉 `utm_*`、`fbclid`、`gclid`、`dclid`、`spm` 等跟踪参数。
-- 获取/保存失败的搜索结果会在 `[Output] md_dir` 中生成 `获取失败_<标题>.md`，内容就是失败的 URL，方便之后重试。
-- 其它选项（`-l/--lang`、`-p`、`-h`、`-a`、`-e`、代理相关选项、`--archive` 等）都会应用到每一条搜索结果。
-
-### 输出路径 (-o / -O)
-
-使用 `-o` 或 `--output` 指定输出文件路径，或使用 `-O` 直接输出到控制台：
-
-```bash
-surf "https://example.com" -o output.md     # 保存为 output.md
-surf "https://example.com" -o -              # 输出到 stdout
-surf "https://example.com" -O               # 输出到 stdout (简写)
-surf -p "https://example.com" -o out.pdf     # PDF 保存为 out.pdf
-surf -p "https://example.com" -o ~/Note/out.pdf  # Windows: 保存到 %USERPROFILE%\Note\out.pdf
-```
-
-使用 `-p` 生成 PDF 时，Surf 从 Markdown 转换出的 HTML 渲染，因此并不一定需要浏览器，按 `[Output] pdf_engine` 指定的引擎链依次尝试：
-
-- **playwright**：最可靠，使用已安装的浏览器（需要可选 extra `browser`）。
-- **chrome**：本机 `google-chrome`/`chromium`/Edge 的 `--headless=new --print-to-pdf`。无 Python 依赖；自动探测，或用 `[Browser] chrome_executable` / 环境变量 `SURF_CHROME_EXECUTABLE` 指定。
-- **weasyprint**：纯 Python 的 HTML/CSS 渲染器（需要可选 extra `pdf`：`uv sync --extra pdf`），完全不需要浏览器；渲染前会通过配置的代理下载远程图片并以 data URI 内嵌。依赖系统 Pango/libgdk-pixbuf 库（Linux：`apt install libpango-1.0-0 libpangoft2-1.0-0`；macOS：`brew install pango libffi`；Windows：GTK3 运行时）。
-- **typst**：Surf 把 Markdown 生成的 HTML 转换成 Typst 标记，再调用 `typst` 二进制。不需要浏览器，也不需要额外 Python 包；远程图片会先下载到临时目录。中文通过内置字体回退列表渲染，只要系统装了任一 CJK 字体即可（可用 `[Output] typst_fonts` 追加字体目录）。
-- **pandoc**：把 HTML 交给 `pandoc`，由它驱动已安装的 PDF 引擎（自动探测：`typst`、`weasyprint`、`xelatex`、`lualatex`、`tectonic`、`pdflatex`）。可用 `[Output] pandoc_pdf_engine` 指定引擎，用 `[Output] pandoc_args` 追加参数，例如 `-V CJKmainfont="Noto Serif CJK SC"`。
-
-```ini
-[Output]
-; auto = playwright, chrome, weasyprint, typst, pandoc
-; 也可显式指定单个或按顺序指定多个，例如 typst,weasyprint
-pdf_engine = auto
-typst_executable = typst        ; 环境变量: SURF_TYPST_EXECUTABLE
-typst_fonts =                   ; 追加字体目录（逗号或 ':' 分隔）
-pandoc_executable = pandoc      ; 环境变量: SURF_PANDOC_EXECUTABLE
-pandoc_pdf_engine =             ; 留空 = 自动探测
-pandoc_args =                   ; 例如 --toc -V CJKmainfont="Noto Serif CJK SC"
-```
-
-PDF 正文现在能正确渲染 Markdown 表格（`| a | b |`）与围栏代码块。
-
-### PDF URL 输入
-
-当抓取的 URL 指向 PDF（通过 `Content-Type: application/pdf`、响应体 PDF 魔数或 `Content-Disposition` 判断）时，由输出格式决定处理方式：
-
-```bash
-surf "https://example.com/paper.pdf"          # 提取文本 -> Markdown（正常流程）
-surf "https://example.com/paper.pdf" -h       # 提取文本 -> HTML
-surf "https://example.com/paper.pdf" -r       # 提取文本，不翻译
-surf "https://example.com/paper.pdf" -p       # 直接下载并保存原始 PDF
-```
-
-- 文本提取使用 `pypdf`；PDF 输出会完全跳过文本提取，因此 `-p` 按字节保留源文件。
-- URL 不一定以 `.pdf` 结尾，Surf 会检查响应内容。
-- 扫描版/纯图片 PDF 没有可提取文本，暂不做 OCR；可改用 `-p` 保存原文件。
-- 如果 PDF 站点已失效（域名无法解析或连接失败），Surf 会向 Wayback Machine 查询该 URL，并在存在快照时使用归档的原始 PDF；快照地址会写入 front matter 的 `archive` 字段。
-- Web 界面规则相同：预览以及 Markdown/HTML 保存使用提取文本，保存为 PDF 时会重新下载原始 PDF（原始站点已失效时使用归档 PDF）。
-
-### 语言模式 (-l)
-
-使用 `-l` 或快捷方式控制翻译模式：
-
-```bash
-surf "https://example.com"           # 翻译为中文（默认）
-surf -r "https://example.com"        # 仅原文（不翻译）
-surf -b "https://example.com"        # 双语对比（原文 + 译文）
-```
-
-### 文本转语音与 Podcast 原始音频 (-a / -s)
-
-普通网页使用 `-a/--format audio` 仍会生成 TTS MP3；Pocket Casts 和小宇宙剧集则会下载页面中的原始音频文件：
-
-```bash
-surf "https://www.xiaoyuzhoufm.com/episode/637761077105b234344c09dc" -a -o ./audio/episode.m4a
-```
-
-不指定输出路径时会保留源扩展名并保存到 `[Output].audio_dir`。Podcast 下载使用 `[Transcription].max_audio_mb` 和 `[Transcription].audio_timeout` 限制。
-
-单次覆盖配置的语音、语速或音量：
-
-```bash
-surf "https://example.com" -a --tts-voice en-US-AriaNeural
-surf "https://example.com" -a --tts-rate +10% --tts-volume -20%
-```
-
-### HTML 选项
-
-保存 HTML 时可使用以下选项：
-
-```bash
-surf "https://example.com" -h          # 保存 HTML 文件
-surf "https://example.com" -h --html-inline  # 保存 HTML 并内联 CSS/JS
-```
-
-### 代理设置 (-x)
-
-使用 `-x` 或快捷方式设置代理模式：
-
-```bash
-surf "https://example.com" -x env      # 使用环境变量代理
-surf "https://example.com" -x win      # 使用 Windows 代理
-surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890  # 自定义代理，优先使用命令行地址
-surf "https://example.com" -c http://127.0.0.1:7890  # 自定义代理简写
-surf "https://example.com" -x custom  # 回退到 config.ini 中的 custom_proxy
-surf "https://example.com" -c  # 等价于 -x custom，并回退到 config.ini 中的 custom_proxy
-surf "https://example.com" -n          # 不使用代理
-```
-
-补充说明：如果 Surf 是通过隐式代理（环境变量 / Windows 系统代理 / 自动回退）发起首个 HTTP 请求，且遇到代理或 TLS 握手错误，会先自动直连重试一次，再决定是否切换到浏览器渲染。显式指定 `-x win` 或 `-x custom` 时，仍会优先尊重你手动选择的代理。
-
-### 其他选项
-
-```bash
-surf "https://example.com" --browser   # 强制使用浏览器
-surf "https://example.com" -B playwright  # 本次运行强制 Playwright 无头后端
-surf "https://example.com" -B obscura     # 本次运行强制 Obscura 无头后端
-surf "https://example.com" -B auto        # 跟随 config.ini 的 [Browser] backend（默认行为）
-surf "https://x.com/user/status/123" -t   # 默认抓取 thread 后续回帖
-surf "https://x.com/user/status/123" --thread before
-surf "https://x.com/user/status/123" --thread both --thread-author same
-surf "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
-surf "https://v2ex.com/t/1208365" -r      # V2EX 默认只抓主贴，并自动使用已配置代理
-surf "https://v2ex.com/t/1208365" -r -t   # V2EX 包含回帖
-surf "https://example.com" --llm L2    # 指定 LLM 提供方（名称大小写不敏感）
-surf "https://example.com" --config myconfig.ini  # 指定配置文件
-surf "https://example.com" --verbose   # 详细日志输出
-surf --version                         # 查看版本
-```
-
-### 内容提取器 (-e / --extractor)
-
-选择用于移除广告、侧边栏等杂乱信息的内容提取库：
-
-- `auto`（默认）：优先使用 Readability，失败后回退到 Trafilatura
-- `readability`：仅使用 Mozilla Readability 算法
-- `trafilatura`：仅使用 Trafilatura
-- `raw`：跳过提取，返回原始 HTML
-
-默认提取器可通过 config.ini 的 `[Content] extractor` 设置；命令行 `-e`/`-R`/`-T`/`-U` 与 Web 界面的「内容提取」选项可单次覆盖。
-
-```bash
-# 当 Readability 效果不好时，使用 Trafilatura
-surf "https://example.com" -e trafilatura
-
-# 仅使用 Readability，不回退
-surf "https://example.com" -e readability
-
-# 跳过提取，保留原始 HTML
-surf "https://example.com" -e raw
-```
-
-### 插图 OCR (--ocr / --no-ocr)
-
-对文章插图执行本地 OCR，并把识别文本追加到图片下方：
-
-```bash
-surf "https://example.com/article" --ocr
-surf "https://www.xiaohongshu.com/explore/..." --no-ocr
-surf "https://example.com/article" --ocr --ocr-lang eng
-surf "https://example.com/article" --ocr --ocr-engine paddleocr
-```
-
-#### 直接图片 OCR
-
-当 `--ocr` 后跟本地图片文件路径时，Surf 会直接对图片执行 OCR 并输出识别文本：
-
-```bash
-# OCR 本地图片（支持 jpg、png、bmp、tiff、gif、webp 等格式）
-surf --ocr /path/to/image.png
-surf --ocr C:\Users\me\scan.jpg
-surf --ocr file:///tmp/screenshot.png
-
-# 指定引擎和语言
-surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
-```
-
-说明：
-
-- OCR 默认使用 `auto`（PaddleOCR > RapidOCR > Tesseract）；可通过 `--ocr-engine` 选择 `paddleocr`、`rapidocr`、`tesseract` 或 `auto`。
-- 回退仅沿所选引擎链发生：`rapidocr` 在不可用或无文本时回退到本地 Tesseract（除非用 `--ocr-engine tesseract` 强制指定）；`auto` 依次尝试 PaddleOCR、RapidOCR、Tesseract。
-- `--ocr-lang` 仅对 Tesseract 生效。
-- 小红书默认开启插图 OCR。
-- OCR 某一张图片失败时只会跳过该图，不会中断整篇文章抓取。
-
-### 认证功能 (--login / --export-auth / --import-auth / --clear-auth)
-
-对于需要登录的网站（如小红书、Twitter/X、Reddit、知乎、豆瓣、NCPSSD），可以先准备并复用 Playwright 登录态：
-
-```bash
-# 首次登录小红书
-surf --login xiaohongshu
-
-# 在有桌面的机器上导出登录态
-surf --export-auth xiaohongshu ./xiaohongshu_state.json
-surf --export-auth xiaohongshu ~/Note/xiaohongshu_state.json
-
-# 在无 GUI 的 Linux 服务器上导入登录态
-surf --import-auth xiaohongshu ./xiaohongshu_state.json
-surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
-
-# 可选：登录 Twitter/X（可提高登录墙页面抓取成功率）
-surf --login twitter
-
-# 可选：登录 Reddit（保存的 Cookie 会复用于 JSON 与浏览器抓取）
-surf --login reddit
-surf --export-auth reddit ./reddit_state.json
-surf --import-auth reddit ./reddit_state.json
-
-# 可选：登录豆瓣（保存的 Cookie 会复用于直接请求和浏览器回退）
-surf --login douban
-surf --export-auth douban ./douban_state.json
-surf --import-auth douban ./douban_state.json
-
-# 优先使用 twitter-cli 和本机浏览器 Cookie
-surf --twitter-backend cli "https://x.com/username/status/1234567890"
-surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
-
-# 可选：登录知乎（Cookie 会用于 API/镜像页请求，并提高浏览器验证页成功率）
-surf --login zhihu
-
-# 可选：登录 NCPSSD（部分受保护全文下载需要）
-surf --login ncpssd
-
-# 登录或导入后正常获取内容
-surf "https://www.xiaohongshu.com/explore/..."
-surf "https://www.xiaohongshu.com/discovery/item/..."
-surf "https://x.com/username/status/1234567890"
-surf --thread after "https://www.reddit.com/r/test/comments/abc123/example_post/"
-surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
-surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
-
-# 清除保存的认证
-surf --clear-auth xiaohongshu
-surf --clear-auth twitter
-surf --clear-auth reddit
-surf --clear-auth zhihu
-surf --clear-auth ncpssd
-# 或清除所有网站的认证
-surf --clear-auth all
-```
-
-**注意**：认证状态和应用数据保存在 Windows 的 `%LOCALLAPPDATA%\surf\` 或 Linux/macOS 的 `~/.local/cache/surf/` 目录中。
-在无 GUI 的 Linux 上，`surf --login ...` 会直接提示缺少图形会话，而不会再尝试自动打开浏览器。推荐在桌面机器执行登录，再用 `--export-auth` / `--import-auth` 将登录态迁移到服务器。
-对于 Twitter/X，`surf --login twitter` 会先通过 `twitter-cli` 尝试从真实浏览器（或 `TWITTER_AUTH_TOKEN` / `TWITTER_CT0` 环境变量）导入 Cookie，这通常比在自动化登录页里手动登录更可靠；导入失败时才回退到可见的 Playwright 登录窗口。Surf 还会在认证目录下保存持久浏览器 profile，以提高登录墙场景的可用性。如果系统可用 `uvx`，默认后端会优先调用 `uvx --from twitter-cli twitter` 复用本机浏览器 Cookie，尽量避免先落到 Surf 现有的 Playwright/oEmbed 链路。Twitter 的强制代理默认等同于 `surf -x win`。
-对于 Reddit 帖子 URL，Surf 会优先走 Reddit comments JSON 接口抓取主贴内容；若存在已保存的 `reddit.com` Cookie，会同时复用于 requests 与浏览器抓取。只有显式传入 `--thread after|both` 或 `-t` 时，才会把回复 thread 一并带上。
-对于小红书笔记 URL，Surf 会先用已保存的登录态 Cookie 直接抓取服务端渲染的笔记页（速度快、无需浏览器），仅在该路径不可用时才回退到浏览器抓取；登录态过期或触发风控/验证拦截时会给出明确报错，而不是把验证页当成内容输出。
-涉及站点专用逻辑（含 NCPSSD 下载规则）的详细说明，请查阅 `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md`。
-
-### Cloudflare 绕过 Cookie
-
-部分网站使用 Cloudflare WAF 阻止自动化访问。Surf 支持使用从真实浏览器提取的 `cf_clearance` Cookie 绕过这些限制。
-
-**提取步骤：**
-
-1. 打开 Chrome 访问目标网站
-2. 通过 Cloudflare 验证（等待真实页面加载）
-3. 打开开发者工具 (F12) > **Application** 标签 > **Cookies** > 选择域名
-4. 找到 `cf_clearance` 并复制其 **Value**
-5. 通过命令行或 config.ini 配置：
-
-```bash
-# 通过命令行设置 Cookie
-surf --set-cf-clearance example.com "cf_clearance=你的Cookie值"
-
-# 正常使用，Surf 会自动注入 Cookie
-surf "https://example.com/article"
-
-# Cookie 过期后清除
-surf --clear-cf-clearance example.com
-```
-
-或直接在 `config.ini` 中添加：
-
-```ini
-[Cloudflare]
-example.com = cf_clearance=你的Cookie值
-```
-
-**重要说明：**
-
-- Cookie **必须**来自 Chrome 或 Chromium 内核浏览器（Surf 使用 Chrome 131 TLS 指纹）
-- Firefox 或 Safari 的 Cookie **无法**使用
-- Cookie 通常在 30 分钟到 24 小时内过期
-- Cookie 过期后，Surf 会自动回退到正常的 Cloudflare 挑战处理流程
-
-## 单字符参数连写
-
-单字符参数可以连写，顺序任意：
-
-```bash
-# 以下命令是等效的：
-surf -h -r -n "https://example.com"
-surf -hrn "https://example.com"
-surf -nrh "https://example.com"
-```
-
-## 帮助
-
-```bash
-surf --help
-```
+| 文件 | 内容 |
+| --- | --- |
+| `SPECIAL_SITES_zh.md` / `SPECIAL_SITES.md` | 每条 URL 规则与处理动作的细节 |
+| `config.ini.example` | 全部配置项及注释 |
+| `surf.py --help` | 上面这份命令行参考的源码版本 |
+| `surf_web.py --help` | Web 服务器参数 |

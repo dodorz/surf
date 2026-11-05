@@ -62,3 +62,24 @@ def test_long_main_body_overrides_tiny_article_card():
 
     assert result["detected"] is False
     assert "truncated content" not in (result["reason"] or "")
+
+
+def test_ambiguous_paywall_container_only_counts_for_short_teasers():
+    long_body = "Real article paragraph. " * 400
+    short_body = "Only the first paragraph is served here."
+
+    long_result = Fetcher._detect_paywall(
+        f'<html><body><article><div class="paywall-content"><p>{long_body}</p></div>'
+        "</article></body></html>",
+        url="https://example.com/essay",
+    )
+    short_result = Fetcher._detect_paywall(
+        f'<html><body><article><div class="paywall-content"><p>{short_body}</p></div>'
+        '<p class="paywall-text">Subscribe to read the full story. '
+        "You've reached your free article limit.</p></article></body></html>",
+        url="https://medium.com/@user/story",
+    )
+
+    assert "ambiguous paywall CSS" not in (long_result["reason"] or "")
+    assert long_result["detected"] is False
+    assert short_result["detected"] is True

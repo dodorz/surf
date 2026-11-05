@@ -1,219 +1,636 @@
-# Surf - URL to Markdown/PDF Converter
+# Surf
 
-**Surf** is a powerful Python CLI tool that converts web pages into clean Markdown or PDF files. It handles dynamic content, removes clutter (ads, sidebars), and uses LLMs to translate content if needed.
+**Turn a link into a clean document.**
+
+Surf takes a web page, a local file, or a search query, strips the clutter, optionally
+translates it, and writes Markdown, HTML, PDF, audio, or a Pastebin post. There are two
+front ends over the same pipeline: a command line for scripting, and a local web page for
+interactive use.
+
+```
+input ─▶ fetch ─▶ extract ─▶ (OCR) ─▶ translate ─▶ render ─▶ save
+```
+
+- **One command per document.** `surf https://example.com` writes a Markdown note.
+- **Static HTML to JavaScript-heavy pages.** Plain HTTP by default, a headless browser
+  (Obscura, or Playwright) when a page needs one.
+- **Real translation.** Detects the language, translates with an OpenAI-compatible LLM,
+  and records what happened in the front matter.
+- **Five outputs from one pipeline.** Markdown, HTML, PDF, audio, Pastebin — including a
+  browser-less PDF chain.
+- **Site-aware.** Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat, Zhihu,
+  Xiaohongshu, NCPSSD, Pocket Casts, Xiaoyuzhou, GitHub, Wikipedia, Foreign Affairs.
+- **Failures are not lost.** A URL that cannot be fetched is written to disk so you can
+  retry it later.
 
 ---
 
-## Features
+## Install
 
-- **Smart Fetching**: Automatically switches between standard `requests` and a headless browser (Obscura by default, Playwright as an alternative) for dynamic JavaScript-heavy sites.
-- **Local File Support**: Read and process local HTML, Markdown, text, and PDF files directly. Supports OS paths, Unix-style paths on Windows, and `file://` URIs. Files are processed through the same translation/output pipeline as web content (local PDFs are copied unchanged with `-p`).
-- **Failed URL Notes**: when the CLI or Web UI cannot fetch/convert/save a web URL (including search results), Surf writes that URL to `[Output] md_dir` as `获取失败_<title>.md` (or a host/path slug when no title is available) so it can be retried later. Existing unrelated files with the same title are never overwritten; an existing note for the same URL is reused.
-- **Keyword Search**: `-S/--search` treats the positional input as search keywords instead of a URL. Surf queries a search engine (`auto` tries DuckDuckGo, then Bing, then configured DeepSeek/SearXNG/Metaso; `duckduckgo`/`bing`/`searxng`/`metaso`/`deepseek` force one), prints a numbered "title + URL" picker for the first `--search-preview` results, and runs the selected URLs through the normal fetch → convert → translate → save pipeline. `--search-top N` skips the picker for the first N results, `--feel-lucky` takes only the first result, and `--search-merge` writes all selected results as one document. Every file gets a mandatory filename prefix in brackets (`[<prefix>]<title>`): it defaults to the search keywords (truncated to 40 characters) and can be overridden with `--search-prefix`; no search subdirectory is created, and the front matter records `search_query`. Tracking parameters (`utm_*`, `fbclid`, `gclid`, ...) are stripped before fetching and from front matter `source`.
-- **Special Site Handling**: Optimized handling for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official Accounts, Zhihu, Xiaohongshu (RED), NCPSSD, Pocket Casts, and Xiaoyuzhou with reusable saved authentication support.
-- **Podcast Audio**: Pocket Casts and Xiaoyuzhou episodes can be saved as their original audio enclosure with `-a/--format audio` (the file keeps the source format such as `.m4a`). Use `-w/--transcribe` to additionally transcribe an episode locally through the optional `transcribe-cpp` backend.
-- **Improved X/Twitter Extraction**: Prefers `uvx --from twitter-cli twitter` by default, reuses local browser cookies when available, detects more X login-wall placeholder variants, resolves `t.co` article links, normalizes direct profile article URLs like `/user/article/<id>` to `/i/article/<id>`, preserves the main tweet/article DOM when possible so inline emphasis and media survive, falls back to structured metadata extraction only when necessary, uses status-id based syndication/fxTwitter fallbacks when `x.com` itself is unreachable, and uses `api.fxtwitter.com` as a final fallback when X content is blocked.
-- **Thread Expansion**: For Twitter/X, Bluesky, Weibo, and Threads, Surf defaults to `--thread after --thread-author all`, following later posts in the thread. Use `--thread before|both|off` to change the direction and `--thread-author same` to keep only the current post author. V2EX uses `-t/--thread` to include topic replies and otherwise saves only the main post.
-- **Short URL Canonicalization**: Common short links such as `https://t.co/...`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st/episode/...` are resolved before site-specific rules run, so special handlers and front matter `source` use the final long URL. If the input is copied share text instead of a bare URL (e.g. a Xiaohongshu share message), the first URL is extracted automatically.
-- **GitHub Markdown Source Preservation**: GitHub repo and branchless Markdown URLs can be fetched from the resolved README/blob file while front matter `source` preserves the user-facing URL you entered.
-- **Accurate Translation Metadata**: Front matter includes `translator` only when content or title translation actually changed the output; language detection alone does not count.
-- **Single-Line Front Matter**: `title` and `description` are flattened to one line; line breaks, tabs, non-breaking spaces, and repeated whitespace are collapsed (and spaces between CJK characters are removed), so the YAML front matter stays valid. A trailing sentence-ending period is dropped from `title`, and GitHub's auto-generated "Contribute to ... development by creating an account on GitHub." sentence is stripped from both `title` and `description` before translation, so translated output never carries a translated copy of it.
-- **Optional Wayback Archiving**: Use `--archive` in CLI or the Web checkbox to submit the final front matter `source` URL to the Internet Archive and write the snapshot URL as `archive`; the default is controlled by `[Output] archive` in config.ini.
-- **Paywall Archive Fallback**: When a paywalled article is detected, Surf first resolves archive.today's `/newest/<url>` endpoint over plain HTTP, which redirects straight to the latest capture. If archive.today has no capture, Surf queries the Wayback Machine availability API and downloads the toolbar-free `id_` document. If both fail it checks `archive.ph`, `archive.today`, `archive.is`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md` in sequence through the browser workflow, with proxy/direct retries and a visible-browser CAPTCHA fallback. Tracking parameters and fragments are stripped when looking up snapshots. When Readability extracts only a short teaser from an archived page, Surf also runs Trafilatura and keeps the longer article body.
-- **Batch Web Processing**: The Web UI processes every URL found in the input one by one and renders separate result cards with independent save actions; text without URLs is saved as a single post using its first sentence as the title.
-- **Short-Post Title Normalization**: For short posts on Twitter/X, Bluesky, Weibo, and Threads, Surf derives the title, front matter `title`, and default Markdown filename as `First sentence - Author on Site`. Long-form articles (for example X `/article/...`) keep the article's own title.
-- **Filename Safety with Minimal Loss**: When titles are used as filenames, Surf preserves valid punctuation (including CJK punctuation) and only removes filesystem-illegal filename characters.
-- **Multilingual Support**: Auto-detects language and translates to the target language (default: Chinese) using LLM.
-- **Translation Modes**: Choose between `trans` (translation), `raw` (no translation), or `both` (bilingual).
-
-### Pocket Casts Episodes
-
-You can paste a Pocket Casts share link directly. Surf resolves the episode page and uses page metadata or a public RSS feed to recover Show Notes; if the page is blocked, it still preserves the basic information contained in the share-link redirect:
+Surf is distributed as a Python package and is easiest to run through
+[uv](https://github.com/astral-sh/uv).
 
 ```bash
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -r
+git clone https://github.com/dodorz/surf.git && cd surf
+uv sync
 ```
 
-The Markdown front matter title uses `Episode Title - Podcast Name`; the default filename adds the `[播客]` prefix, for example `[播客] Episode Title - Podcast Name`. The `Podcast`, `Podcast ID`, and `Episode ID` metadata labels remain unchanged when Show Notes are translated. When a publication date is available, Surf uses it for `created`; `translator` is written only when translation actually changes the result.
+That installs the core dependencies, including the OCR engines (PaddleOCR, RapidOCR,
+pytesseract — the Tesseract binary itself is a system package).
 
-To transcribe the episode locally, install the optional backend and configure a GGUF model:
+Optional extras, only if you need them:
+
+| Extra | Adds | Install |
+| --- | --- | --- |
+| `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` |
+| `pdf` | WeasyPrint: browser-less PDF rendering | `uv sync --extra pdf` |
+| `transcribe` | Local podcast transcription via transcribe.cpp | `uv sync --extra transcribe` |
+| `curlcffi` | Browser-like TLS fingerprint to get past some Cloudflare blocks | `uv sync --extra curlcffi` |
+
+Surf's default headless backend is **Obscura**, a separate binary. Install it from the
+[Obscura releases](https://github.com/h4ckf0r0day/obscura/releases) and make sure it is on
+`PATH` (or set `[Browser] obscura_executable`). Surf starts and reuses a managed
+`obscura serve` process over the Chrome DevTools Protocol, so no Playwright install is
+needed for ordinary dynamic pages.
+
+Then create a configuration file and add at least one LLM provider:
+
+```bash
+cp config.ini.example config.ini
+```
+
+Surf looks for `config.ini` next to the script first, then
+`$XDG_CONFIG_HOME/surf/config.ini` (default `~/.config/surf/config.ini`).
+
+---
+
+## Quick start
+
+```bash
+uv run surf "https://example.com"                  # Markdown, translated to Chinese
+uv run surf "https://example.com" -r               # keep the original language
+uv run surf "https://example.com" -b               # bilingual
+uv run surf "https://example.com" -h               # HTML
+uv run surf "https://example.com" -p               # PDF
+uv run surf "https://example.com" -a               # text-to-speech audio
+uv run surf "https://example.com" -P               # publish to Pastebin
+uv run surf "https://example.com" -o ~/note.md     # explicit output path
+uv run surf "https://example.com" -O               # print to stdout
+```
+
+Short flags can be combined: `surf -hrn URL` is `-h -r -n` (HTML, original language, no
+proxy).
+
+The web UI runs the same pipeline:
+
+```bash
+uv run python surf_web.py                # http://127.0.0.1:18473
+```
+
+---
+
+## Inputs
+
+Surf accepts one positional argument. What it means depends on the input itself.
+
+### A URL
+
+```bash
+uv run surf "https://example.com/article"
+```
+
+If the argument is text that contains a URL — a Xiaohongshu share message, for instance —
+the first `http(s)` URL is extracted. Common short links (`t.co`, `bit.ly`,
+`tinyurl.com`, `xhslink.com`, `xhslink.cn`, `pca.st/episode/...`) are resolved to their
+final URL before site rules run, and the resolved URL is what lands in the front matter.
+
+The CLI handles one URL per invocation; use a shell loop or `-S/--search` for batches. The
+Web UI does accept several URLs at once and renders one card per URL.
+
+Text with no URL at all is only meaningful in the Web UI, which saves it as a post with
+the first sentence as the title. The CLI requires a URL, a local path, or `-S` keywords.
+
+### A local file
+
+Local HTML, Markdown, text, and PDF files go through the same pipeline as web pages.
+
+```bash
+uv run surf /tmp/article.html          # OS path
+uv run surf ~/docs/readme.md           # translated like any other document
+uv run surf file:///tmp/article.html   # file:// URI
+uv run surf "C:\Temp\notes.txt"        # Windows path
+```
+
+Recognised types: `.html`, `.htm`, `.md`, `.txt`, `.rst`, `.adoc`, `.pdf`. Anything else is
+read as plain text. On Windows, Unix-style paths in arguments and config values are
+accepted and normalised (`~/Note/x.md` resolves under `%USERPROFILE%`).
+
+### A PDF
+
+When the input resolves to a PDF — by URL, by `file://`, or by local path — the output
+format decides what happens:
+
+```bash
+uv run surf "https://example.com/paper.pdf"        # extract text → Markdown
+uv run surf "https://example.com/paper.pdf" -h     # extract text → HTML
+uv run surf "https://example.com/paper.pdf" -p     # keep the original PDF, byte for byte
+```
+
+Detection uses `Content-Type`, the response body, and `Content-Disposition`, so the URL
+does not have to end in `.pdf`. Text extraction uses `pypdf`; scanned PDFs are not OCR'd,
+so use `-p` to keep the source. If the PDF host is dead, Surf asks the Wayback Machine for
+a snapshot and uses the archived raw PDF, recording it in the front matter `archive`
+field.
+
+### Keywords
+
+With `-S/--search`, the argument is a query instead of a URL:
+
+```bash
+uv run surf -S "python asyncio tutorial"
+```
+
+Surf searches, prints a numbered "title + URL" list, and fetches only what you select. See
+[Keyword search](#keyword-search).
+
+### A social thread
+
+```bash
+uv run surf -t       "https://x.com/user/status/123"   # later posts (default range)
+uv run surf --thread before "https://x.com/user/status/123"
+uv run surf --thread both --thread-author same "https://x.com/user/status/123"
+uv run surf --no-thread "https://bsky.app/profile/user.bsky.social/post/abc123"
+```
+
+Twitter/X, Bluesky, Weibo, and Threads expand threads by default (`after`, all authors).
+V2EX saves only the main post unless `-t/--thread` is given, in which case replies are
+included.
+
+---
+
+## Outputs
+
+`-f/--format` picks the output type; the single-letter flags are shorthand for it.
+
+| Format | Flag | Shorthand |
+| --- | --- | --- |
+| Markdown | `-f md` | default |
+| HTML | `-f html` | `-h` |
+| PDF | `-f pdf` | `-p` |
+| Audio | `-f audio` | `-a` |
+| Pastebin | `-f publish` | `-P` |
+
+### Markdown
+
+The default. Files are written to `[Output] md_dir` and named after the title, with a YAML
+front matter block recording `title`, `source`, `created`, `description`, and — when
+translation actually changed the text — `translator`.
+
+```bash
+uv run surf "https://example.com" --no-front-matter   # skip the front matter block
+uv run surf "https://example.com" --archive           # also archive the source URL
+```
+
+Titles used as filenames keep CJK punctuation and valid symbols; only characters the
+filesystem rejects are removed. `--archive` submits the final source URL to the Internet
+Archive and writes the snapshot into the front matter; the default comes from
+`[Output] archive`.
+
+### HTML
+
+```bash
+uv run surf "https://example.com" -h
+uv run surf "https://example.com" -h --html-inline     # self-contained file
+```
+
+`--html-inline` embeds external CSS/JS so the file works offline on its own (`[Output]
+html_inline` sets the default).
+
+### PDF
+
+PDFs are rendered from the document's HTML, so a browser is not strictly required. The
+`[Output] pdf_engine` chain is tried in order:
+
+| Engine | What it uses | Needs |
+| --- | --- | --- |
+| `playwright` | Installed Chromium through Playwright | `--extra browser` |
+| `chrome` | Local `google-chrome` / `chromium` / Edge with `--headless=new --print-to-pdf` | a Chrome binary |
+| `weasyprint` | Pure-Python HTML/CSS renderer, downloads and embeds remote images | `--extra pdf`, system Pango |
+| `typst` | Converts the HTML to Typst markup and runs `typst` | the `typst` binary |
+| `pandoc` | Hands the HTML to `pandoc`, which drives typst/weasyprint/xelatex/… | `pandoc` + an engine |
+
+```ini
+[Output]
+pdf_engine = auto          ; playwright, chrome, weasyprint, typst, pandoc
+typst_executable = typst   ; env: SURF_TYPST_EXECUTABLE
+typst_fonts =              ; extra font dirs, comma or ':' separated
+pandoc_executable = pandoc ; env: SURF_PANDOC_EXECUTABLE
+pandoc_pdf_engine =        ; empty = auto-detect
+pandoc_args =              ; e.g. --toc -V CJKmainfont="Noto Serif CJK SC"
+```
+
+Pick or reorder engines with a comma-separated list, e.g. `pdf_engine = typst,weasyprint`.
+Chrome is auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
+CommonMark tables and fenced code blocks render correctly. CJK text works with any
+installed CJK font.
+
+### Audio and speech
+
+```bash
+uv run surf "https://example.com" -a                              # save MP3
+uv run surf "https://example.com" -s                              # read it aloud
+uv run surf "https://example.com" -a --tts-voice en-US-AriaNeural
+uv run surf "https://example.com" -a --tts-rate +10% --tts-volume -20%
+```
+
+Speech comes from `edge-tts`; voice, rate, and volume default to the `[TTS]` section and
+can be overridden per run. For Pocket Casts and Xiaoyuzhou episodes, `-a` downloads the
+original episode audio instead (keeping the source extension, e.g. `.m4a`), bounded by
+`[Transcription] max_audio_mb` and `audio_timeout`.
+
+### Pastebin
+
+```bash
+uv run surf "https://example.com" -P
+```
+
+Publishing writes no local file and prints the paste URL. It needs a `[publish.pastebin]
+api_dev_key`; `api_paste_expire_date` and `api_paste_private` are optional.
+
+### Choosing where it goes
+
+```bash
+uv run surf "https://example.com" -o output.md      # explicit file
+uv run surf "https://example.com" -o ~/Note/out.md  # ~ expands on Windows too
+uv run surf "https://example.com" -o -              # stdout
+uv run surf "https://example.com" -O                # same as -o -
+uv run surf -p "https://example.com" -o out.pdf
+```
+
+`-o` overrides the configured directory. Without it, each format uses its own directory:
+`md_dir`, `html_dir`, `pdf_dir`, `audio_dir`.
+
+---
+
+## Translation
+
+```bash
+uv run surf "https://example.com"          # -l trans (default)
+uv run surf "https://example.com" -r       # -l raw, no translation
+uv run surf "https://example.com" -b       # -l both, original + translation
+uv run surf "https://example.com" --llm l2 # pick another configured provider
+```
+
+Translation runs only when the detected language differs from `[Output]
+target_language`, and long documents are split into segments so they fit the model's
+context. Front matter records `translator` only when the content or title actually
+changed; language detection alone does not count.
+
+`title` and `description` are flattened to a single line — line breaks, tabs,
+non-breaking spaces and repeated whitespace collapse, and spaces between CJK characters
+are dropped — so the YAML stays valid. A trailing sentence-ending period is removed from
+`title`, and GitHub's auto-generated "Contribute to … development by creating an account
+on GitHub." sentence is stripped before translation so translated output never carries a
+translated copy of it.
+
+---
+
+## Fetching
+
+### Proxy
+
+```bash
+uv run surf "https://example.com" -x env               # http_proxy / https_proxy / no_proxy
+uv run surf "https://example.com" -x win               # Windows Internet Settings (Windows only)
+uv run surf "https://example.com" -c http://127.0.0.1:7890
+uv run surf "https://example.com" -x custom --set-proxy http://127.0.0.1:7890
+uv run surf "https://example.com" -n                   # direct connection
+```
+
+Modes are `env`, `win`, `custom`, and `no`; `-c` is `-x custom` with an optional inline
+URL, and `-n` is `-x no`. Without a flag the CLI resolves a proxy implicitly — reasonable
+on a Windows desktop where many sites need a local proxy. If an implicit proxy fails with
+a proxy/TLS handshake error, Surf retries once without it before falling back to a
+browser. Explicit modes are never silently changed.
+
+The [Web UI](#web-ui) starts at `no` instead, because it usually runs on a server where
+public sites are directly reachable.
+
+### Content extraction
+
+```bash
+uv run surf "https://example.com" -e trafilatura   # -T
+uv run surf "https://example.com" -e readability   # -R
+uv run surf "https://example.com" -e raw           # -U, keep the original HTML
+```
+
+`auto` (the default, `[Content] extractor`) tries Readability and falls back to
+Trafilatura. Both remove ads, sidebars, and navigation. Content-like inline SVG diagrams
+are converted to Markdown image references while decorative icons are dropped.
+
+### Headless browser
+
+```bash
+uv run surf "https://example.com" --browser
+uv run surf "https://example.com" -B playwright
+uv run surf "https://example.com" -B obscura
+uv run surf "https://example.com" -B auto          # follow [Browser] backend
+```
+
+Use `--browser` to force rendering through a headless browser instead of plain HTTP, and
+`-B/--browser-backend` to choose which one. Obscura is the default and needs no Python
+extra:
+
+- `[Browser] obscura_fetch = auto` uses raw CDP and falls back to the Playwright client on
+  protocol errors; `native` never falls back; `playwright` uses the legacy client.
+- A configured CDP endpoint that is already alive is treated as external: Surf connects
+  to it but does not start or stop it.
+- Requests from different web-server threads coordinate access, and a managed Obscura
+  service is safely replaced when the proxy changes.
+- Bloomberg-family sites force Obscura stealth mode even when `obscura_stealth = false`,
+  because the default headless profile cannot pass PerimeterX.
+- Zhihu is the exception: its browser fallback always opens a visible Playwright window,
+  because the `zse-ck` challenge does not resolve headlessly. That needs a graphical
+  session on Linux.
+
+If a headed browser is impossible, archive.today's CAPTCHA fallback now fails fast instead
+of launching a browser that cannot work.
+
+### Image OCR
+
+```bash
+uv run surf "https://example.com/article" --ocr
+uv run surf "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
+uv run surf "https://www.xiaohongshu.com/explore/..." --no-ocr
+uv run surf --ocr /path/to/image.png                 # OCR a local image directly
+```
+
+OCR appends recognised text below each article image. The default engine is `auto`
+(PaddleOCR → RapidOCR → Tesseract); `--ocr-engine` forces one — with `rapidocr`, Tesseract
+is still the fallback. `--ocr-lang` applies to Tesseract only. Xiaohongshu enables OCR by
+default; every other site needs `--ocr` or `[OCR] enabled = true`. A failing image is
+skipped rather than aborting the fetch, and engines run in a short-lived child process so
+their memory is not retained by a web worker.
+
+---
+
+## Podcasts and transcription
+
+Pocket Casts and Xiaoyuzhou episode links are resolved to Show Notes, publication date,
+duration, and the audio enclosure:
+
+```bash
+uv run surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -r
+uv run surf "https://www.xiaoyuzhoufm.com/episode/69018660740634ca4785c3b8" -a
+```
+
+The front matter title is `Episode Title - Podcast Name` and the default filename adds a
+`[播客]` prefix. Show Notes are emitted under `## Show Notes`; when a date is available it
+becomes `created`. Podcast metadata labels stay untranslated even when the notes are
+translated. If the episode page is blocked, the information in the share redirect is
+preserved.
+
+Local transcription needs the optional backend and a GGUF model:
 
 ```bash
 uv sync --extra transcribe
-surf "https://pca.st/episode/ef99d8d4-a16c-48c3-a844-9a88163450d3" -w
+uv run surf "https://pca.st/episode/..." -w
+uv run surf "https://pca.st/episode/..." -w --transcript-timestamps segment
 ```
 
-By default the transcript is emitted as plain paragraphs without timestamps (`[Transcription].timestamps = none`). Use `--transcript-timestamps segment` (or set `[Transcription].timestamps = segment` in config.ini) to prefix each line with an `[HH:MM:SS]` timestamp instead.
+```ini
+[Transcription]
+backend = auto
+model_path = /path/to/whisper-small-Q8_0.gguf
+language = auto
+timestamps = none        ; none = plain paragraphs, segment = [HH:MM:SS] per line
+ffmpeg_path = ffmpeg
+max_audio_mb = 2048
+audio_timeout = 120
+```
 
-The Web UI exposes the same `transcribe.cpp` option. Configure `[Transcription].model_path` and ensure `ffmpeg` is installed. Transcript text follows the active language mode (`trans` / `raw` / `both`); Show Notes and Transcript are translated independently.
+Transcript text follows the active language mode; Show Notes and the transcript are
+translated independently.
 
-### Xiaoyuzhou (小宇宙) Episodes
+---
 
-You can paste a Xiaoyuzhou share link directly. Surf parses the embedded page data to recover Show Notes, publication date, duration, and the audio URL:
+## Sites with special handling
+
+Surf ships handlers for Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat Official
+Accounts, Zhihu, Xiaohongshu, NCPSSD, Pocket Casts, Xiaoyuzhou, GitHub, Wikipedia, and
+Foreign Affairs. Highlights:
+
+Site defaults are part of the same system: WeChat, Zhihu, Xiaohongshu, NCPSSD, V2EX, and BBC
+default to no proxy and no translation (Xiaohongshu also enables image OCR), and every one
+of those defaults can be overridden by an explicit flag.
+
+- **Twitter/X** prefers `uvx --from twitter-cli twitter` and reuses local browser cookies,
+  resolves `t.co` links, normalises `/user/article/<id>` to `/i/article/<id>`, keeps the
+  main tweet DOM so inline emphasis and media survive, and falls back to syndication,
+  fxTwitter, and `api.fxtwitter.com` when X itself is unreachable.
+- **Short posts** (Twitter/X, Bluesky, Weibo, Threads) are titled
+  `First sentence - Author on Site`; long-form articles keep their own title.
+- **Reddit** reads the JSON comments endpoint and reuses saved cookies; replies appear
+  only with an explicit `--thread after|both` or `-t`.
+- **Xiaohongshu** fetches the server-rendered note page with saved cookies first and only
+  falls back to a browser; expired auth and risk-control responses are reported as errors
+  instead of being emitted as content.
+- **GitHub** fetches the resolved README/blob file while keeping the page URL you entered
+  in the front matter `source`. Embedded HTML fragments in Markdown are converted back to
+  Markdown; fenced code examples are preserved.
+- **Foreign Affairs** strips the share/citation modal and subscription pitch so freely
+  readable essays are not mistaken for paywalled ones.
+- **Paywalls** trigger an archive-first fallback: `archive.today/newest/<url>` over plain
+  HTTP, then the Wayback availability API with the toolbar-free `id_` document, then the
+  `archive.ph` / `archive.is` / `archive.fo` / … chain through a browser, ending with a
+  visible CAPTCHA window. Tracking parameters and fragments are stripped when looking up
+  snapshots, and if Readability only recovers a teaser, Trafilatura is run as well.
+
+Matching rules, per-site actions, and maintenance notes live in `SPECIAL_SITES.md`
+(English) and `SPECIAL_SITES_zh.md` (中文). Keep them in sync with the code.
+
+---
+
+## Authentication
+
+Some sites need a login. Surf stores a Playwright auth state per site and reuses it.
 
 ```bash
-surf "https://www.xiaoyuzhoufm.com/episode/69018660740634ca4785c3b8" -r
+uv run surf --login xiaohongshu
+uv run surf --export-auth xiaohongshu ~/Note/xhs_state.json   # move it to another machine
+uv run surf --import-auth xiaohongshu ~/Note/xhs_state.json
+uv run surf --clear-auth xiaohongshu
+uv run surf --clear-auth all
 ```
 
-Output matches the Pocket Casts episode format: front matter title uses `Episode Title - Podcast Name`, the default filename adds the `[播客]` prefix, the author is written to front matter `author`, and Show Notes are emitted under `## Show Notes`. Use `-a/--format audio` to download the original enclosure (for example, the `.m4a` file) instead of generating TTS; `-o/--output` can choose the exact destination. Local transcription with `-w/--transcribe` is supported as well.
+Supported sites: `xiaohongshu`, `twitter` (alias `x`), `reddit`, `zhihu`, `douban`,
+`ncpssd`. State lives in `%LOCALLAPPDATA%\surf\` on Windows and
+`~/.local/cache/surf/` on Linux and macOS.
 
-### Translation Mode
+`--login` needs a desktop session. On headless Linux it fails fast instead of trying to
+open a browser — log in on a desktop machine and move the state with `--export-auth` /
+`--import-auth`.
 
-By default, the content is translated to the target language. Use `--lang` or shortcuts to change this:
+Notes per site:
 
-- `--lang trans`: Translation (default).
-- `--lang raw` or `-r`: No translation.
-- `--lang both` or `-b`: Bilingual output.
+- **Twitter/X** first tries to import cookies from your real browser (or
+  `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`) through `twitter-cli`, which is usually more
+  reliable than X's automated login page; if that is unavailable it opens a visible
+  Playwright window and keeps a persistent profile.
+- **Twitter/X** also accepts `--twitter-backend auto|cli|native`, `--twitter-browser`,
+  and `--twitter-profile` for cookie import. `--twitter-cli-bin` is deprecated and
+  ignored.
+- **Zhihu** cookies feed API and mirror requests and help with browser verification.
+- **NCPSSD** login is required by some secure full-text PDF downloads.
+
+### Cloudflare cookies
+
+Sites behind Cloudflare WAF can be reached by reusing a `cf_clearance` cookie from your
+own browser:
+
+1. Visit the site in Chrome and pass the challenge.
+2. DevTools → Application → Cookies → pick the domain.
+3. Copy the `cf_clearance` value.
 
 ```bash
-# Bilingual output
-surf "https://example.com" -b
-
-# Original only (no translation)
-surf "https://example.com" -r
+uv run surf --set-cf-clearance example.com "cf_clearance=VALUE"
+uv run surf --clear-cf-clearance example.com
+uv run surf --clear-cf-clearance all
 ```
 
-- **PDF Generation**: Generate PDF files with a Playwright browser, a local Chrome/Chromium CLI, WeasyPrint, Typst or pandoc — no browser required at all. `[Output] pdf_engine` picks the engine chain.
-- **PDF Input**: When a URL returns a PDF, Surf keeps the original file for `-p/--format pdf`; for Markdown, HTML, audio or publish output it extracts the text with `pypdf` and runs the normal translation/save pipeline. OCR for scanned PDFs is not supported yet.
-- **Note Integration**: Automatically saves files to your designated notes folder.
-- **TTS Support**: Text-to-Speech support using `edge-tts`. Can save to audio file or read aloud; voice, rate, and volume can be overridden per run with `--tts-voice` / `--tts-rate` / `--tts-volume` (CLI) or the Web UI TTS options.
-- **Flexible Proxy**: Unified proxy modes: CLI defaults to implicit auto proxy resolution, while Surf Web defaults to `no` proxy for server deployments. Explicit `auto`, `env`, `win` (Windows Internet Settings), `custom`, and `no` modes remain available where supported.
-- **Authentication Management**: Interactive login plus auth state import/export for sites requiring authentication (e.g., Xiaohongshu, Reddit, Douban, NCPSSD).
-- **Experimental Image OCR**: Optional local OCR on article images. The default engine is the `auto` chain (PaddleOCR > RapidOCR > Tesseract); `paddleocr`, `rapidocr`, and `tesseract` can be selected via `[OCR] engine` / `--ocr-engine`. Xiaohongshu enables image OCR by default; other sites require `--ocr` or `[OCR].enabled = true`.
-- **Inline SVG Illustration Preservation**: Content-like inline SVG diagrams are converted to Markdown image references, while decorative icons are filtered out.
-- **Web Text Posts**: In `surf_web.py`, if you paste plain text without any URL, Surf treats it as a post, uses the first sentence as the title, and sends it through the normal translation/export pipeline.
+Or write it into the config file:
 
-### Special Site Policies
+```ini
+[Cloudflare]
+example.com = cf_clearance=VALUE
+```
 
-Surf includes site-specific handlers for platforms such as Twitter/X, Reddit, WeChat, Zhihu, Xiaohongshu, Bluesky, Weibo, Threads, V2EX, NCPSSD, GitHub, and Wikipedia.
+The cookie must come from Chrome or another Chromium-based browser — Surf impersonates a
+Chrome TLS fingerprint, so Firefox and Safari cookies will not work. These cookies expire
+within 30 minutes to 24 hours; when one expires, the normal challenge handling takes over
+again.
 
-Detailed matching rules, handler behavior, default policy overrides, and maintenance notes are documented in:
-- `SPECIAL_SITES.md` (English)
-- `SPECIAL_SITES_zh.md` (Chinese)
+---
 
-## Installation
+## Keyword search
 
-We recommend using `uv` for a clean environment.
+```bash
+uv run surf -S "python asyncio tutorial"                    # interactive picker
+uv run surf -S "python asyncio tutorial" --search-top 3     # first 3, no prompt
+uv run surf -S "python asyncio tutorial" --feel-lucky       # first result only
+uv run surf -S "python asyncio tutorial" --search-merge     # one merged document
+uv run surf -S "python asyncio tutorial" --search-prefix asyncio
+uv run surf -S "python asyncio tutorial" --search-preview 3 --search-delay 2
+```
 
-1.  **Install uv**:
+`-S` turns the positional argument into keywords. Surf searches, prints the first
+`--search-preview` results as a numbered list, and runs the selected URLs through the
+normal fetch → extract → translate → save pipeline. One failing result is logged and
+skipped instead of aborting the batch.
 
-    ```bash
-    pip install uv
-    # or follow https://github.com/astral-sh/uv
-    ```
+**Engines** — `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek` (default:
+`[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then any configured
+DeepSeek/SearXNG/Metaso API.
 
-2.  **Setup Environment**:
-    ```bash
-    uv sync
-    # Optional: Playwright-based browser automation (see below)
-    uv sync --extra browser
-    uv run playwright install chromium
-    ```
-    `uv sync` installs the Python dependencies declared in `pyproject.toml`, including `paddleocr`, `rapidocr-onnxruntime`, and `pytesseract` for image OCR (the Tesseract binary itself must be installed separately).
+```ini
+[Search]
+engine = auto
+limit = 5             ; results retrieved per run, 1-20
+preview = 5           ; rows shown in the interactive picker
+searxng_url =         ; self-hosted instance with the JSON API enabled
+metaso_api_key =      ; https://metaso.cn open API
+deepseek_api_key =    ; POST https://api.deepseek.com/v1/tools/search
+deepseek_url =        ; optional endpoint override
+```
 
-    Playwright is **optional** and lives in the `browser` extra: Surf's default headless fetch drives Obscura over the raw Chrome DevTools Protocol (through the small `websockets` package) and needs no Playwright at all. Install the extra only for:
-    - headed interactive login (`--login`),
-    - the special-site page handlers that automate a real page (archive.today, WeChat, Weibo/Threads, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Zhihu),
-    - the NCPSSD full-text PDF download,
-    - the Playwright PDF engine (PDFs can also be rendered by a local Chrome/Chromium CLI or by WeasyPrint, see `uv sync --extra pdf`).
+DeepSeek search supports `site:`, `lang:`, `after:`, `before:`, exact phrases, and
+exclusion.
 
-    Everything else works without the extra: `requests`/`curl-cffi` fetching, dynamic pages through Obscura, and PDF export via a local `google-chrome`/`chromium`/Edge binary when one is installed. Features that need Playwright now log an actionable message (naming the extra to install) instead of a bare `ModuleNotFoundError`.
+**Selecting** — enter `1`, `1,3-5`, `1 3 5`, or `all`; an empty line cancels. Invalid input
+is re-prompted up to three times. When stdin is not a terminal (scripts, CI), all
+retrieved results are processed; prefer `--search-top N` or `--feel-lucky` to keep batches
+deterministic.
 
-    ```ini
-    [Browser]
-    ; How Surf talks to Obscura: auto (raw CDP, Playwright fallback on error),
-    ; native (raw CDP only), playwright (legacy Playwright client)
-    obscura_fetch = auto
-    ; Chrome/Chromium used by the Playwright-free PDF path (empty = auto-detect)
-    chrome_executable =
+**Output** — one file per result by default, or one merged document with
+`--search-merge`. No search-specific directory is created; files land in the regular
+`[Output]` directories and are always named `[<prefix>]<title>`. The prefix defaults to
+the keywords (truncated to 40 characters); `--search-prefix` overrides it, trailing
+separators are normalised, and an already bracketed prefix is kept as-is. In search mode
+`-o/--output` accepts only `-` (stdout). Every file records `search_query` in the front
+matter, and tracking parameters (`utm_*`, `fbclid`, `gclid`, `dclid`, `spm`, …) are stripped
+from the result URL before fetching and from the front matter `source`.
 
-    [Output]
-    ; PDF engine chain, tried in order until one succeeds
-    pdf_engine = auto
-    ```
-    `SURF_CHROME_EXECUTABLE` overrides `chrome_executable`.
+All other options (`-l`, `-p`, `-h`, `-a`, `-e`, proxy flags, `--archive`, …) apply to
+every result.
 
-    For PDF output with neither a browser nor Chrome installed, `uv sync --extra pdf` adds WeasyPrint (pure Python, needs the system Pango libraries). See [Generate PDF (-p)](#generate-pdf--p).
-    Obscura is Surf's default and recommended browser backend. Surf also supports Playwright as an alternative. Install the Obscura Rust binary separately from [its releases](https://github.com/h4ckf0r0day/obscura/releases). Surf starts one managed `obscura serve` on demand, reuses it for concurrent requests, and connects through CDP. The generic headless fetch speaks the raw Chrome DevTools Protocol (`[Browser] obscura_fetch = auto|native|playwright`), so it needs no Playwright: `auto` (default) uses raw CDP and falls back to the Playwright client if the protocol path fails, `native` never falls back, and `playwright` restores the legacy client. Requests are coordinated across the web server's threads; if the request proxy changes, Surf safely replaces the managed server before the next request. The managed server is cleaned up when the worker exits. A CDP endpoint that is already running is treated as external and is only connected to, never started or stopped by Surf. The configured backend is used for all headless browser work: the generic dynamic-page fallback and the Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and archive-snapshot paths all honour `[Browser] backend`. Bloomberg-family hosts automatically force Obscura stealth mode (even when `obscura_stealth = false`) because their PerimeterX "Are you a robot?" interstitial does not clear for a default headless profile; if a browser navigation still returns an anti-bot challenge, Surf retries it before falling back to the archive/paywall path. Zhihu is the exception: its browser fallback always opens a visible Playwright window even when `backend = obscura`, because Zhihu's `zse-ck` challenge does not resolve in a headless session, and it therefore needs a graphical session (`DISPLAY`) on Linux. Headed interactive login, the special-site page handlers, the NCPSSD full-text PDF download and the Playwright PDF engine are the only features that need the optional Playwright extra (`uv sync --extra browser`). To use the Playwright client for every headless fetch too, set `[Browser] backend = playwright` in `config.ini` and run `uv run playwright install`. `[Browser] obscura_navigation_timeout` (default 60 seconds) bounds a single navigation; waitress applies no hard request timeout, so slow browser/archive flows can finish without being killed. On hosts without a graphical session Surf now fails fast instead of opening a visible browser for the archive CAPTCHA fallback. For a single run, `-B/--browser-backend {auto,obscura,playwright}` overrides `[Browser] backend` from the config file (`auto`, the default, follows the config); the Web UI exposes the same "浏览器后端" option.
-
-    Surf logs at WARNING level by default. Set the `SURF_LOG_LEVEL` environment variable (for example `SURF_LOG_LEVEL=INFO`) to capture per-request details such as backend selection and fallback decisions; the CLI `--verbose` flag does the same for a single run.
-
-3.  **Optional: Install OCR engine(s) for image OCR**:
-    `uv sync` already installs both PaddleOCR and RapidOCR (declared in `pyproject.toml`), so no extra Python packages are needed. Select an engine with `[OCR] engine` in `config.ini` or `--ocr-engine` on the command line: `auto` (default; PaddleOCR > RapidOCR > Tesseract), `paddleocr`, `rapidocr`, or `tesseract`.
-    Tesseract is optional and needs a local binary: install it yourself and ensure `tesseract` is on `PATH`, or set `[OCR] tesseract_cmd` in `config.ini`. It is used when `tesseract` is selected explicitly, and as the fallback for the `rapidocr` and `auto` chains.
-
-4.  **Optional: Install curl-cffi for Cloudflare bypass**:
-    Some websites (e.g., ACM Digital Library) use Cloudflare's anti-bot protection. Surf can use `curl-cffi` to impersonate browser TLS fingerprints and bypass these challenges. Install it with:
-    ```bash
-    uv sync --extra curlcffi
-    ```
-    Then configure in `config.ini`:
-    ```ini
-    [Browser]
-    ; Use curl-cffi TLS fingerprint impersonation to bypass Cloudflare challenges
-    ; Values: false (default), true (always use), auto (use as fallback only)
-    curlcffi_mode = auto
-    ```
-    When set to `auto`, Surf first tries standard requests, then attempts curl-cffi before falling back to browser rendering. This is lighter weight than launching a full browser.
+---
 
 ## Web UI
 
-`surf_web.py` provides a local Flask-based web interface for development and personal use. The built-in `app.run(...)` server is Flask's development server, so the warning about production deployment is expected.
-
-The web form exposes the most commonly used Surf options directly, including:
-- language mode (`trans` / `raw` / `both`)
-- proxy mode and custom proxy (`auto/win/env/custom/no` on Windows, `auto/env/custom/no` on non-Windows)
-- browser rendering
-- browser backend (follow config / Obscura / Playwright, matching CLI `-B/--browser-backend`)
-- output format: Markdown / HTML / PDF / Audio / publish to Pastebin (publish matches CLI `-P/--format publish` and needs `api_dev_key` under `[publish.pastebin]` in config.ini; publishing writes no local file and shows the Pastebin URL on success)
-- TTS options (voice dropdown, rate, volume) shown when the Audio format is selected, matching CLI `--tts-voice` / `--tts-rate` / `--tts-volume`; defaults come from `[TTS]` in config.ini
-- image OCR on/off, with OCR engine and OCR language controls shown only when OCR is not disabled
-- thread expansion (`after` / `before` / `both` / `off`) and author scope (`same` / `all`; V2EX uses thread range as reply inclusion)
-- optional LLM provider override for translation, shown only when language mode is not `raw`
-- Podcast transcription (`-w/--transcribe`) for Pocket Casts and Xiaoyuzhou episodes; the checkbox appears after the URL is recognized as one of these supported episode sites
-- free-form URL or text input: you can paste share text and Surf will extract the first `http/https` URL automatically; if no URL is present, the text is saved as a post and the first sentence becomes the title
-- the input area also includes an inline fetch button and a `Save full text` mode that keeps pasted text intact even when it contains URLs
-- keyword search mode (`-S/--search`): check `关键词搜索 (-S)`, enter keywords, and choose the engine / result count / filename prefix. Surf fetches the search results and shows them as a checkbox list with title + URL; fetching the selected entries produces the normal preview cards, so per-card save and the aggregate merge-save card work unchanged. Saved search results get `search_query` front matter and `[prefix]` filenames; any URL that fails to fetch/convert is written to `[Output] md_dir` as `获取失败_<title>.md` with the URL as its body
-- `Direct save` processes the current URL/text and selected output format, then queues the file without rendering a preview card; the success message shows which URL was queued and a save queue list below it tracks every background save job (queued / saving / done / failed); the queue list persists across successive enqueues and hides automatically once every queued job has finished
-- after each result is rendered, the preview area shows editable `Save folder` and `File title` fields with prefilled defaults; clicking a save button writes the file immediately without a second prompt
-- when one submission produces multiple result cards, Surf Web also shows an aggregate save card so you can merge all successful results into one Markdown/HTML/PDF/Audio file
-- when translation is enabled, Surf Web returns the raw result card first and finishes translation in a background job; the same card refreshes automatically when the translated result is ready
-
-As you type a URL, the Web UI applies matching special-site defaults to the visible options. For example, sites that default to raw language hide the LLM provider unless you manually choose a translation mode, sites where the effective OCR default is off hide the OCR engine unless you manually enable OCR, and the Podcast transcription checkbox appears only for Pocket Casts or Xiaoyuzhou episode URLs.
-
-GitHub repo and Markdown URLs use the normal Surf Web language default: content is checked and non-Chinese Markdown is translated to Chinese unless you manually choose raw mode. Directly fetched GitHub Markdown still has embedded HTML fragments converted back to Markdown, while fenced code examples are preserved.
-
-Web proxy default selection is intentionally different from the CLI:
-- CLI defaults to implicit auto proxy resolution because it often runs on Windows client machines where many sites need a local proxy.
-- Surf Web defaults to `no` proxy because it usually runs on a server where public sites are directly reachable, and Linux servers do not have Windows registry proxy settings. Choose `auto`, `env`, `custom`, or another proxy mode manually in the Web UI only when that deployment needs it.
-- When Surf used an implicit proxy and the first HTTP request fails with a proxy/TLS handshake error, it automatically retries once without the proxy before switching to browser rendering. Explicit `-x win` / `-x custom` still keep the user-selected proxy behavior.
-
-For local access:
-
 ```bash
-uv run python surf_web.py --host 127.0.0.1 --port 18473
+uv run python surf_web.py                              # http://127.0.0.1:18473
+uv run python surf_web.py --port 8080
+uv run python surf_web.py --host 0.0.0.0 --root /surf
 ```
 
-For external or public deployment, use a real WSGI server and point it at `surf_web:app`:
+The page is one screen: a composer at the top, an options panel below it, then result
+cards. Everything the composer needs is visible; everything that is a per-run preference
+lives in the collapsible options panel, whose header summarises the current choices
+(language · proxy · OCR · format).
+
+### What the page does
+
+- **Two input modes.** *Link / text* fetches URLs or saves pasted text as a post;
+  *keyword search* runs the same search pipeline as `-S` and shows a checkbox list of
+  hits, from which you fetch only what you want.
+- **Extract, or extract and save.** *提取* renders preview cards. *直接保存* skips the
+  preview and queues the file in the background.
+- **Full-text mode.** With *全文保存* enabled, pasted text is kept intact even when it
+  contains URLs.
+- **One card per document.** Each card has an editable save directory and filename, then
+  format buttons (MD / HTML / PDF / 音频 / Pastebin) so you can export the same result in
+  any format without re-fetching. A 朗读 button generates speech on the spot.
+- **Three preview tabs.** Markdown, HTML, and the raw extracted text sit side by side.
+- **Merge card.** When one run produces several results, an extra card merges them into a
+  single Markdown/HTML/PDF/audio document.
+- **Live translation.** With translation enabled the card appears immediately with the
+  original text, then refreshes in place when the background translation job finishes.
+- **Save queue.** Background saves are listed with their state (queued, saving, done,
+  failed) and a task counter in the top bar; the panel hides itself once the queue drains.
+- **Site-aware defaults.** Typing a URL applies that site's defaults — sites that keep the
+  original language hide the LLM provider until you choose a translation mode, sites whose
+  effective OCR default is off hide the engine selector, and the podcast transcription
+  toggle only appears for Pocket Casts and Xiaoyuzhou episodes.
+- **Proxy default.** The Web UI starts at `no` proxy (see [Proxy](#proxy)). Pick another
+  mode when your deployment needs it.
+- **Keyboard.** `Ctrl`/`Cmd` + `Enter` submits the composer.
+
+GitHub repository and Markdown URLs use the ordinary language default in the Web UI:
+non-Chinese content is translated unless you choose raw mode.
+
+### Deploying
+
+The built-in server is Flask's development server, so its production warning is expected.
+For anything long-running, point a WSGI server at `surf_web:app`:
 
 ```bash
-# waitress: single-process, thread-based production server (installed by `uv sync`)
 uv run waitress-serve --listen=0.0.0.0:18473 --threads=4 surf_web:app
 ```
 
-Waitress keeps one copy of the application in memory (a thread pool instead of prefork workers), which matters on small hosts: each gunicorn worker costs its own ~70 MB Python baseline.
+Waitress keeps one copy of the application in memory (a thread pool instead of prefork
+workers). That matters on small hosts: each gunicorn worker pays its own ~70 MB Python
+baseline.
 
-If you expose it to the internet, put it behind a reverse proxy with HTTPS and open only the required port in your firewall or security group.
+If you expose it to the internet, put it behind a reverse proxy with HTTPS and open only
+the port you need.
 
-### Running behind a reverse proxy (Nginx, etc.)
+### Behind a reverse proxy
 
-When running Surf behind a reverse proxy with a URL prefix (e.g., `http://IP:8000/surf`), use the `--root` flag to tell Surf about the path prefix:
+Serving under a path prefix (`http://IP:8000/surf`) needs `--root`:
 
 ```bash
 uv run python surf_web.py --host 127.0.0.1 --port 18473 --root /surf
 ```
-
-Example Nginx configuration:
 
 ```nginx
 location /surf/ {
@@ -225,506 +642,196 @@ location /surf/ {
 }
 ```
 
-> **Note**: The trailing `/` in `proxy_pass` automatically strips the `/surf` prefix before forwarding (e.g., `/surf/api/process` → `/api/process`). In this case, `--root` is not needed. If `proxy_pass` does NOT have a trailing `/` (path forwarded as-is), you must use `--root /surf`.
+The trailing `/` in `proxy_pass` strips the prefix before forwarding
+(`/surf/api/process` → `/api/process`), so `--root` is not needed in that case. If
+`proxy_pass` has no trailing slash and the path is forwarded as-is, `--root /surf` is
+required.
+
+---
 
 ## Configuration
 
-Surf looks for `config.ini` next to the launched executable/script first. If it is not there, it falls back to `$XDG_CONFIG_HOME/surf/config.ini`, or `~/.config/surf/config.ini` when `XDG_CONFIG_HOME` is unset.
-
-Copy `config.ini.example` to `config.ini` and edit it to set your API keys and paths.
-
-On Windows, Surf accepts Unix-style path input in config values and CLI path arguments. For example, `~/Note/article.md` is resolved under `%USERPROFILE%`, and `/` is normalized to `\`.
-
-```bash
-cp config.ini.example config.ini
-```
+`config.ini.example` documents every option; the sections that matter most:
 
 ```ini
 [LLM]
-; Default LLM provider name
-provider = L1
+provider = LLM1                     ; default provider name
 
-[LLM.L1]
-; OpenAI-compatible API configuration for L1
+[LLM.LLM1]
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
 
-[LLM.L2]
-; Additional LLM provider example (DeepSeek)
-base_url = https://api.deepseek.com/v1
-api_key = your_deepseek_api_key
-model = deepseek-chat
-
 [Output]
+target_language = zh-cn             ; translation target
 md_dir = ./notes
-target_language = zh-cn
-; Directory to save PDF files (default: current directory)
-pdf_dir = .
-; PDF engine chain, tried in order: auto | playwright | chrome | weasyprint | typst | pandoc (comma separated)
-pdf_engine = auto
-; Directory to save Audio files (default: current directory)
-audio_dir = .
-; Directory to save HTML files (default: current directory)
-html_dir = .
-; Save the final source URL to the Internet Archive by default (CLI --archive and the Web UI checkbox can force it on per run)
-archive = false
-; Disable YAML front matter in markdown output by default (CLI --no-front-matter and the Web UI checkbox can force it on per run)
-no_front_matter = false
-; Inline CSS/JS in HTML output by default (CLI --html-inline and the Web UI checkbox can force it on per run)
-html_inline = false
+pdf_dir = ./pdf
+html_dir = ./web
+audio_dir = ./audio
+pdf_engine = auto                   ; playwright, chrome, weasyprint, typst, pandoc
+archive = false                     ; default for --archive
+no_front_matter = false             ; default for --no-front-matter
+html_inline = false                 ; default for --html-inline
 
 [Content]
-; Content extractor: auto (readability then trafilatura fallback), readability, trafilatura, raw
-; CLI -e/--extractor / -R / -T / -U and the Web UI extractor option override this per run
-extractor = auto
+extractor = auto                    ; auto, readability, trafilatura, raw
 
-[Search]
-; Engine for -S/--search: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso),
-; duckduckgo, bing, searxng, metaso, deepseek. CLI --search-engine overrides this per run
-engine = auto
-; Number of search results to retrieve per run (1-20)
-; CLI --search-limit overrides this per run
-limit = 5
-; Interactive picker size when --search-preview is not given
-preview = 5
-; SearXNG instance base URL; the JSON API must be enabled
-searxng_url =
-; Metaso API key from https://metaso.cn
-metaso_api_key =
-; DeepSeek Search API key from https://platform.deepseek.com
-deepseek_api_key =
-; Optional DeepSeek Search endpoint override
-deepseek_url =
+[Network]
+proxy_mode = env                    ; env, win, custom, no
+custom_proxy =
 
 [TTS]
-engine = edge-tts
-; CLI --tts-voice / --tts-rate / --tts-volume and the Web UI TTS options override these per run
 voice = zh-CN-XiaoxiaoNeural
 rate = +0%
 volume = +0%
 
-[Network]
-; Proxy mode: env (environment vars), win (Windows Internet Settings), custom (custom_proxy), no (no proxy)
-proxy_mode = env
-; Custom proxy URL (e.g., http://127.0.0.1:7890)
-custom_proxy =
-
-[Twitter]
-; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
-backend = cli
-; Deprecated: Surf always invokes `uvx --from twitter-cli twitter`
-cli_bin =
-; Optional browser hint for twitter-cli cookies: chrome, edge, brave, firefox, arc
-browser =
-; Optional browser profile hint for twitter-cli, for example: Default or Profile 2
-profile =
+[Browser]
+backend = obscura                   ; obscura or playwright
+obscura_executable = obscura
+obscura_endpoint = http://127.0.0.1:9222
+obscura_fetch = auto                ; auto, native, playwright
+obscura_stealth = false
+obscura_navigation_timeout = 60
+chrome_executable =                 ; for the Playwright-free PDF fallback
+curlcffi_mode = auto                ; false, true, auto
 
 [OCR]
-; Enable OCR on article images by default (false by default; Xiaohongshu overrides to true)
-enabled = false
-; OCR engine: auto (default; paddleocr > rapidocr > tesseract), paddleocr, rapidocr, or tesseract
-engine = auto
-; Tesseract language(s), for example: chi_sim+eng, eng, jpn+eng
-; Ignored by RapidOCR and PaddleOCR; used when Tesseract is selected or as fallback.
+enabled = false                     ; Xiaohongshu overrides this to true
+engine = auto                       ; auto, paddleocr, rapidocr, tesseract
 lang = chi_sim+eng
-; Optional explicit path to the local tesseract executable
-tesseract_cmd =
-; OCR at most this many images per article
 max_images = 8
+
+[publish.pastebin]
+api_dev_key = your_pastebin_api_key_here
 ```
 
-## Usage
+`SURF_LOG_LEVEL` (e.g. `SURF_LOG_LEVEL=INFO`) raises log verbosity for long-running
+deployments; `--verbose` does the same for a single CLI run. Surf logs only warnings by
+default.
+
+---
+
+## CLI reference
+
+Grouped by the same sections as `--help`.
+
+**Input**
+
+| Option | Meaning |
+| --- | --- |
+| `URL \| PATH \| KEYWORDS` | The single positional argument. Not needed for auth commands. |
+
+**Output**
+
+| Option | Meaning |
+| --- | --- |
+| `-f, --format {md,pdf,html,audio,publish}` | Output format (default `md`) |
+| `-h` `-p` `-a` `-P` | Shorthands for `-f html/pdf/audio/publish` |
+| `-o, --output PATH` | Output path, or `-` for stdout |
+| `-O` | Same as `-o -` |
+| `--html-inline` | Inline CSS/JS into HTML |
+| `--no-front-matter` | Omit YAML front matter |
+| `--archive` | Submit the source URL to the Wayback Machine |
+
+**Language and audio**
+
+| Option | Meaning |
+| --- | --- |
+| `-l, --lang {trans,raw,both}` | Translation mode (default `trans`) |
+| `-r` `-b` | Shorthands for `-l raw` / `-l both` |
+| `--llm PROVIDER` | LLM provider for this run |
+| `-s, --speak` | Read the result aloud |
+| `--tts-voice` `--tts-rate` `--tts-volume` | Override `[TTS]` for this run |
+| `-w, --transcribe` | Transcribe a podcast episode locally |
+| `--transcript-timestamps {none,segment}` | Timestamp style for transcripts |
+
+**Extraction and rendering**
+
+| Option | Meaning |
+| --- | --- |
+| `-e, --extractor {auto,readability,trafilatura,raw}` | Extraction strategy |
+| `-R` `-T` `-U` | Shorthands for `readability` / `trafilatura` / `raw` |
+| `--browser` | Force headless browser rendering |
+| `-B, --browser-backend {auto,obscura,playwright}` | Which headless backend |
+
+**Network**
+
+| Option | Meaning |
+| --- | --- |
+| `-x, --proxy {env,win,custom,no}` | Proxy mode (`win` is Windows-only) |
+| `-c [PROXY]` | Custom proxy, optionally inline |
+| `-n` | No proxy |
+| `--set-proxy URL` | Proxy URL for `-x custom` |
+
+**Threads and social sites**
+
+| Option | Meaning |
+| --- | --- |
+| `-t, --thread [{after,before,both,off}]` | Thread range |
+| `--no-thread` | Disable thread expansion |
+| `--thread-author {same,all}` | Author scope (default `all`) |
+| `--twitter-backend {auto,cli,native}` | Twitter/X backend |
+| `--twitter-browser` `--twitter-profile` | Cookie source for `twitter-cli` |
+
+**OCR**
+
+| Option | Meaning |
+| --- | --- |
+| `--ocr` / `--no-ocr` | Enable or disable image OCR |
+| `--ocr-engine {rapidocr,tesseract,paddleocr,auto}` | Engine or fallback chain |
+| `--ocr-lang LANGS` | Tesseract languages |
+
+**Search** (`-S/--search` only)
+
+| Option | Meaning |
+| --- | --- |
+| `-S, --search` | Treat the input as keywords |
+| `--search-engine` | `auto`, `duckduckgo`, `bing`, `searxng`, `metaso`, `deepseek` |
+| `--search-limit N` | Results to retrieve (max 20) |
+| `--search-preview N` | Rows in the picker |
+| `--search-top N` / `--feel-lucky` | Skip the picker |
+| `--search-merge` | One merged document |
+| `--search-prefix PREFIX` | Filename prefix |
+| `--search-delay SECONDS` | Pause between fetches |
+
+**Authentication and cookies**
+
+| Option | Meaning |
+| --- | --- |
+| `--login SITE` | Interactive login |
+| `--clear-auth SITE` | Delete saved auth (`all` for every site) |
+| `--export-auth SITE FILE` / `--import-auth SITE FILE` | Move auth state between machines |
+| `--set-cf-clearance DOMAIN COOKIE` | Store a Cloudflare clearance cookie |
+| `--clear-cf-clearance DOMAIN` | Delete it (`all` for every domain) |
+
+**Runtime**
+
+| Option | Meaning |
+| --- | --- |
+| `--config FILE` | Use a specific config file |
+| `--verbose` | Verbose logging |
+| `--version` / `--help` | Version / this reference |
 
-### Basic
+---
 
-Convert a URL and print Markdown to console.
+## Exit status and failure notes
 
-```bash
-uv run surf.py "https://example.com"
-```
+Exit status is `0` on success and non-zero when the input could not be processed (the CLI
+uses `1` for a failed fetch/convert/save and `130` for Ctrl+C).
 
-On Windows, path-style arguments such as `--config`, `-o/--output`, `--export-auth`, and `--import-auth` also accept Unix-style input. For example, `~/Note/out.md` resolves under `%USERPROFILE%`.
+When the CLI or the Web UI cannot fetch, convert, or save a web URL — including search
+results — Surf writes the URL itself to `[Output] md_dir` as `获取失败_<title>.md` (or a
+host/path slug when there is no title). Existing unrelated files with the same name are
+never overwritten, and an existing note for the same URL is reused, so these files double
+as a retry queue.
 
-### Local Files
+---
 
-Surf can read and process local HTML, Markdown, and text files directly. Supported input formats:
+## More documentation
 
-- **OS paths**: `/tmp/article.html`, `~/docs/readme.md`, `C:\Temp\notes.txt`
-- **Unix-style on Windows**: `C:/Temp/article.md` (auto-converts `/` to `\`)
-- **file:// URIs**: `file:///tmp/article.html`
-
-Supported file types: `.html`, `.htm`, `.md`, `.txt`, `.rst`, `.adoc`, `.pdf` (others are treated as plain text). Local PDFs use the same text-extraction pipeline as PDF URLs.
-
-```bash
-# Read a local HTML file
-uv run surf.py /tmp/article.html
-
-# Read a local Markdown file (translated by default)
-uv run surf.py ~/docs/readme.md
-
-# Local file with Windows path
-uv run surf.py "C:\Temp\notes.txt"
-
-# file:// URI
-uv run surf.py file:///tmp/article.html
-
-# Keep original language (no translation)
-uv run surf.py /tmp/article.md -r
-
-# Generate PDF from local HTML
-uv run surf.py /tmp/article.html -p
-
-# Extract text from a local PDF, or copy it unchanged with -p
-uv run surf.py ~/docs/paper.pdf
-uv run surf.py ~/docs/paper.pdf -p
-```
-
-- `.html`/`.htm` files are processed as-is.
-- `.md` files are read as Markdown content and passed through the standard translation/output pipeline.
-- `.txt` and other files are converted to HTML paragraphs before processing.
-
-### Keyword Search (-S / --search)
-
-Pass search keywords instead of a URL. Surf searches the web, prints a numbered "title + URL" list of the retrieved results, and asks which ones to process. Every selected result goes through the normal fetch → convert → translate → save pipeline and is written as its own file; a failing result is logged and skipped instead of aborting the batch.
-
-```bash
-# Interactive picker (press Enter with no selection to cancel)
-uv run surf.py -S "python asyncio tutorial"
-
-# Skip the picker: save the first 3 results, or only the first result
-uv run surf.py -S "python asyncio tutorial" --search-top 3
-uv run surf.py -S "python asyncio tutorial" --feel-lucky
-
-# Use DeepSeek Search (requires [Search] deepseek_api_key)
-uv run surf.py -S "python asyncio tutorial" --search-engine deepseek
-
-# Merge all selected results into one document
-uv run surf.py -S "python asyncio tutorial" --search-top 3 --search-merge
-
-# Override the default prefix (default: the search keywords)
-uv run surf.py -S "python asyncio tutorial" --search-prefix "asyncio"
-# -> [asyncio]Async IO in Python.md
-
-# Show fewer entries in the picker and wait 2s between fetches
-uv run surf.py -S "python asyncio tutorial" --search-preview 3 --search-delay 2
-```
-
-- Engine: `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek` (default: `[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then configured DeepSeek/SearXNG/Metaso APIs.
-- SearXNG: set `[Search] searxng_url` to a self-hosted instance whose JSON API is enabled.
-- Metaso: set `[Search] metaso_api_key` (Metaso open API).
-- DeepSeek: set `[Search] deepseek_api_key` (DeepSeek platform API key, used with `POST https://api.deepseek.com/v1/tools/search`). `[Search] deepseek_url` can override the endpoint. DeepSeek search supports its own `site:`, `lang:`, `after:`, `before:`, exact-phrase and exclusion operators.
-- Results: `--search-limit N` (default: `[Search] limit`, 5; capped at 20) controls how many results are retrieved. The picker prints the first 5 by default; `--search-preview N` changes that (config: `[Search] preview`).
-- Selection: enter `1`, `1,3-5`, `1 3 5`, `all`, or an empty line to cancel. Invalid input is re-prompted up to three times.
-- Non-interactive stdin (scripts/CI) processes all retrieved results; use `--search-top N` or `--feel-lucky` to keep batches deterministic.
-- Output: one file per selected result by default. `--search-merge` combines them into a single document (md/html/pdf/audio/publish). No search-specific directory is created; files land in the regular `[Output]` directories. Every filename is `[<prefix>]<title>`: the prefix defaults to the search keywords (truncated to 40 characters) and `--search-prefix` overrides it (trailing separators are normalized; an already bracketed prefix is kept as-is). In search mode `-o/--output` only accepts `-` (stdout).
-- Front matter: each saved file records `search_query`, and tracking parameters (`utm_*`, `fbclid`, `gclid`, `dclid`, `spm`, ...) are stripped from the result URL before fetching and from front matter `source`.
-- Failures are recorded as `获取失败_<title>.md` files in `[Output] md_dir` containing just the failed URL, so you can retry them later.
-- All other options (`-l/--lang`, `-p`, `-h`, `-a`, `-e`, proxy flags, `--archive`, etc.) apply to each search result.
-
-### Proxy Modes (-x / -c / -n)
-
-```bash
-# Use environment variables (http_proxy / https_proxy / no_proxy)
-uv run surf.py "https://example.com" -x env
-
-# Windows only: use Windows Internet Settings proxy (WinINET)
-uv run surf.py "https://example.com" -x win
-
-# Custom proxy (CLI value overrides config `custom_proxy`)
-uv run surf.py "https://example.com" -x custom --set-proxy http://127.0.0.1:7890
-uv run surf.py "https://example.com" -c http://127.0.0.1:7890
-uv run surf.py "https://example.com" -x custom
-uv run surf.py "https://example.com" -c
-
-# Disable proxy
-uv run surf.py "https://example.com" -n
-
-# Override the configured LLM provider (provider names are case-insensitive)
-uv run surf.py "https://example.com" --llm l2
-```
-
-### Save Note (-n)
-
-Save to the configured `md_dir`.
-
-```bash
-uv run surf.py "https://example.com" -n
-```
-
-### Generate PDF (-p)
-
-Generate a PDF file. PDFs are rendered from the Markdown-derived HTML, so they do not need a browser: several engines are supported and tried in order.
-
-- **playwright**: Highly reliable, uses the installed browser (needs the optional `browser` extra).
-- **chrome**: `google-chrome`, `chromium`, or Edge rendered through `--headless=new --print-to-pdf`. No Python dependency; auto-detected, or set `[Browser] chrome_executable` / `SURF_CHROME_EXECUTABLE`.
-- **weasyprint**: Pure-Python HTML/CSS renderer (needs the optional `pdf` extra: `uv sync --extra pdf`). No browser at all; remote images are downloaded through the configured proxy and embedded before rendering. Requires the system Pango/libgdk-pixbuf libraries (Linux: `apt install libpango-1.0-0 libpangoft2-1.0-0`; macOS: `brew install pango libffi`; Windows: GTK3 runtime).
-- **typst**: Surf converts the Markdown-derived HTML into Typst markup and runs the `typst` binary. Needs no browser and no Python package; remote images are downloaded to a temporary directory first. CJK text renders through a built-in font fallback list, so any installed CJK font works (add font directories with `[Output] typst_fonts`).
-- **pandoc**: hands the HTML to `pandoc`, which drives an installed PDF engine (auto-detected: `typst`, `weasyprint`, `xelatex`, `lualatex`, `tectonic`, `pdflatex`). Use `[Output] pandoc_pdf_engine` to force one and `[Output] pandoc_args` for extra flags such as `-V CJKmainfont="Noto Serif CJK SC"`.
-
-```ini
-[Output]
-; auto = playwright, chrome, weasyprint, typst, pandoc
-; or pick/order engines explicitly, e.g. typst,weasyprint
-pdf_engine = auto
-typst_executable = typst        ; env: SURF_TYPST_EXECUTABLE
-typst_fonts =                   ; extra font directories (comma/':' separated)
-pandoc_executable = pandoc      ; env: SURF_PANDOC_EXECUTABLE
-pandoc_pdf_engine =             ; empty = auto-detect
-pandoc_args =                   ; e.g. --toc -V CJKmainfont="Noto Serif CJK SC"
-```
-
-```bash
-uv run surf.py "https://example.com" -p
-uv run surf.py "https://example.com" -p -o ~/Note/example.pdf
-```
-
-CommonMark tables (`| a | b |`) and fenced code blocks are rendered properly in the PDF body.
-
-### PDF URLs as input
-
-When the fetched URL points at a PDF (detected by `Content-Type: application/pdf`, a `.pdf` response body, or `Content-Disposition`), the output format decides what happens:
-
-```bash
-surf "https://example.com/paper.pdf"          # Extract text -> Markdown (normal pipeline)
-surf "https://example.com/paper.pdf" -h       # Extract text -> HTML
-surf "https://example.com/paper.pdf" -r       # Extract text without translation
-surf "https://example.com/paper.pdf" -p       # Download and save the original PDF unchanged
-```
-
-- Text extraction uses `pypdf` and is skipped entirely for PDF output, so `-p` preserves the source file byte-for-byte.
-- The URL does not need to end in `.pdf`; the response itself is inspected.
-- Scanned/image-only PDFs have no extractable text and are not OCR'd yet. Use `-p` to keep the original file.
-- If the PDF host no longer resolves or the connection fails (for example a dead domain), Surf looks up the URL in the Wayback Machine and uses the archived raw PDF when a snapshot exists. The snapshot is written to the `archive` front matter field.
-- The Web UI follows the same rule: previews and Markdown/HTML saves use extracted text, while saving as PDF re-downloads the original PDF (or the archived PDF when the original host is dead).
-
-### Save HTML (--html / --html-inline)
-
-Save content as HTML files:
-
-- `--html`: Save raw HTML
-- `--html-inline`: Inline external CSS/JS resources for standalone HTML files
-
-```bash
-# Save HTML file
-uv run surf.py "https://example.com" --html
-
-# Save HTML with inlined CSS/JS (self-contained file)
-uv run surf.py "https://example.com" --html-inline
-```
-
-### Text-to-Speech (-a / -s)
-
-For ordinary web pages, `-a/--format audio` still generates an MP3 with text-to-speech. For Pocket Casts and Xiaoyuzhou episode URLs, the same option downloads the original Podcast audio enclosure instead:
-
-```bash
-uv run surf.py "https://www.xiaoyuzhoufm.com/episode/637761077105b234344c09dc" -a -o ./audio/episode.m4a
-```
-
-The source extension and audio format are preserved when no explicit output path is supplied. Podcast audio downloads use `[Transcription].max_audio_mb` and `[Transcription].audio_timeout` limits.
-
-Read content aloud (requires local audio output):
-
-```bash
-uv run surf.py "https://example.com" -s
-```
-
-Override the configured voice, rate, or volume for a single run:
-
-```bash
-uv run surf.py "https://example.com" -a --tts-voice en-US-AriaNeural
-uv run surf.py "https://example.com" -a --tts-rate +10% --tts-volume -20%
-```
-
-### Force Browser / Browser Backend (-B / --browser-backend)
-
-Force browser rendering with `--browser`; pick the headless backend with `-B` (useful for tricky sites).
-
-```bash
-uv run surf.py "https://example.com" --browser
-uv run surf.py "https://example.com" -B playwright   # Force the Playwright headless backend for this run
-uv run surf.py "https://example.com" -B obscura      # Force the Obscura headless backend for this run
-uv run surf.py "https://example.com" -B auto         # Follow [Browser] backend in config.ini (default behavior)
-```
-
-### Content Extractor (-e / --extractor)
-
-Choose the content extraction library used to remove ads, sidebars, and other clutter:
-
-- `auto` (default): Use Readability first, fall back to Trafilatura if extraction fails
-- `readability`: Use Mozilla Readability algorithm only
-- `trafilatura`: Use Trafilatura only
-- `raw`: Skip extraction entirely, return original HTML
-
-The default extractor can be set with `[Content] extractor` in config.ini; the CLI `-e`/`-R`/`-T`/`-U` flags and the Web UI extractor option override it per run.
-
-```bash
-# Use Trafilatura when Readability gives poor results
-uv run surf.py "https://example.com" -e trafilatura
-
-# Force Readability only (no fallback)
-uv run surf.py "https://example.com" -e readability
-
-# Skip extraction, keep original HTML
-uv run surf.py "https://example.com" -e raw
-```
-
-### Thread Expansion (-t / --thread / --thread-author / --no-thread)
-
-Fetch the current post together with posts from the same thread. `--thread` chooses the range, and `--thread-author` chooses whether to keep only the current post author or all authors:
-
-```bash
-uv run surf.py "https://x.com/user/status/123" -t
-uv run surf.py "https://x.com/user/status/123" --thread before
-uv run surf.py "https://x.com/user/status/123" --thread both --thread-author same
-uv run surf.py "https://bsky.app/profile/user.bsky.social/post/abc123" --no-thread
-```
-
-Thread directions are `after` (later posts, default), `before` (earlier posts), `both`, and `off`. Author scopes are `all` (default) and `same`.
-
-For V2EX topics, Surf defaults to the main post only and uses the configured proxy automatically when available. Add `-t` or `--thread` to include replies:
-
-```bash
-uv run surf.py "https://v2ex.com/t/1208365" -r
-uv run surf.py "https://v2ex.com/t/1208365" -r -t
-```
-
-### Image OCR (--ocr / --no-ocr)
-
-Run local OCR on article images and append recognized text below each image:
-
-```bash
-uv run surf.py "https://example.com/article" --ocr
-uv run surf.py "https://www.xiaohongshu.com/explore/..." --no-ocr
-uv run surf.py "https://example.com/article" --ocr --ocr-lang eng
-uv run surf.py "https://example.com/article" --ocr --ocr-engine tesseract --ocr-lang eng
-```
-
-#### Direct Image OCR
-
-When `--ocr` is followed by a local image file path, Surf runs OCR directly on the image and prints the recognized text:
-
-```bash
-# OCR a local image (any supported format: jpg, png, bmp, tiff, gif, webp)
-surf --ocr /path/to/image.png
-surf --ocr C:\Users\me\scan.jpg
-surf --ocr file:///tmp/screenshot.png
-
-# With specific engine and language
-surf --ocr photo.png --ocr-engine tesseract --ocr-lang eng
-```
-
-Notes:
-
-- The default OCR engine is `auto` (PaddleOCR > RapidOCR > Tesseract); choose `paddleocr`, `rapidocr`, `tesseract`, or `auto` with `--ocr-engine` (or `[OCR] engine`).
-- Fallback follows the selected chain: with `rapidocr`, Surf falls back to local Tesseract when RapidOCR is unavailable or produces no usable text (unless you force `--ocr-engine tesseract`); `auto` tries PaddleOCR, then RapidOCR, then Tesseract.
-- `--ocr-lang` only applies to Tesseract.
-- Xiaohongshu enables image OCR by default.
-- OCR failures only skip the affected image; they do not abort the article fetch.
-
-### Authentication (--login / --export-auth / --import-auth / --clear-auth)
-
-For sites requiring authentication (e.g., Xiaohongshu, Twitter/X, Reddit, Zhihu, Douban, NCPSSD), prepare and reuse a saved Playwright auth state:
-
-```bash
-# First-time login for Xiaohongshu
-surf --login xiaohongshu
-
-# Export the saved state from a desktop machine
-surf --export-auth xiaohongshu ./xiaohongshu_state.json
-surf --export-auth xiaohongshu ~/Note/xiaohongshu_state.json
-
-# Import that state on a headless Linux server
-surf --import-auth xiaohongshu ./xiaohongshu_state.json
-surf --import-auth xiaohongshu ~/Note/xiaohongshu_state.json
-
-# Optional: login for Twitter/X (helps with login-wall pages)
-surf --login twitter
-
-# Optional: login for Reddit (reuses saved cookies for JSON and browser fetches)
-surf --login reddit
-surf --export-auth reddit ./reddit_state.json
-surf --import-auth reddit ./reddit_state.json
-
-# Optional: login for Douban (reuses saved cookies for direct requests and browser fallback)
-surf --login douban
-surf --export-auth douban ./douban_state.json
-surf --import-auth douban ./douban_state.json
-
-# Prefer uvx --from twitter-cli twitter with local browser cookies
-surf --twitter-backend cli "https://x.com/username/status/1234567890"
-surf --twitter-backend cli --twitter-browser chrome "https://x.com/username/status/1234567890"
-
-# Optional: login for Zhihu (feeds cookies to API/mirror requests and helps browser verification)
-surf --login zhihu
-
-# Optional: login for NCPSSD (required by some secure full-text downloads)
-surf --login ncpssd
-
-# After login/import, fetch content normally
-surf "https://www.xiaohongshu.com/explore/..."
-surf "https://www.xiaohongshu.com/discovery/item/..."
-surf "https://x.com/username/status/1234567890"
-surf --thread after "https://www.reddit.com/r/test/comments/abc123/example_post/"
-surf "https://www.zhihu.com/question/349732913/answer/2008128917886751846"
-surf -p "https://ncpssd.cn/Literature/secure/articleinfo?params=..."
-
-# Clear saved authentication
-surf --clear-auth xiaohongshu
-surf --clear-auth twitter
-surf --clear-auth reddit
-surf --clear-auth zhihu
-surf --clear-auth ncpssd
-# Or clear all sites
-surf --clear-auth all
-```
-
-**Note**: Authentication state and application data are saved in `%LOCALLAPPDATA%\surf\` on Windows, or `~/.local/cache/surf/` on Linux/macOS.
-On headless Linux, `surf --login ...` now fails fast instead of trying to open a browser with no display. Run the login command on a desktop machine, then move the saved state with `--export-auth` and `--import-auth`.
-For Twitter/X, `surf --login twitter` first tries to import cookies from your real browser (or `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`) through `twitter-cli`, which is usually more reliable than X's automated login page. If that import is unavailable, Surf falls back to a visible Playwright login window and keeps a persistent browser profile under the auth directory. If `uvx` is available, the default backend prefers `uvx --from twitter-cli twitter` so Surf can reuse local browser cookies before touching the built-in Playwright/oEmbed chain. Twitter's forced proxy path defaults to the same behavior as `surf -x win`.
-For Reddit post URLs, Surf fetches the post from Reddit's JSON comments endpoint, reuses saved `reddit.com` cookies when available, and only includes reply threads when you explicitly pass `--thread after|both` or `-t`.
-For Xiaohongshu note URLs, Surf first fetches the server-side rendered note page directly with the saved cookies (fast, no browser needed) and only falls back to the browser path when that is unavailable; expired auth state and risk-control/verification responses are reported as explicit errors instead of being emitted as content.
-For site-specific behavior details (including NCPSSD download rules), refer to `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md`.
-
-### Cloudflare Bypass Cookies
-
-Some websites use Cloudflare WAF to block automated access. Surf can use `cf_clearance` cookies extracted from your real browser to bypass these blocks.
-
-**How to extract cookies:**
-
-1. Open Chrome and visit the target website
-2. Pass the Cloudflare challenge (wait for the real page to load)
-3. Open DevTools (F12) > **Application** tab > **Cookies** > select the domain
-4. Find `cf_clearance` and copy its **Value**
-5. Configure via CLI or config.ini:
-
-```bash
-# Set cookie via CLI
-surf --set-cf-clearance example.com "cf_clearance=YOUR_COOKIE_VALUE"
-
-# Use normally - surf will automatically inject the cookie
-surf "https://example.com/article"
-
-# Clear cookies when expired
-surf --clear-cf-clearance example.com
-```
-
-Or add directly to `config.ini`:
-
-```ini
-[Cloudflare]
-example.com = cf_clearance=YOUR_COOKIE_VALUE
-```
-
-**Important notes:**
-
-- The cookie **must** come from Chrome or a Chromium-based browser (Surf uses Chrome 131 TLS fingerprint)
-- Cookies from Firefox or Safari will **not** work
-- Cookies typically expire in 30 minutes to 24 hours
-- When cookies expire, Surf falls back to its normal Cloudflare challenge handling
-
-## Help
-
-```bash
-uv run surf.py --help
-```
+| File | Contents |
+| --- | --- |
+| `SPECIAL_SITES.md` / `SPECIAL_SITES_zh.md` | Every URL rule and handler action, in detail |
+| `config.ini.example` | All configuration keys with comments |
+| `surf.py --help` | The CLI reference above, from the source |
+| `surf_web.py --help` | Web server options |

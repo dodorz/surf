@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "1.2.1.259"
-description = "A powerful Python CLI tool that converts web pages into clean Markdown or PDF files"
+version = "1.2.1.261"
+description = "Turn a web page, local file, or search query into clean Markdown, HTML, PDF, audio, or a Pastebin post"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
