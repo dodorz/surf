@@ -14,8 +14,9 @@ input ─▶ fetch ─▶ extract ─▶ (OCR) ─▶ translate ─▶ render �
 - **One command per document.** `surf https://example.com` writes a Markdown note.
 - **Static HTML to JavaScript-heavy pages.** Plain HTTP by default, a headless browser
   (Obscura, or Playwright) when a page needs one.
-- **Real translation.** Detects the language, translates with an OpenAI-compatible LLM,
-  and records what happened in the front matter.
+- **Real translation.** Detects the language, translates with an OpenAI Chat Completions,
+  OpenAI Responses, or Anthropic Messages LLM, and records what happened in the
+  front matter.
 - **Five outputs from one pipeline.** Markdown, HTML, PDF, audio, Pastebin — including a
   browser-less PDF chain.
 - **Site-aware.** Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat, Zhihu,
@@ -292,6 +293,46 @@ are dropped — so the YAML stays valid. A trailing sentence-ending period is re
 `title`, and GitHub's auto-generated "Contribute to … development by creating an account
 on GitHub." sentence is stripped before translation so translated output never carries a
 translated copy of it.
+
+### LLM API styles
+
+Each `[LLM.<name>]` section talks to its provider with one of three wire formats,
+selected by `api_style`:
+
+| `api_style` | Endpoint | Notes |
+| --- | --- | --- |
+| `chat` (default) | `/chat/completions` | OpenAI Chat Completions style, works with every OpenAI-compatible gateway |
+| `responses` | `/responses` | OpenAI Responses style, sent through the official SDK |
+| `anthropic` | `/v1/messages` | Anthropic Messages style, sent with `requests` |
+
+```ini
+[LLM.chat_gateway]
+api_style = chat
+base_url = https://api.deepseek.com/v1
+api_key = sk-...
+model = deepseek-chat
+
+[LLM.openai_responses]
+api_style = responses
+base_url = https://api.openai.com/v1
+api_key = sk-...
+model = gpt-4.1-mini
+
+[LLM.claude]
+api_style = anthropic
+base_url = https://api.anthropic.com
+api_key = sk-ant-...
+model = claude-3-5-sonnet-latest
+max_tokens = 8192
+```
+
+`base_url` for `anthropic` may be the host, the host plus `/v1`, or the full
+`/v1/messages` URL. Auth defaults to the `x-api-key` header; set
+`auth_header = bearer` (or `both`) for Anthropic-compatible gateways that expect
+`Authorization: Bearer`. The API version defaults to `2023-06-01` and can be changed
+with `anthropic_version`. `max_tokens` is optional (`max_tokens` for chat/anthropic,
+`max_output_tokens` for responses; Anthropic defaults to 4096) and `timeout` only
+applies to the Anthropic Messages request (default 120s).
 
 ---
 
@@ -662,6 +703,7 @@ required.
 provider = LLM1                     ; default provider name
 
 [LLM.LLM1]
+api_style = chat                    ; chat, responses, or anthropic
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo

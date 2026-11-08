@@ -68,16 +68,42 @@ deepseek_url =
 provider = LLM1
 
 [LLM.LLM1]
-; OpenAI-compatible API configuration for L1
+; API wire format: chat (OpenAI Chat Completions, default), responses
+; (OpenAI Responses) or anthropic (Anthropic Messages)
+api_style = chat
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
+; Optional: cap the answer length (chat: max_tokens; responses: max_output_tokens;
+; anthropic: max_tokens, default 4096)
+; max_tokens = 4096
+; Optional request timeout in seconds (Anthropic Messages only)
+; timeout = 120
 
 [LLM.LLM2]
 ; Additional LLM provider example (DeepSeek)
 base_url = https://api.deepseek.com/v1
 api_key = your_deepseek_api_key
 model = deepseek-chat
+
+[LLM.LLM3]
+; OpenAI Responses API example (same host as chat, different endpoint)
+api_style = responses
+base_url = https://api.openai.com/v1
+api_key = your_api_key_here
+model = gpt-4.1-mini
+
+[LLM.LLM4]
+; Anthropic Messages API example; base_url may be the host, .../v1, or .../v1/messages
+api_style = anthropic
+base_url = https://api.anthropic.com
+api_key = your_anthropic_api_key
+model = claude-3-5-sonnet-latest
+; Optional: x-api-key (default), bearer, or both — use bearer for
+; Anthropic-compatible gateways that expect Authorization: Bearer
+; auth_header = x-api-key
+; anthropic_version = 2023-06-01
+; max_tokens = 4096
 
 [TTS]
 ; Support: edge-tts

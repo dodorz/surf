@@ -10,7 +10,7 @@ Surf 把一个网页、一个本地文件或一句搜索词，变成一份去掉
 
 - **一条命令就是一份文档。** `surf https://example.com` 直接写出 Markdown 笔记。
 - **静态 HTML 到重 JavaScript 页面。** 默认走普通 HTTP，需要时自动（或手动）启用无头浏览器（Obscura，或 Playwright）。
-- **真正的翻译。** 检测语言，调用兼容 OpenAI 的 LLM 翻译，并把实际发生了什么写进 front matter。
+- **真正的翻译。** 检测语言，调用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 风格的 LLM 翻译，并把实际发生了什么写进 front matter。
 - **一套流程五种产物。** Markdown、HTML、PDF、音频、Pastebin，PDF 甚至可以不依赖浏览器。
 - **认识站点。** Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙、GitHub、Wikipedia、Foreign Affairs。
 - **失败不会凭空消失。** 抓不下来的 URL 会写到磁盘，之后可以重试。
@@ -239,6 +239,39 @@ uv run surf "https://example.com" --llm l2 # 换一个已配置的 provider
 只有当检测到的语言与 `[Output] target_language` 不同时才会翻译；长文会切分成段以适配模型上下文。只有正文或标题真的被改写时，front matter 才写入 `translator`；单纯的语言判断不算翻译。
 
 `title` 和 `description` 会被压成单行——换行、制表符、不换行空格与连续空白合并，中文字符之间的空格去掉——保证 YAML 始终有效。`title` 末尾的句号会被删除；GitHub 自动生成的 "Contribute to … development by creating an account on GitHub." 会在翻译前从 `title` 和 `description` 中移除，避免译文里出现被翻译过的这句话。
+
+### LLM API 风格
+
+每个 `[LLM.<name>]` 小节通过 `api_style` 选择一种接口风格：
+
+| `api_style` | 端点 | 说明 |
+| --- | --- | --- |
+| `chat`（默认） | `/chat/completions` | OpenAI Chat Completions 风格，兼容所有 OpenAI 风格网关 |
+| `responses` | `/responses` | OpenAI Responses 风格，走官方 SDK |
+| `anthropic` | `/v1/messages` | Anthropic Messages 风格，用 `requests` 直发 |
+
+```ini
+[LLM.chat_gateway]
+api_style = chat
+base_url = https://api.deepseek.com/v1
+api_key = sk-...
+model = deepseek-chat
+
+[LLM.openai_responses]
+api_style = responses
+base_url = https://api.openai.com/v1
+api_key = sk-...
+model = gpt-4.1-mini
+
+[LLM.claude]
+api_style = anthropic
+base_url = https://api.anthropic.com
+api_key = sk-ant-...
+model = claude-3-5-sonnet-latest
+max_tokens = 8192
+```
+
+`anthropic` 的 `base_url` 可以只写域名、写域名加 `/v1`，或直接写完整的 `/v1/messages`。默认使用 `x-api-key` 头；如果 Anthropic 兼容网关要求 `Authorization: Bearer`，设 `auth_header = bearer`（或 `both`）。API 版本默认为 `2023-06-01`，可用 `anthropic_version` 修改。`max_tokens` 可选（chat/anthropic 用 `max_tokens`，responses 用 `max_output_tokens`；Anthropic 默认 4096），`timeout` 只作用于 Anthropic Messages 请求（默认 120 秒）。
 
 ---
 
@@ -506,6 +539,7 @@ location /surf/ {
 provider = LLM1                     ; 默认 provider 名称
 
 [LLM.LLM1]
+api_style = chat                    ; chat、responses 或 anthropic
 base_url = https://api.openai.com/v1
 api_key = your_api_key_here
 model = gpt-3.5-turbo
