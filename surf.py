@@ -13310,6 +13310,24 @@ class ContentProcessor:
             logger.error(f"Translation failed: {e}")
             return text, title
 
+def _ocr_needs_space(left_text, right_text):
+    """Whether a wrapped OCR line should be joined with a space.
+
+    CJK text wraps without spaces, Latin text keeps the word separator.
+    """
+    if not left_text or not right_text:
+        return False
+    left_char = left_text[-1]
+    right_char = right_text[0]
+    if left_char.isspace() or right_char.isspace():
+        return False
+    if right_char in ",.;:!?)]}，。；：！？）】》」』、":
+        return False
+    if left_char in "([{（【《「『":
+        return False
+    return left_char.isascii() and right_char.isascii()
+
+
 class OcrHandler:
     @staticmethod
     def _is_enabled_for_site(site_name, site_config, args, config):
@@ -13362,6 +13380,44 @@ class OcrHandler:
             if cleaned:
                 lines.append(cleaned)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _normalize_ocr_blocks(text):
+        """Collapse whitespace but keep the text's own paragraph structure.
+
+        Engines that return plain text (Tesseract) separate paragraphs with a
+        blank line while wrapping long paragraphs over several lines. Merging the
+        wrapped lines and keeping the blank line preserves the author's
+        paragraphs instead of turning every visual line into a hard break. When
+        the engine gives no blank lines at all there is nothing to rely on, so
+        the original line breaks are kept.
+        """
+        if not text:
+            return ""
+
+        blocks = []
+        current = []
+        for line in text.splitlines():
+            cleaned = re.sub(r"\s+", " ", line).strip()
+            if cleaned:
+                current.append(cleaned)
+            elif current:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+
+        if len(blocks) <= 1:
+            return "\n".join(blocks[0]) if blocks else ""
+
+        paragraphs = []
+        for block in blocks:
+            merged = block[0]
+            for next_line in block[1:]:
+                separator = " " if _ocr_needs_space(merged, next_line) else ""
+                merged = f"{merged}{separator}{next_line}"
+            paragraphs.append(merged)
+        return "\n\n".join(paragraphs)
 
     @staticmethod
     def _prepare_image_for_ocr(image):
@@ -13437,15 +13493,18 @@ class OcrHandler:
         if not result or not result[0]:
             return ""
 
-        fragments = []
+        # Keep the recognised boxes so paragraphs can be rebuilt from detector
+        # geometry instead of the raw newlines each box introduces.
+        boxes = []
         for item in result[0]:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
             text = (item[1][0] if isinstance(item[1], (list, tuple)) and len(item[1]) > 0 else str(item[1]))
             text = OcrHandler._normalize_ocr_text(text)
             if text:
-                fragments.append(text)
-        return "\n".join(fragments).strip()
+                boxes.append((text, item[0] if isinstance(item[0], (list, tuple)) else None))
+        return OcrHandler._assemble_ocr_paragraphs(boxes)
+
     @staticmethod
     def _extract_text_with_rapidocr(rapidocr_engine, image):
         ocr_input = OcrHandler._image_to_png_bytes(image)
@@ -13457,14 +13516,112 @@ class OcrHandler:
         if not lines:
             return ""
 
-        fragments = []
+        boxes = []
         for item in lines:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
             text = OcrHandler._normalize_ocr_text(str(item[1]))
             if text:
-                fragments.append(text)
-        return "\n".join(fragments).strip()
+                boxes.append((text, item[0] if isinstance(item[0], (list, tuple)) else None))
+        return OcrHandler._assemble_ocr_paragraphs(boxes)
+
+    @staticmethod
+    def _ocr_box_geometry(box):
+        """(left, right, top, bottom, height) of a detector box, or None."""
+        if not box:
+            return None
+        try:
+            points = [(float(point[0]), float(point[1])) for point in box]
+        except Exception:
+            return None
+        if not points:
+            return None
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        left, right = min(xs), max(xs)
+        top, bottom = min(ys), max(ys)
+        height = bottom - top
+        if height <= 0:
+            return None
+        return left, right, top, bottom, height
+
+    @staticmethod
+    def _assemble_ocr_paragraphs(entries):
+        """Rebuild logical paragraphs from OCR line boxes.
+
+        Vision engines return one box per *visual* line, so a wrapped sentence
+        arrives split in the middle ("...\u5a92\u4f53" / "\u5904\u7406...") and joining the boxes with
+        newlines turns every visual line into a hard break. The detector geometry
+        separates a wrapped line from a real paragraph break:
+
+        * line gap: a wrapped line sits one normal line-height below the previous
+          one, while paragraphs leave extra leading (~1.4x and more);
+        * left edge: a new paragraph that is indented starts further right, and a
+          continuation line never starts right of the paragraph's first line;
+        * text size: headings are taller than body text, so a size change starts
+          a new block (two heading lines still join into one heading).
+
+        Engine text without boxes keeps its original line structure.
+        """
+        if not entries:
+            return ""
+
+        lines = []
+        for text, box in entries:
+            cleaned = (text or "").strip()
+            if not cleaned:
+                continue
+            lines.append((cleaned, OcrHandler._ocr_box_geometry(box)))
+        if not lines:
+            return ""
+
+        geometries = [geometry for _text, geometry in lines if geometry is not None]
+        if not geometries:
+            return "\n\n".join(text for text, _geometry in lines)
+
+        heights = sorted(geometry[4] for geometry in geometries)
+        median_height = heights[len(heights) // 2]
+        if median_height <= 0:
+            return "\n\n".join(text for text, _geometry in lines)
+
+        paragraphs = []
+        current = ""
+        current_geometry = None
+        for cleaned, geometry in lines:
+            if not current:
+                current = cleaned
+                current_geometry = geometry
+                continue
+
+            if geometry is None or current_geometry is None:
+                # No geometry to reason about: keep the detector's own line break.
+                paragraphs.append(current)
+                current = cleaned
+                current_geometry = geometry
+                continue
+
+            left, _right, top, _bottom, height = geometry
+            prev_left, _prev_right, _ptop, prev_bottom, prev_height = current_geometry
+
+            # Headings are noticeably taller than body copy, so a size jump in
+            # either direction starts a new block (two heading lines still join).
+            size_ratio = height / prev_height if prev_height else 1.0
+            same_size = 0.8 <= size_ratio <= 1.25
+            line_gap = top - prev_bottom <= 1.25 * max(prev_height, height)
+            not_indented = left <= prev_left + 0.5 * median_height
+
+            if same_size and line_gap and not_indented:
+                separator = " " if _ocr_needs_space(current, cleaned) else ""
+                current = f"{current}{separator}{cleaned}"
+            else:
+                paragraphs.append(current)
+                current = cleaned
+            current_geometry = geometry
+
+        if current:
+            paragraphs.append(current)
+
+        return "\n\n".join(paragraphs)
 
     @staticmethod
     def _resolve_ocr_languages(pytesseract_module, requested_langs):
@@ -13511,7 +13668,7 @@ class OcrHandler:
                         e,
                     )
                     continue
-                text = OcrHandler._normalize_ocr_text(text)
+                text = OcrHandler._normalize_ocr_blocks(text)
                 if len(text) > len(best_text):
                     best_text = text
         return best_text
@@ -13631,9 +13788,14 @@ class OcrHandler:
         label.append(strong)
         block.append(label)
 
-        for line in ocr_text.splitlines():
+        # Paragraphs are separated by a blank line (see _assemble_ocr_paragraphs):
+        # emit one <p> per paragraph instead of one per recognised line.
+        paragraphs = [para.strip() for para in re.split(r"\n\s*\n", ocr_text or "") if para.strip()]
+        if not paragraphs:
+            paragraphs = [line for line in (ocr_text or "").splitlines() if line.strip()]
+        for paragraph in paragraphs:
             para = soup.new_tag("p")
-            para.string = line
+            para.string = paragraph
             block.append(para)
 
         return block

@@ -421,6 +421,14 @@ default; every other site needs `--ocr` or `[OCR] enabled = true`. A failing ima
 skipped rather than aborting the fetch, and engines run in a short-lived child process so
 their memory is not retained by a web worker.
 
+Tesseract hands over plain text and keeps the author's paragraphs: wrapped lines inside a
+paragraph are joined back together and only the blank lines stay as paragraph breaks.
+PaddleOCR and RapidOCR return one box per visual line, so the recognised text is regrouped
+by detector geometry — a line that sits one normal line-height below the previous one, at
+the same left margin, continues that paragraph; extra leading, an indented first line or a
+different text size starts a new one. That keeps wrapped sentences whole and stops every
+visual line from becoming a hard break.
+
 ---
 
 ## Podcasts and transcription
