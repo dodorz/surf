@@ -214,7 +214,7 @@ lang = chi_sim+eng
 ; Optional explicit path to the local tesseract executable
 ; On Windows, '~/Tools/tesseract.exe' also works and resolves under %USERPROFILE%.
 tesseract_cmd =
-; OCR at most this many images per article
+; OCR at most this many images per article (0 = no limit; --ocr-max-images overrides)
 max_images = 8
 ; Skip very small images
 min_width = 240

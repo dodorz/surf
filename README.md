@@ -417,7 +417,9 @@ uv run surf --ocr /path/to/image.png                 # OCR a local image directl
 OCR appends recognised text below each article image. The default engine is `auto`
 (PaddleOCR → RapidOCR → Tesseract); `--ocr-engine` forces one — with `rapidocr`, Tesseract
 is still the fallback. `--ocr-lang` applies to Tesseract only. Xiaohongshu enables OCR by
-default; every other site needs `--ocr` or `[OCR] enabled = true`. Xiaohongshu notes also
+default; every other site needs `--ocr` or `[OCR] enabled = true`. At most `[OCR] max_images`
+images per article are OCR'd (default 8, `--ocr-max-images N`, `0` means no limit); the run
+log reports how many images the limit skipped. Xiaohongshu notes also
 move their `#hashtags` into front matter `tags` (the in-body tag links are dropped) and turn
 the footer's relative date (`3天前`, `2周前`, ...) into an absolute `created`. A failing image is
 skipped rather than aborting the fetch, and engines run in a short-lived child process so
@@ -763,7 +765,7 @@ curlcffi_mode = auto                ; false, true, auto
 enabled = false                     ; Xiaohongshu overrides this to true
 engine = auto                       ; auto, paddleocr, rapidocr, tesseract
 lang = chi_sim+eng
-max_images = 8
+max_images = 8                      ; 0 = no limit; --ocr-max-images overrides
 
 [publish.pastebin]
 api_dev_key = your_pastebin_api_key_here
@@ -843,6 +845,7 @@ Grouped by the same sections as `--help`.
 | --- | --- |
 | `--ocr` / `--no-ocr` | Enable or disable image OCR |
 | `--ocr-engine {rapidocr,tesseract,paddleocr,auto}` | Engine or fallback chain |
+| `--ocr-max-images N` | OCR at most `N` images per article (`0` = no limit) |
 | `--ocr-lang LANGS` | Tesseract languages |
 
 **Search** (`-S/--search` only)

@@ -13545,6 +13545,18 @@ class OcrHandler:
         return value or "paddleocr"
 
     @staticmethod
+    def _get_ocr_max_images(args, config):
+        """Per-article OCR image limit; 0 or a negative value means no limit."""
+        override = getattr(args, "ocr_max_images", None)
+        if override is None:
+            override = OcrHandler._get_int_config(config, "max_images", 8)
+        try:
+            limit = int(override)
+        except (TypeError, ValueError):
+            limit = 8
+        return max(limit, 0)
+
+    @staticmethod
     def _get_engine_chain(args, config):
         engine = OcrHandler._get_engine_setting(args, config)
         if engine == "paddleocr":
@@ -14157,7 +14169,7 @@ class OcrHandler:
             return html_content
 
         req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        max_images = OcrHandler._get_int_config(config, "max_images", 8)
+        max_images = OcrHandler._get_ocr_max_images(args, config)
         min_width = OcrHandler._get_int_config(config, "min_width", 240)
         min_height = OcrHandler._get_int_config(config, "min_height", 120)
         min_text_length = OcrHandler._get_int_config(config, "min_text_length", 8)
@@ -14166,10 +14178,14 @@ class OcrHandler:
         root = soup.find("article") or soup.find("main") or soup.body or soup
         seen_urls = set()
         candidates = []  # (img_tag, img_url, prepared PNG bytes)
+        limit_text = str(max_images) if max_images > 0 else "no limit"
+        skipped_by_limit = 0
 
         for img in root.find_all("img"):
-            if len(candidates) >= max_images:
-                break
+            if max_images > 0 and len(candidates) >= max_images:
+                # Keep counting so the log tells how many images were left out.
+                skipped_by_limit += 1
+                continue
             if img.find_next_sibling(class_="surf-ocr"):
                 continue
 
@@ -14184,7 +14200,12 @@ class OcrHandler:
             seen_urls.add(img_url)
 
             try:
-                logger.info("OCR downloading image %d/%d: %s", len(candidates) + 1, max_images, img_url[:120])
+                logger.info(
+                    "OCR downloading image %d (limit: %s): %s",
+                    len(candidates) + 1,
+                    limit_text,
+                    img_url[:120],
+                )
                 image_bytes = OcrHandler._download_image(img_url, source_url, req_proxies)
                 image = Image.open(io.BytesIO(image_bytes))
                 image.load()
@@ -14196,6 +14217,14 @@ class OcrHandler:
                 candidates.append((img, img_url, OcrHandler._image_to_png_bytes(prepared_image)))
             except Exception as e:
                 logger.warning("OCR failed for image %s: %s", img_url[:120], e)
+
+        if skipped_by_limit:
+            logger.info(
+                "OCR image limit reached ([OCR] max_images = %d / --ocr-max-images); "
+                "%d further image(s) were not OCR'd. Set it to 0 for no limit.",
+                max_images,
+                skipped_by_limit,
+            )
 
         if not candidates:
             logger.warning("OCR ran but no downloadable images were found.")
@@ -18295,6 +18324,12 @@ Exit status is 0 on success and non-zero when the input could not be processed.
         help="auto = paddleocr > rapidocr > tesseract (default), or force one engine",
     )
     group.add_argument("--ocr-lang", help="Tesseract language(s), e.g. chi_sim+eng")
+    group.add_argument(
+        "--ocr-max-images",
+        type=int,
+        metavar="N",
+        help="OCR at most N images per article (default: [OCR] max_images, 8); 0 means no limit",
+    )
 
     # -------------------------------------------------------------- search
     group = parser.add_argument_group("keyword search (-S/--search)")

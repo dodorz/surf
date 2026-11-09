@@ -3004,11 +3004,13 @@ def build_text_post_html(text, title):
 def build_web_ocr_args(data):
     """Build an args-like object for OCR settings reused from the CLI pipeline."""
     ocr_mode = str(data.get("ocr_mode", "default")).strip().lower()
+    max_images = str(data.get("ocr_max_images") or "").strip()
     return SimpleNamespace(
         ocr=ocr_mode == "on",
         no_ocr=ocr_mode == "off",
         ocr_lang=(data.get("ocr_lang") or "").strip() or None,
         ocr_engine=(data.get("ocr_engine") or "").strip() or None,
+        ocr_max_images=int(max_images) if max_images.lstrip("-").isdigit() else None,
     )
 
 

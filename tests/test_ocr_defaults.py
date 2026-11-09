@@ -48,3 +48,28 @@ def test_unknown_engine_falls_back_to_auto_chain():
         "rapidocr",
         "tesseract",
     ]
+
+
+def test_max_images_defaults_to_config_value():
+    args = argparse.Namespace(ocr_max_images=None)
+    assert OcrHandler._get_ocr_max_images(args, _config()) == 8
+
+
+def test_max_images_config_value_is_used():
+    args = argparse.Namespace(ocr_max_images=None)
+    assert OcrHandler._get_ocr_max_images(args, _config(max_images="20")) == 20
+
+
+def test_max_images_cli_override_wins():
+    args = argparse.Namespace(ocr_max_images=3)
+    assert OcrHandler._get_ocr_max_images(args, _config(max_images="20")) == 3
+
+
+def test_max_images_zero_or_negative_means_no_limit():
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(ocr_max_images=0), _config()) == 0
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(ocr_max_images=-5), _config()) == 0
+
+
+def test_max_images_tolerates_bad_input():
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(ocr_max_images="many"), _config()) == 8
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(), _config(max_images="x")) == 8
