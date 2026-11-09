@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "surf"
-version = "1.3.0.267"
+version = "1.3.0.268"
 description = "Turn a web page, local file, or search query into clean Markdown, HTML, PDF, audio, or a Pastebin post"
 readme = "README.md"
 license = {text = "MIT"}

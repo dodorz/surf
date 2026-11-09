@@ -3530,8 +3530,23 @@ def _enqueue_web_save_job(save_data):
     threading.Thread(target=_run_web_save_job, args=(job_id,), daemon=True).start()
     return job_id
 
-def _wait_for_translation_and_get_result(translation_job_id, timeout=300, poll_interval=2):
+def _translation_job_timeout_seconds():
+    """How long a save waits for a background translation job.
+
+    A long document is translated chunk by chunk, so the wait has to scale with
+    the article rather than fit in a fixed five minutes.
+    """
+    try:
+        value = int(get_config().get("LLM", "translation_job_timeout", fallback="1800"))
+    except (TypeError, ValueError):
+        value = 1800
+    return max(value, 60)
+
+
+def _wait_for_translation_and_get_result(translation_job_id, timeout=None, poll_interval=2):
     """Poll an async translation job until completion, then return the translated result."""
+    if timeout is None:
+        timeout = _translation_job_timeout_seconds()
     deadline = time.time() + timeout
     while time.time() < deadline:
         job = _get_translation_job(translation_job_id)

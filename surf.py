@@ -32,7 +32,12 @@ import queue
 from requests.utils import get_encoding_from_headers
 from readability import Document
 import markdownify
-from langdetect import detect
+from langdetect import DetectorFactory as _LangDetectorFactory, detect
+
+# langdetect is probabilistic (it samples n-grams). Seeding it makes language
+# detection deterministic, so the same page never flips between "translate" and
+# "already Chinese" across runs.
+_LangDetectorFactory.seed = 0
 import warnings
 import asyncio
 import edge_tts
@@ -13562,6 +13567,11 @@ class ContentProcessor:
             return m.group(1).strip()
         return text
 
+    # A whole document is split into many chunks; one flaky response used to
+    # abort the entire translation, and the page came back untranslated.
+    TRANSLATION_ATTEMPTS = 3
+    TRANSLATION_RETRY_DELAY = 2
+
     @classmethod
     def translate_if_needed(
         cls,
@@ -13672,10 +13682,51 @@ class ContentProcessor:
             if extra_system_instruction:
                 content_system_prompt = f"{content_system_prompt} {extra_system_instruction}".strip()
 
+            failed_chunks = 0
             for i, chunk in enumerate(chunks):
                 logger.info(f"Translating chunk {i + 1}/{total_chunks} ({len(chunk)} chars)...")
-                completion_text = client.complete(content_system_prompt, chunk)
+                completion_text = None
+                last_error = None
+                for attempt in range(1, cls.TRANSLATION_ATTEMPTS + 1):
+                    try:
+                        completion_text = client.complete(content_system_prompt, chunk)
+                        break
+                    except Exception as e:
+                        last_error = e
+                        if attempt < cls.TRANSLATION_ATTEMPTS:
+                            logger.warning(
+                                "Translating chunk %d/%d failed (attempt %d/%d): %s. Retrying...",
+                                i + 1,
+                                total_chunks,
+                                attempt,
+                                cls.TRANSLATION_ATTEMPTS,
+                                e,
+                            )
+                            time.sleep(cls.TRANSLATION_RETRY_DELAY * attempt)
+                if completion_text is None:
+                    # One failing chunk must not throw away the whole translation:
+                    # keep the source text for that chunk, remember the failure and
+                    # report it, instead of silently returning an untranslated doc.
+                    failed_chunks += 1
+                    logger.error(
+                        "Translation failed for chunk %d/%d (%d chars): %s",
+                        i + 1,
+                        total_chunks,
+                        len(chunk),
+                        last_error,
+                    )
+                    translated_chunks.append(chunk)
+                    continue
                 translated_chunks.append(ContentProcessor._extract_from_code_block(completion_text))
+
+            if failed_chunks:
+                logger.warning(
+                    "Translation left %d/%d chunk(s) in the source language. "
+                    "Long documents with a slow/flaky provider are the usual cause; "
+                    "re-run the command or raise the [LLM] timeout.",
+                    failed_chunks,
+                    total_chunks,
+                )
 
             if protected_lines:
                 translated_text = "\n\n".join(protected_lines)

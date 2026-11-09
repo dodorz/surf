@@ -66,6 +66,10 @@ deepseek_url =
 [LLM]
 ; Default LLM provider name
 provider = LLM1
+; How long the Web UI's background save waits for a queued translation job, in
+; seconds. Long articles are translated chunk by chunk, so this needs to scale
+; with the document size (default 1800).
+; translation_job_timeout = 1800
 
 [LLM.LLM1]
 ; API wire format: chat (OpenAI Chat Completions, default), responses

@@ -10,7 +10,7 @@ Surf 把一个网页、一个本地文件或一句搜索词，变成一份去掉
 
 - **一条命令就是一份文档。** `surf https://example.com` 直接写出 Markdown 笔记。
 - **静态 HTML 到重 JavaScript 页面。** 默认走普通 HTTP，需要时自动（或手动）启用无头浏览器（Obscura，或 Playwright）。
-- **真正的翻译。** 检测语言，调用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 风格的 LLM 翻译，并把实际发生了什么写进 front matter。
+- **真正的翻译。** 检测语言，调用 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 风格的 LLM 翻译，并把实际发生了什么写进 front matter。长文档按块翻译并自动重试；某一块重试后仍失败时保留该块原文并在日志里告警，而不是整篇放弃翻译。
 - **一套流程五种产物。** Markdown、HTML、PDF、音频、Pastebin，PDF 甚至可以不依赖浏览器。
 - **认识站点。** Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公众号、知乎、小红书、NCPSSD、Pocket Casts、小宇宙、GitHub、Wikipedia、Foreign Affairs。
 - **失败不会凭空消失。** 抓不下来的 URL 会写到磁盘，之后可以重试。
@@ -277,7 +277,7 @@ model = claude-3-5-sonnet-latest
 max_tokens = 8192
 ```
 
-`anthropic` 的 `base_url` 可以只写域名、写域名加 `/v1`，或直接写完整的 `/v1/messages`。默认使用 `x-api-key` 头；如果 Anthropic 兼容网关要求 `Authorization: Bearer`，设 `auth_header = bearer`（或 `both`）。API 版本默认为 `2023-06-01`，可用 `anthropic_version` 修改。`max_tokens` 可选（chat/anthropic 用 `max_tokens`，responses 用 `max_output_tokens`；Anthropic 默认 4096），`timeout` 只作用于 Anthropic Messages 请求（默认 120 秒）。
+`anthropic` 的 `base_url` 可以只写域名、写域名加 `/v1`，或直接写完整的 `/v1/messages`。默认使用 `x-api-key` 头；如果 Anthropic 兼容网关要求 `Authorization: Bearer`，设 `auth_header = bearer`（或 `both`）。API 版本默认为 `2023-06-01`，可用 `anthropic_version` 修改。`max_tokens` 可选（chat/anthropic 用 `max_tokens`，responses 用 `max_output_tokens`；Anthropic 默认 4096），`timeout` 只作用于 Anthropic Messages 请求（默认 120 秒）。每个翻译分块最多重试 3 次；仍然失败的块保留原文，运行日志会说明有几块没有翻译成功。
 
 ---
 

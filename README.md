@@ -16,7 +16,9 @@ input ─▶ fetch ─▶ extract ─▶ (OCR) ─▶ translate ─▶ render �
   (Obscura, or Playwright) when a page needs one.
 - **Real translation.** Detects the language, translates with an OpenAI Chat Completions,
   OpenAI Responses, or Anthropic Messages LLM, and records what happened in the
-  front matter.
+  front matter. Long documents are translated chunk by chunk with retries, and a chunk
+  that still fails keeps its source text (with a warning in the log) instead of
+  discarding the whole translation.
 - **Five outputs from one pipeline.** Markdown, HTML, PDF, audio, Pastebin — including a
   browser-less PDF chain.
 - **Site-aware.** Twitter/X, Reddit, Bluesky, Weibo, Threads, V2EX, WeChat, Zhihu,
@@ -340,7 +342,9 @@ max_tokens = 8192
 `Authorization: Bearer`. The API version defaults to `2023-06-01` and can be changed
 with `anthropic_version`. `max_tokens` is optional (`max_tokens` for chat/anthropic,
 `max_output_tokens` for responses; Anthropic defaults to 4096) and `timeout` only
-applies to the Anthropic Messages request (default 120s).
+applies to the Anthropic Messages request (default 120s). Each translation chunk is tried
+three times before it gives up; the chunk then keeps its source text and the run log says
+how many chunks were left untranslated.
 
 ---
 
