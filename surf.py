@@ -37,7 +37,7 @@ import warnings
 import asyncio
 import edge_tts
 from playsound import playsound
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil import parser as date_parser  # type: ignore
 from bs4 import BeautifulSoup, UnicodeDammit
 from html import escape, unescape
@@ -2257,6 +2257,11 @@ class LlmCompletionClient:
             return "".join(parts)
         completion = payload.get("completion")
         return completion if isinstance(completion, str) else ""
+
+
+def _xiaohongshu_day_start(moment):
+    """Round a datetime down to local midnight (relative stamps only give a day)."""
+    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 class Fetcher:
@@ -5139,6 +5144,34 @@ class Fetcher:
         for meta_desc in soup.find_all("meta", attrs={"name": "description"}):
             meta_desc.decompose()
 
+        # Hashtag links (#话题) become front matter tags: their text is kept as a
+        # meta tag and the in-body links are dropped, so the body is not a wall
+        # of tag links pointing at search results.
+        article = soup.find("article") or soup.body or soup
+        hashtags = Fetcher._extract_xiaohongshu_hashtags(article)
+        Fetcher._strip_xiaohongshu_hashtag_links(article)
+        for tag_text in hashtags:
+            meta_tag = soup.new_tag("meta")
+            meta_tag["name"] = "surf-tag"
+            meta_tag["content"] = tag_text
+            head = soup.find("head")
+            if head:
+                head.append(meta_tag)
+
+        # "7天前 美国" style footers are relative dates: turn the age into a
+        # published_at meta tag and drop the row from the body.
+        published_at = Fetcher._extract_xiaohongshu_published_at(article)
+        if published_at:
+            meta_created = soup.new_tag("meta")
+            meta_created["name"] = "surf-created"
+            # Relative stamps only resolve down to a day, so the published date
+            # is written without a misleading midnight timestamp.
+            meta_created["content"] = published_at.strftime("%Y-%m-%d")
+            head = soup.find("head")
+            if head:
+                head.append(meta_created)
+        Fetcher._strip_xiaohongshu_date_row(article)
+
         # Fix images with 403 errors by adding proper referrer meta tag
         # Some xhscdn images require a referrer
         meta_referrer = soup.new_tag("meta")
@@ -5154,6 +5187,150 @@ class Fetcher:
             soup.insert(0, head)
 
         return str(soup)
+
+    # Relative timestamps Xiaohongshu renders in the note footer.
+    _XHS_RELATIVE_DATE_RE = re.compile(
+        r"^(?:刚刚|刚才|今天|昨天|前天|\d+\s*(?:秒|分钟|小時|小时|天|周|星期|个?月|年)前)$"
+    )
+    # "编辑于 3天前" is an edit stamp, not the publication date.
+    _XHS_EDIT_DATE_RE = re.compile(r"^(?:编辑于|修改于|更新于)")
+
+    @staticmethod
+    def _extract_xiaohongshu_hashtags(root):
+        """Hashtag texts (#话题) from a Xiaohongshu note body, without the '#'."""
+        if root is None:
+            return []
+        tags = []
+        seen = set()
+        for anchor in root.find_all("a"):
+            if (anchor.get("id") or "").strip().lower() != "hash-tag":
+                class_names = anchor.get("class") or []
+                if not any(str(name).strip().lower() == "tag" for name in class_names):
+                    continue
+            text = re.sub(r"\s+", " ", anchor.get_text(" ", strip=True)).strip()
+            hashtag = re.match(r"^#([^#\s].*?)\s*$", text)
+            if not hashtag:
+                continue
+            value = OutputHandler.normalize_markdown_encoding(hashtag.group(1)).strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            tags.append(value)
+        return tags
+
+    @staticmethod
+    def _strip_xiaohongshu_hashtag_links(root):
+        """Drop hashtag anchor links from the note body (their text is metadata now).
+
+        Text that is not a hashtag anchor is left untouched; a paragraph that
+        becomes empty is removed so no blank line is left behind.
+        """
+        if root is None:
+            return
+        for anchor in list(root.find_all("a")):
+            is_hashtag = (anchor.get("id") or "").strip().lower() == "hash-tag"
+            if not is_hashtag:
+                class_names = anchor.get("class") or []
+                is_hashtag = any(str(name).strip().lower() == "tag" for name in class_names)
+            if not is_hashtag:
+                continue
+            parent = anchor.parent
+            anchor.decompose()
+            if parent is not None and not parent.get_text(strip=True) and not parent.find("img"):
+                if parent.name in {"div", "p", "span", "section"}:
+                    parent.decompose()
+
+    @staticmethod
+    def _parse_xiaohongshu_relative_date(text, now=None):
+        """Convert '刚刚' / '3天前' / '2周前' ... into an absolute datetime."""
+        if not text:
+            return None
+        cleaned = re.sub(r"\s+", " ", str(text)).strip()
+        if not cleaned or Fetcher._XHS_EDIT_DATE_RE.match(cleaned):
+            return None
+        current = now or datetime.now()
+        if cleaned in {"刚刚", "刚才", "今天"}:
+            return _xiaohongshu_day_start(current)
+        if cleaned == "昨天":
+            return _xiaohongshu_day_start(current - timedelta(days=1))
+        if cleaned == "前天":
+            return _xiaohongshu_day_start(current - timedelta(days=2))
+        match = re.match(r"^(\d+)\s*(秒|分钟|小时|小時|天|周|星期|个?月|年)前$", cleaned)
+        if not match:
+            return None
+        amount, unit = int(match.group(1)), match.group(2)
+        # Relative stamps only resolve to a day, so the clock time is not known.
+        if unit == "秒":
+            return current - timedelta(seconds=amount)
+        if unit == "分钟":
+            return current - timedelta(minutes=amount)
+        if unit in {"小时", "小時"}:
+            return current - timedelta(hours=amount)
+        if unit == "天":
+            delta_days = amount
+        elif unit in {"周", "星期"}:
+            delta_days = amount * 7
+        elif unit in {"月", "个月"}:
+            delta_days = amount * 30
+        else:
+            delta_days = amount * 365
+        return _xiaohongshu_day_start(current - timedelta(days=delta_days))
+
+    @staticmethod
+    def _extract_xiaohongshu_published_at(root, now=None):
+        """Publication date from the note footer's relative timestamp, if present."""
+        if root is None:
+            return None
+        for element in root.find_all(True):
+            if element.find(True):
+                continue
+            text = re.sub(r"\s+", " ", element.get_text(" ", strip=True)).strip()
+            if not text or len(text) > 40:
+                continue
+            for token in text.split(" "):
+                if not Fetcher._XHS_RELATIVE_DATE_RE.match(token):
+                    continue
+                parsed = Fetcher._parse_xiaohongshu_relative_date(token, now=now)
+                if parsed:
+                    return parsed
+        return None
+
+    @staticmethod
+    def _strip_xiaohongshu_date_row(root):
+        """Remove the footer row that only carries the relative date and location."""
+        if root is None:
+            return
+        for element in list(root.find_all(True)):
+            class_names = [str(name).strip().lower() for name in (element.get("class") or [])]
+            if "date" not in class_names:
+                continue
+            element.decompose()
+
+        # Drop a container left with nothing but the date text.
+        for element in list(root.find_all(["div", "span", "p"])):
+            if element.find(True):
+                continue
+            text = re.sub(r"\s+", " ", element.get_text(" ", strip=True)).strip()
+            if text and Fetcher._XHS_RELATIVE_DATE_RE.search(text):
+                element.decompose()
+
+        # Remove empty wrappers left behind by the removals above, innermost
+        # first, so the note body does not end with stray blank blocks.
+        for _ in range(3):
+            removed = False
+            for element in reversed(list(root.find_all(["div", "span", "p", "section"]))):
+                if element.find(["img", "video"]):
+                    continue
+                if element.get_text(strip=True):
+                    continue
+                if element.name == "div" and "images" in [
+                    str(name).strip().lower() for name in (element.get("class") or [])
+                ]:
+                    continue
+                element.decompose()
+                removed = True
+            if not removed:
+                break
 
     @staticmethod
     def _get_zhihu_headers(referer_url):
@@ -7705,7 +7882,12 @@ class Fetcher:
         if content_el is None:
             return None
 
-        title_el = soup.select_one("h1#detail-title") or soup.select_one("h1.title")
+        title_el = (
+            soup.select_one("h1#detail-title")
+            or soup.select_one("#detail-title")
+            or soup.select_one("h1.title")
+            or soup.select_one(".note-title")
+        )
         if title_el is None:
             title_el = content_el.find("h1")
         title = title_el.get_text(strip=True) if title_el else ""
@@ -7718,10 +7900,19 @@ class Fetcher:
             return None
 
         # The assembled document adds its own <h1>; drop the in-content copy.
+        # Newer note pages repeat the title in a plain <div id="detail-title">,
+        # which the h1 selectors above miss.
         if title_el is not None:
             title_el.extract()
+        for duplicate in content_el.select("#detail-title, h1.title, .note-title"):
+            duplicate.decompose()
 
         content = content_el.decode_contents()
+        # A stripped page can still expose the note shell with the title only;
+        # without text and without images there is no note body to hand over.
+        body_text = re.sub(r"\s+", "", content_el.get_text(" ", strip=True))
+        if not body_text and not content_el.find("img"):
+            return None
 
         image_urls = []
         seen = set()
@@ -14827,6 +15018,26 @@ class OutputHandler:
                     metadata["created"] = _format_front_matter_datetime(parsed_date)
                 except (ValueError, TypeError):
                     pass
+        elif source_site == "xiaohongshu":
+            # Hashtag texts (#话题) and the footer's relative date are lifted out of
+            # the note body by _clean_xiaohongshu_content and carried in meta tags.
+            for tag_meta in soup.find_all("meta", attrs={"name": "surf-tag"}):
+                tag_value = OutputHandler.normalize_markdown_encoding((tag_meta.get("content") or "").strip())
+                if tag_value and tag_value not in metadata["tags"]:
+                    metadata["tags"].append(tag_value)
+            created_tag = soup.find("meta", attrs={"name": "surf-created"})
+            if created_tag:
+                created_value = (created_tag.get("content") or "").strip()
+                if created_value:
+                    if re.match(r"^\d{4}-\d{2}-\d{2}$", created_value):
+                        metadata["created"] = created_value
+                    else:
+                        try:
+                            metadata["created"] = _format_front_matter_datetime(
+                                date_parser.parse(created_value)
+                            )
+                        except (ValueError, TypeError):
+                            pass
         elif source_site == "zhihu":
             created_tag = soup.find("meta", attrs={"name": "surf-created"})
             updated_tag = soup.find("meta", attrs={"name": "surf-updated"})
@@ -17588,7 +17799,7 @@ def _process_single_url(args, config, parser, proxy_mode, custom_proxy):
 def _strip_leading_markdown_heading(markdown_text, title):
     text = (markdown_text or "").lstrip("\ufeff")
     if title:
-        pattern = re.compile(r"^#\s+" + re.escape(str(title)) + r"\s*(?:\r?\n){1,2}")
+        pattern = re.compile(r"^#\s+" + re.escape(str(title)) + r"\s*(?:\r?\n|$)")
         text = pattern.sub("", text, count=1)
     return text.lstrip("\r\n")
 

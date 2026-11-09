@@ -417,7 +417,9 @@ uv run surf --ocr /path/to/image.png                 # OCR a local image directl
 OCR appends recognised text below each article image. The default engine is `auto`
 (PaddleOCR → RapidOCR → Tesseract); `--ocr-engine` forces one — with `rapidocr`, Tesseract
 is still the fallback. `--ocr-lang` applies to Tesseract only. Xiaohongshu enables OCR by
-default; every other site needs `--ocr` or `[OCR] enabled = true`. A failing image is
+default; every other site needs `--ocr` or `[OCR] enabled = true`. Xiaohongshu notes also
+move their `#hashtags` into front matter `tags` (the in-body tag links are dropped) and turn
+the footer's relative date (`3天前`, `2周前`, ...) into an absolute `created`. A failing image is
 skipped rather than aborting the fetch, and engines run in a short-lived child process so
 their memory is not retained by a web worker.
 

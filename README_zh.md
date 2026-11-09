@@ -335,7 +335,7 @@ uv run surf "https://www.xiaohongshu.com/explore/..." --no-ocr
 uv run surf --ocr /path/to/image.png                 # 直接对本地图片 OCR
 ```
 
-OCR 会把识别文本附在每张插图下方。默认引擎是 `auto`（PaddleOCR → RapidOCR → Tesseract）；`--ocr-engine` 可强制其中一个——即使选 `rapidocr`，Tesseract 仍是回退项。`--ocr-lang` 只对 Tesseract 生效。小红书默认开启 OCR，其它站点需要 `--ocr` 或 `[OCR] enabled = true`。单张图片失败只会跳过它，不会中断抓取；引擎在短生命周期子进程中运行，内存不会被 Web worker 长期占住。
+OCR 会把识别文本附在每张插图下方。默认引擎是 `auto`（PaddleOCR → RapidOCR → Tesseract）；`--ocr-engine` 可强制其中一个——即使选 `rapidocr`，Tesseract 仍是回退项。`--ocr-lang` 只对 Tesseract 生效。小红书默认开启 OCR，其它站点需要 `--ocr` 或 `[OCR] enabled = true`。小红书笔记还会把正文里的 `#话题` 提取为 front matter 的 `tags`（正文中的标签链接会被移除），并把文末的相对时间（`3天前`、`2周前` 等）换算成绝对日期写入 `created`。单张图片失败只会跳过它，不会中断抓取；引擎在短生命周期子进程中运行，内存不会被 Web worker 长期占住。
 
 OCR 文本按原文档的段落还原，而不是按识别出的每一行硬插换行：Tesseract 返回纯文本，段落内的折行会被重新拼接，只有空行才作为段落分隔；PaddleOCR / RapidOCR 每行返回一个检测框，因此按检测框几何关系重组——与上一行保持正常行距且左边界对齐的行视为同一段的续行，行距明显变大（段间距）、首行缩进或字号明显变化则视为新段落。这样折行的句子不会被切断，也不会把每一行都变成独立的段落。
 

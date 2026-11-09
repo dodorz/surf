@@ -423,6 +423,8 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - SSR 提取时会去掉与合成 `<h1>` 重复的正文内标题；`og:image` 中的站点 logo（`picasso-static`）与头像（`sns-avatar-qc`）会被过滤，仅保留笔记图集
 - 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
 - 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数；`rednote.com` 会归一化为 `xiaohongshu.com`
+- 正文中的话题标签（`#话题` 链接）会提取为 front matter 的 `tags`（只保留文本、去掉 `#`），正文里的标签链接会被移除，避免文末变成一串搜索结果链接
+- 文末的相对时间（`刚刚`、`昨天`、`3天前`、`2周前`、`1个月前`、`2年前` 等）会按当前日期换算成绝对发布日期写入 front matter 的 `created`（精确到天：相对时间只能确定是哪一天，因此不编造 00:00 时刻）；`编辑于 ...` 属于修改时间，不参与换算。日期/地区那一行随后从正文中移除
 
 **内容提取**:
 - 标题：从 `h1` 或页面标题提取

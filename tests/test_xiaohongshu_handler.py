@@ -1,3 +1,5 @@
+import re
+
 import surf
 from surf import Fetcher
 
@@ -397,3 +399,115 @@ def test_resolve_xhslink_passes_cookies_and_recovers_note_url(monkeypatch):
     assert seen["cookies"].get("a1") == "v"
     assert resolved.startswith("https://www.xiaohongshu.com/discovery/item/6ae7acbb000000001202d751")
     assert cleaned.endswith("xsec_token=x%3D")
+
+
+_XHS_NOTE_WITH_TAGS = """
+<html><head><meta charset="utf-8"><title>标题 - 小红书</title>
+<meta name="surf-source-site" content="xiaohongshu"></head>
+<body><article>
+<h1>标题</h1>
+<div class="desc" id="detail-desc"><span class="note-text">
+<a class="tag" href="/search_result?keyword=homelab" id="hash-tag">#homelab</a>
+<span>正文内容。</span>
+<a class="tag" href="/search_result?keyword=%E5%AE%B6%E5%BA%AD" id="hash-tag">#家庭服务器</a>
+</span></div>
+<div class="bottom-container"><div class="bottom-left">
+<span class="date">7天前 美国</span></div></div>
+</article></body></html>
+"""
+
+
+def test_xiaohongshu_hashtags_become_meta_and_leave_the_body():
+    from bs4 import BeautifulSoup
+
+    cleaned = Fetcher._clean_xiaohongshu_content(_XHS_NOTE_WITH_TAGS)
+    soup = BeautifulSoup(cleaned, "html.parser")
+    tags = [m.get("content") for m in soup.find_all("meta", attrs={"name": "surf-tag"})]
+    assert tags == ["homelab", "家庭服务器"]
+    body = soup.find("article").get_text(" ", strip=True)
+    assert "#homelab" not in body and "#家庭服务器" not in body
+    assert "正文内容。" in body
+    assert "search_result" not in cleaned
+
+
+def test_xiaohongshu_relative_date_becomes_created_and_leaves_the_body():
+    from bs4 import BeautifulSoup
+
+    cleaned = Fetcher._clean_xiaohongshu_content(_XHS_NOTE_WITH_TAGS)
+    soup = BeautifulSoup(cleaned, "html.parser")
+    created = soup.find("meta", attrs={"name": "surf-created"})
+    assert created is not None
+    # Day precision only, so no misleading midnight timestamp.
+    assert re.match(r"^\d{4}-\d{2}-\d{2}$", created.get("content"))
+    body = soup.find("article").get_text(" ", strip=True)
+    assert "7天前" not in body and "美国" not in body
+
+
+def test_xiaohongshu_metadata_uses_surf_tag_and_surf_created():
+    from bs4 import BeautifulSoup
+
+    cleaned = Fetcher._clean_xiaohongshu_content(_XHS_NOTE_WITH_TAGS)
+    metadata = surf.OutputHandler._extract_metadata(
+        cleaned, source_url="https://www.xiaohongshu.com/explore/abc?xsec_token=x="
+    )
+    assert metadata["tags"] == ["homelab", "家庭服务器"]
+    assert re.match(r"^\d{4}-\d{2}-\d{2}$", metadata["created"])
+
+
+def test_xiaohongshu_relative_date_parser_units():
+    from datetime import datetime
+
+    now = datetime(2026, 11, 9, 12, 0, 0)
+    parse = Fetcher._parse_xiaohongshu_relative_date
+    assert parse("前天", now=now) == datetime(2026, 11, 7, 0, 0, 0)
+    assert parse("2周前", now=now) == datetime(2026, 10, 26, 0, 0, 0)
+    assert parse("1个月前", now=now) == datetime(2026, 10, 10, 0, 0, 0)
+    assert parse("5小时前", now=now) == datetime(2026, 11, 9, 7, 0, 0)
+    # Day-granularity stamps resolve to midnight of the target day.
+    assert parse("昨天", now=now) == datetime(2026, 11, 8, 0, 0, 0)
+    assert parse("3天前", now=now) == datetime(2026, 11, 6, 0, 0, 0)
+    # Edit stamps are not publication dates.
+    assert parse("编辑于 3天前", now=now) is None
+    assert parse("", now=now) is None
+
+
+def test_xiaohongshu_published_at_ignores_prose_that_mentions_days():
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(
+        "<article><p>这次旅行是3天前决定的。</p><span class='date'>2周前 北京</span></article>",
+        "html.parser",
+    )
+    published = Fetcher._extract_xiaohongshu_published_at(soup)
+    assert published is not None
+
+
+def test_ssr_note_ignores_a_stripped_shell_with_only_the_title():
+    # The rednote login wall serves a page whose note container holds only the
+    # title div; that is not a note body and must not become a document.
+    html = """
+    <html><head><title>标题 - rednote</title></head><body>
+    <div class="note-content"><div id="detail-title">标题</div></div>
+    </body></html>
+    """
+    assert Fetcher._extract_xiaohongshu_ssr_note(html) is None
+
+
+def test_ssr_note_drops_duplicate_title_div():
+    html = """
+    <html><head><title>标题 - 小红书</title></head><body>
+    <div class="note-content">
+      <div id="detail-title">标题</div>
+      <div id="detail-desc"><span class="note-text">正文内容。</span></div>
+    </div></body></html>
+    """
+    title, content, _images = Fetcher._extract_xiaohongshu_ssr_note(html)
+    assert title == "标题"
+    assert "正文内容。" in content
+    assert "标题" not in content
+
+
+def test_strip_leading_markdown_heading_handles_title_only_body():
+    assert surf._strip_leading_markdown_heading("# 标题\n\n正文", "标题") == "正文"
+    assert surf._strip_leading_markdown_heading("# 标题", "标题") == ""
+    assert surf._strip_leading_markdown_heading("# 别的\n\n正文", "标题") == "# 别的\n\n正文"
