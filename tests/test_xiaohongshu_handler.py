@@ -511,3 +511,89 @@ def test_strip_leading_markdown_heading_handles_title_only_body():
     assert surf._strip_leading_markdown_heading("# 标题\n\n正文", "标题") == "正文"
     assert surf._strip_leading_markdown_heading("# 标题", "标题") == ""
     assert surf._strip_leading_markdown_heading("# 别的\n\n正文", "标题") == "# 别的\n\n正文"
+
+
+_STATE_PAGE = """
+<html><head><title>标题 - rednote</title>
+<meta name="surf-source-site" content="xiaohongshu"></head>
+<body><div class="note-content">
+<div class="title" id="detail-title">标题</div>
+<div class="desc" id="detail-desc"><span class="note-text">
+<a class="tag" href="/search_result?keyword=homelab" id="hash-tag">#homelab</a>
+<span> </span>
+<a class="tag" href="/search_result?keyword=x" id="hash-tag">#家庭服务器</a>
+</span></div></div>
+<script>window.__INITIAL_STATE__ = {"note":{"noteDetailMap":{
+  "6ae7acbb000000001202d751":{"note":{
+    "noteId":"6ae7acbb000000001202d751",
+    "title":"标题",
+    "desc":"#homelab[话题]# #家庭服务器[话题]#\\n\\n第一段正文。\\n\\n第二段正文。",
+    "tagList":[{"name":"homelab"},{"name":"家庭服务器"}],
+    "time":1793567931000,
+    "imageList":[
+      {"urlDefault":"http://sns-webpic-qc.xhscdn.com/a/one.jpg","width":1440,"height":2400},
+      {"urlDefault":"http://sns-web-i10.rednotecdn.com/b/two.jpg","width":1440,"height":2400}
+    ]
+  }}}}};</script>
+</body></html>
+"""
+
+
+def test_state_payload_is_used_when_the_dom_only_has_hashtags():
+    note = Fetcher._extract_xiaohongshu_ssr_note(_STATE_PAGE)
+    assert note is not None
+    title, content, images = note
+    assert title == "标题"
+    assert "第一段正文。" in content and "第二段正文。" in content
+    assert "#homelab" not in content
+    assert len(images) == 2
+    assert images[0].endswith("one.jpg")
+    # rednotecdn is a valid note CDN, not a UI asset.
+    assert images[1].endswith("two.jpg")
+
+
+def test_state_payload_parsing_helpers():
+    html = "<<<" + '"noteDetailMap":' + '{"id":{"note":{"title":"t","desc":"d"}}}'
+    state_note = Fetcher._extract_xiaohongshu_state_note(html)
+    assert state_note == {"title": "t", "desc": "d"}
+    assert Fetcher._extract_xiaohongshu_state_note("<html></html>") is None
+    assert Fetcher._extract_xiaohongshu_state_note('"noteDetailMap":{broken') is None
+
+
+def test_hashtag_text_is_stripped_from_descriptions():
+    assert Fetcher._strip_xiaohongshu_hashtag_text("#homelab[话题]# #家庭服务器[话题]#") == ""
+    assert (
+        Fetcher._strip_xiaohongshu_hashtag_text("正文。#tag[话题]# 结尾。") == "正文。 结尾。"
+    )
+    html = Fetcher._xiaohongshu_desc_to_html("#a[话题]#\n\n第一段。\n\n第二段。#b[话题]# 尾。")
+    assert html == "<p>第一段。</p><p>第二段。 尾。</p>"
+    assert Fetcher._xiaohongshu_desc_to_html("#only[话题]#") == ""
+
+
+def test_note_without_body_or_images_is_rejected():
+    html = """
+    <html><head><title>标题 - rednote</title></head><body>
+    <div class="note-content"><div id="detail-title">标题</div></div>
+    </body></html>
+    """
+    assert Fetcher._extract_xiaohongshu_ssr_note(html) is None
+
+
+def test_state_payload_created_time_is_used_for_front_matter():
+    note = Fetcher._extract_xiaohongshu_state_note(_STATE_PAGE)
+    created = Fetcher._xiaohongshu_state_created(note)
+    assert created is not None
+    assert created.startswith("2026-11-")
+    assert Fetcher._xiaohongshu_state_created({}) is None
+    assert Fetcher._xiaohongshu_state_created({"time": "not-a-number"}) is None
+
+
+def test_english_relative_stamps_are_understood():
+    from datetime import datetime
+
+    now = datetime(2026, 11, 9, 12, 0, 0)
+    parse = Fetcher._parse_xiaohongshu_relative_date
+    assert parse("8d ago", now=now) == datetime(2026, 11, 1, 0, 0, 0)
+    assert parse("2w ago", now=now) == datetime(2026, 10, 26, 0, 0, 0)
+    assert parse("3h ago", now=now) == datetime(2026, 11, 9, 9, 0, 0)
+    assert parse("yesterday", now=now) == datetime(2026, 11, 8, 0, 0, 0)

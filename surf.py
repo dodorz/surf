@@ -5146,11 +5146,23 @@ class Fetcher:
 
         # Hashtag links (#话题) become front matter tags: their text is kept as a
         # meta tag and the in-body links are dropped, so the body is not a wall
-        # of tag links pointing at search results.
+        # of tag links pointing at search results. Tags may also arrive as
+        # pre-stamped surf-tag meta tags (extracted from the page state payload).
         article = soup.find("article") or soup.body or soup
-        hashtags = Fetcher._extract_xiaohongshu_hashtags(article)
+        hashtags = [
+            (meta.get("content") or "").strip()
+            for meta in soup.find_all("meta", attrs={"name": "surf-tag"})
+        ]
+        hashtags += Fetcher._extract_xiaohongshu_hashtags(article)
+        hashtags = [tag for tag in hashtags if tag]
+        for existing in soup.find_all("meta", attrs={"name": "surf-tag"}):
+            existing.decompose()
         Fetcher._strip_xiaohongshu_hashtag_links(article)
+        seen_hashtags = set()
         for tag_text in hashtags:
+            if tag_text in seen_hashtags:
+                continue
+            seen_hashtags.add(tag_text)
             meta_tag = soup.new_tag("meta")
             meta_tag["name"] = "surf-tag"
             meta_tag["content"] = tag_text
@@ -5190,10 +5202,46 @@ class Fetcher:
 
     # Relative timestamps Xiaohongshu renders in the note footer.
     _XHS_RELATIVE_DATE_RE = re.compile(
-        r"^(?:刚刚|刚才|今天|昨天|前天|\d+\s*(?:秒|分钟|小時|小时|天|周|星期|个?月|年)前)$"
+        r"^(?:刚刚|刚才|今天|昨天|前天|\d+\s*(?:秒|分钟|小時|小时|天|周|星期|个?月|年)前"
+        r"|just now|today|yesterday|\d+\s*(?:s|m|h|d|w|mo|y)\s+ago)$",
+        re.IGNORECASE,
     )
     # "编辑于 3天前" is an edit stamp, not the publication date.
     _XHS_EDIT_DATE_RE = re.compile(r"^(?:编辑于|修改于|更新于)")
+
+    _XHS_HASHTAG_TOKEN_RE = re.compile(r"#[^#\s\[\]]+(?:\[话题\])?#?")
+
+    @staticmethod
+    def _strip_xiaohongshu_hashtag_text(text):
+        """Remove ``#tag[话题]`` tokens from the plain-text description."""
+        if not text:
+            return ""
+        cleaned = Fetcher._XHS_HASHTAG_TOKEN_RE.sub(" ", text)
+        cleaned = re.sub(r"(?:^|\s)#(?=\s|$)", " ", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    @staticmethod
+    def _xiaohongshu_desc_to_html(desc):
+        """Render the note's plain-text ``desc`` (state payload) as body HTML.
+
+        The description uses blank lines for paragraphs and ``#tag[话题]`` tokens,
+        which are metadata (front matter ``tags``), not body text.
+        """
+        if not desc:
+            return ""
+        from html import escape
+
+        # Split on blank lines first: hashtag stripping collapses whitespace and
+        # would otherwise merge paragraphs into one.
+        paragraphs = []
+        for block in re.split(r"\n\s*\n", str(desc)):
+            cleaned = Fetcher._strip_xiaohongshu_hashtag_text(block)
+            cleaned = re.sub(r"\n+", " ", cleaned).strip()
+            if cleaned:
+                paragraphs.append(cleaned)
+        if not paragraphs:
+            return ""
+        return "".join(f"<p>{escape(paragraph)}</p>" for paragraph in paragraphs)
 
     @staticmethod
     def _extract_xiaohongshu_hashtags(root):
@@ -5249,15 +5297,30 @@ class Fetcher:
         if not cleaned or Fetcher._XHS_EDIT_DATE_RE.match(cleaned):
             return None
         current = now or datetime.now()
-        if cleaned in {"刚刚", "刚才", "今天"}:
+        lowered = cleaned.lower()
+        if cleaned in {"刚刚", "刚才", "今天"} or lowered in {"just now", "today"}:
             return _xiaohongshu_day_start(current)
-        if cleaned == "昨天":
+        if cleaned == "昨天" or lowered == "yesterday":
             return _xiaohongshu_day_start(current - timedelta(days=1))
         if cleaned == "前天":
             return _xiaohongshu_day_start(current - timedelta(days=2))
         match = re.match(r"^(\d+)\s*(秒|分钟|小时|小時|天|周|星期|个?月|年)前$", cleaned)
         if not match:
-            return None
+            # rednote renders the same stamp in English for non-Chinese locales,
+            # e.g. "8d ago" / "2w ago" / "3h ago".
+            english = re.match(r"^(\d+)\s*(s|m|h|d|w|mo|y)\s+ago$", cleaned, re.IGNORECASE)
+            if not english:
+                return None
+            amount = int(english.group(1))
+            unit = english.group(2).lower()
+            if unit == "s":
+                return current - timedelta(seconds=amount)
+            if unit == "m":
+                return current - timedelta(minutes=amount)
+            if unit == "h":
+                return current - timedelta(hours=amount)
+            delta_days = {"d": amount, "w": amount * 7, "mo": amount * 30, "y": amount * 365}[unit]
+            return _xiaohongshu_day_start(current - timedelta(days=delta_days))
         amount, unit = int(match.group(1)), match.group(2)
         # Relative stamps only resolve to a day, so the clock time is not known.
         if unit == "秒":
@@ -7868,19 +7931,110 @@ class Fetcher:
         return bool(re.match(r"^/(?:explore|discovery/item)/[^/?#]+", parsed.path or ""))
 
     @staticmethod
+    def _extract_xiaohongshu_state_note(html):
+        """Pull the note payload out of the page's embedded ``__INITIAL_STATE__`` JSON.
+
+        ``rednote.com`` serves note pages whose DOM carries only the title and the
+        hashtag line - the body and the gallery live in the JSON state that the
+        client script hydrates from. Parsing that payload recovers the real note
+        (description, tag list, publication time, image list) without a browser.
+        """
+        if not html:
+            return None
+        marker = '"noteDetailMap":'
+        index = html.find(marker)
+        if index < 0:
+            return None
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(html, index + len(marker))
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for entry in payload.values():
+            if not isinstance(entry, dict):
+                continue
+            note = entry.get("note")
+            if not isinstance(note, dict):
+                continue
+            if note.get("title") or note.get("desc") or note.get("imageList"):
+                return note
+        return None
+
+    @staticmethod
+    def _xiaohongshu_state_created(note):
+        """Absolute publication time (local ISO) from the state payload, if present."""
+        if not note:
+            return None
+        raw = note.get("time") or note.get("lastUpdateTime")
+        if not raw:
+            return None
+        try:
+            timestamp = float(raw)
+        except (TypeError, ValueError):
+            return None
+        # Xiaohongshu emits epoch milliseconds.
+        if timestamp > 1e11:
+            timestamp /= 1000.0
+        try:
+            return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _xiaohongshu_state_images(note):
+        """Ordered gallery URLs from ``note["imageList"]``."""
+        if not note:
+            return []
+        images = []
+        seen = set()
+        for image in note.get("imageList") or []:
+            if not isinstance(image, dict):
+                continue
+            candidate = (
+                image.get("urlDefault")
+                or image.get("url")
+                or image.get("urlPre")
+                or image.get("traceId")
+                or ""
+            )
+            candidate = str(candidate).strip()
+            if not candidate:
+                for info in image.get("infoList") or []:
+                    if isinstance(info, dict) and info.get("url"):
+                        candidate = str(info["url"]).strip()
+                        break
+            if not candidate:
+                continue
+            if candidate.startswith("//"):
+                candidate = f"https:{candidate}"
+            canonical = Fetcher._canonicalize_xiaohongshu_image_url(candidate)
+            if not canonical or canonical in seen:
+                continue
+            seen.add(canonical)
+            images.append(candidate)
+        return images
+
+    @staticmethod
     def _extract_xiaohongshu_ssr_note(html):
         """
         Extract title/content/images from a server-side rendered Xiaohongshu note page.
+
+        The rendered DOM and the embedded ``__INITIAL_STATE__`` payload complement
+        each other: newer/rednote pages ship only the title and the hashtag line in
+        the markup and rely on the JSON state for the description, the tag list and
+        the gallery. Both sources are read and the richer one wins, so a note never
+        degrades to a bare heading.
 
         Returns:
             tuple: (title, content_html, image_urls) or None when the page has no note body.
         """
         soup = BeautifulSoup(html, "html.parser")
+        state_note = Fetcher._extract_xiaohongshu_state_note(html)
+
         content_el = soup.select_one(".note-content")
         if content_el is None:
             content_el = soup.select_one("#detail-desc")
-        if content_el is None:
-            return None
 
         title_el = (
             soup.select_one("h1#detail-title")
@@ -7888,12 +8042,17 @@ class Fetcher:
             or soup.select_one("h1.title")
             or soup.select_one(".note-title")
         )
-        if title_el is None:
+        if title_el is None and content_el is not None:
             title_el = content_el.find("h1")
+
         title = title_el.get_text(strip=True) if title_el else ""
         if not title:
             og_title = soup.find("meta", property="og:title")
             title = (og_title.get("content") or "").strip() if og_title else ""
+        if not title and state_note:
+            title = str(state_note.get("title") or "").strip()
+        if not title and content_el is not None:
+            title = content_el.get_text(" ", strip=True)
         # The <title> is "<note title> - 小红书" or "... - rednote".
         title = re.sub(r"\s*-\s*(?:小红书|rednote)\s*$", "", title, flags=re.IGNORECASE).strip()
         if not title:
@@ -7904,33 +8063,57 @@ class Fetcher:
         # which the h1 selectors above miss.
         if title_el is not None:
             title_el.extract()
-        for duplicate in content_el.select("#detail-title, h1.title, .note-title"):
-            duplicate.decompose()
+        if content_el is not None:
+            for duplicate in content_el.select("#detail-title, h1.title, .note-title"):
+                duplicate.decompose()
 
-        content = content_el.decode_contents()
-        # A stripped page can still expose the note shell with the title only;
-        # without text and without images there is no note body to hand over.
-        body_text = re.sub(r"\s+", "", content_el.get_text(" ", strip=True))
-        if not body_text and not content_el.find("img"):
-            return None
+        dom_content = content_el.decode_contents() if content_el is not None else ""
+        dom_text = ""
+        if content_el is not None:
+            dom_copy = BeautifulSoup(str(content_el), "html.parser")
+            Fetcher._strip_xiaohongshu_hashtag_links(dom_copy)
+            dom_text = re.sub(r"\s+", "", dom_copy.get_text(" ", strip=True))
+
+        # Hashtag-only markup (or nothing at all) means the body really lives in
+        # the JSON state; otherwise the rendered DOM is the richer source.
+        state_content = Fetcher._xiaohongshu_desc_to_html(state_note.get("desc") if state_note else "")
+        state_text = re.sub(r"\s+", "", BeautifulSoup(state_content, "html.parser").get_text(" ", strip=True))
+        if state_text and len(state_text) > len(dom_text):
+            logger.info("Xiaohongshu note body taken from the embedded page state")
+            content = state_content
+        else:
+            content = dom_content if dom_text else ""
 
         image_urls = []
         seen = set()
-        for meta in soup.find_all("meta", property="og:image"):
-            img = (meta.get("content") or "").strip()
+
+        def _add_image(raw):
+            img = (raw or "").strip()
             if not img:
-                continue
+                return
             if img.startswith("//"):
                 img = f"https:{img}"
             canonical = Fetcher._canonicalize_xiaohongshu_image_url(img)
             if not canonical or "picasso-static" in canonical or "sns-avatar" in canonical:
-                continue
-            if "xhscdn.com" not in canonical and "xiaohongshu.com" not in canonical:
-                continue
+                return
+            # Note images are served from several CDNs (xhscdn.com, rednotecdn.com,
+            # ...), so any absolute http(s) asset is accepted here; the static UI
+            # assets above are already filtered out.
+            if not canonical.lower().startswith(("http://", "https://")):
+                return
             if canonical in seen:
-                continue
+                return
             seen.add(canonical)
             image_urls.append(img)
+
+        for meta in soup.find_all("meta", property="og:image"):
+            _add_image(meta.get("content"))
+        for img_url in Fetcher._xiaohongshu_state_images(state_note):
+            _add_image(img_url)
+
+        if not content.strip() and not image_urls:
+            # Nothing but the title: the note body never arrived.
+            return None
 
         return title, content, image_urls
 
@@ -8015,9 +8198,15 @@ class Fetcher:
             f"<title>{escape(title)}</title>",
             f'<meta name="source-url" content="{Fetcher._canonicalize_xiaohongshu_source_url(url)}">',
             '<meta name="surf-source-site" content="xiaohongshu">',
-            "</head><body><article>",
-            f"<h1>{escape(title)}</h1>",
         ]
+        # The state payload carries the exact publication timestamp, which beats
+        # the relative "8d ago" a stripped page renders.
+        created_at = Fetcher._xiaohongshu_state_created(
+            Fetcher._extract_xiaohongshu_state_note(response.text)
+        )
+        if created_at:
+            html_parts.append(f'<meta name="surf-created" content="{escape(created_at)}">')
+        html_parts.extend(["</head><body><article>", f"<h1>{escape(title)}</h1>"])
         if image_urls:
             html_parts.append("<div class='images'>")
             for img_url in image_urls:

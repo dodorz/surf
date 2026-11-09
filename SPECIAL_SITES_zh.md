@@ -362,6 +362,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - **SSR 快速路径优先**：笔记 URL（`explore` / `discovery/item`）先用已保存的 Cookie 直接请求服务端渲染的 HTML（约 1 秒内完成、无需浏览器），从 `.note-content` DOM 提取标题/正文、从 `og:image` meta 提取有序图集；仅当该路径不可用时才回退到浏览器抓取
 - 支持短链接自动解析（`xhslink.com` / `xhslink.cn` → `xiaohongshu.com`），解析时带上已保存的 Cookie：未登录的短链请求现在会被跳到 `shard.xiaohongshu.com` 再落到 `rednote.com/login`，丢失笔记地址；带登录态则直接 302 到笔记页
 - 同时支持 `rednote.com`（小红书国际版前端，与 `xiaohongshu.com` 同后端）：`rednote.com` 的笔记页常被登录墙或精简页替换，因此遇到 `rednote.com` 笔记 URL 时会先尝试等价的 `www.xiaohongshu.com` 地址，拿到完整正文与图集后再回退到原地址
+- 小红书新版/`rednote.com` 笔记页的 DOM 只剩标题和话题行，正文与图集放在页面内嵌的 `__INITIAL_STATE__`（`noteDetailMap`）JSON 里：解析该载荷可取回 `desc`（真正的正文）、`tagList`、`time`（发布时间戳）与完整的 `imageList`，两处来源取其内容更全者，仅剩标题时视为无正文
 - 支持直接粘贴完整分享文本（如 `打开App查看 https://xhslink.cn/o/xxx，复制本条信息`），命令行会先提取其中的 URL
 - 短链解析时若小红书把未登录请求重定向到 `/login?redirectPath=<笔记URL>`（含 `rednote.com/login`），会自动解包 `redirectPath` 还原真实笔记地址（否则会匹配不到处理规则而输出登录页噪音）
 - 抓取后自动识别风控/验证拦截页（如 `/punish`、`/captcha` 链接、HTTP 412/429，或页面出现“当前环境异常”“请完成验证”等提示），命中时直接报错并提示刷新登录态，而不是输出验证页的界面噪音
@@ -424,7 +425,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
 - 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数；`rednote.com` 会归一化为 `xiaohongshu.com`
 - 正文中的话题标签（`#话题` 链接）会提取为 front matter 的 `tags`（只保留文本、去掉 `#`），正文里的标签链接会被移除，避免文末变成一串搜索结果链接
-- 文末的相对时间（`刚刚`、`昨天`、`3天前`、`2周前`、`1个月前`、`2年前` 等）会按当前日期换算成绝对发布日期写入 front matter 的 `created`（精确到天：相对时间只能确定是哪一天，因此不编造 00:00 时刻）；`编辑于 ...` 属于修改时间，不参与换算。日期/地区那一行随后从正文中移除
+- 文末的相对时间（`刚刚`、`昨天`、`3天前`、`2周前`、`1个月前`、`2年前`，以及英文界面的 `just now`、`8d ago`、`2w ago` 等）会按当前日期换算成绝对发布日期写入 front matter 的 `created`（精确到天：相对时间只能确定是哪一天，因此不编造 00:00 时刻）；`编辑于 ...` 属于修改时间，不参与换算；若页面状态里带 `time` 时间戳，则优先用精确时间戳。日期/地区那一行随后从正文中移除
 
 **内容提取**:
 - 标题：从 `h1` 或页面标题提取
