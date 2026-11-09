@@ -28,6 +28,12 @@ uv sync
 
 这会装上核心依赖，包含 OCR 引擎（PaddleOCR、RapidOCR、pytesseract；Tesseract 二进制本身属于系统包）。
 
+Surf 需要所有二进制依赖都提供 wheel 的 CPython，因此解释器在 `.python-version` 中固定为
+**3.13**（PaddlePaddle、ONNX Runtime、RapidOCR 在 Linux、macOS、Windows 上都支持的最新版本）。
+本机没有该解释器时 `uv sync` / `uv run` 会自动下载，无需自己安装 Python，各平台上的
+`uv run surf ...` 用法保持不变。如果运行环境（解释器或 CPU）不支持 PaddlePaddle，
+PaddleOCR 会被自动跳过，OCR 链回落到 RapidOCR 和 Tesseract。
+
 只有确实需要时才装可选 extra：
 
 | Extra | 提供 | 安装 |

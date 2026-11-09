@@ -20,6 +20,9 @@
 
 - 使用包管理器 `uv` 管理依赖、版本锁定、构建、发布、测试、运行脚本 
 - 依赖版本锁定文件不加入版本控制（如 `uv.lock`），允许不同环境自动重建依赖
+- **Python 版本钉定**：`pyproject.toml` 的 `requires-python` 为 `>=3.11`，默认解释器版本固定在 `.python-version`（3.13，需纳入版本控制），并在 `[tool.uv]` 中启用 `python-preference = "managed"`，保证 Windows/macOS/Linux 上 `uv sync` / `uv run` 自动下载可用的 CPython
+- **二进制依赖约束**：新增或升级依赖时，必须确认其在 py3.11/3.12/3.13（至少 py3.13）上对 Linux、macOS、Windows 都有 wheel；用 `uv pip install --dry-run --python-version 3.13 --python-platform x86_64-pc-windows-msvc -r pyproject.toml` 逐平台验证，禁止引入只有源码包的重量级依赖
+- 暂无 wheel 的依赖用版本标记排除（如 `rapidocr-onnxruntime; python_version < '3.14'`），不得让 `uv lock` 出现无对应 wheel 的解析结果
 
 ## 命令行参数设计
 

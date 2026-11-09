@@ -13276,13 +13276,31 @@ class OcrHandler:
             raise RuntimeError(f"RapidOCR init failed: {e}") from e
 
     @staticmethod
-    def _init_paddleocr():
+    def _import_paddleocr():
+        """Import PaddleOCR, tolerating a broken PaddlePaddle runtime.
+
+        PaddlePaddle ships CPU wheels built for AVX/AVX2 capable x86 CPUs; on
+        older hardware (and on some Windows installs) importing it aborts the
+        interpreter with SIGILL instead of raising, so the engine must only be
+        imported inside the short-lived OCR worker or guarded by a probe.
+        """
         try:
             from paddleocr import PaddleOCR  # type: ignore
         except Exception as e:
             raise RuntimeError(f"PaddleOCR is unavailable: {e}") from e
+        return PaddleOCR
+
+    @staticmethod
+    def _init_paddleocr():
+        PaddleOCR = OcrHandler._import_paddleocr()
         try:
             return PaddleOCR(lang="ch", use_angle_cls=True, show_log=False)
+        except TypeError:
+            # PaddleOCR 3.x dropped use_angle_cls/show_log.
+            try:
+                return PaddleOCR(lang="ch")
+            except Exception as e:
+                raise RuntimeError(f"PaddleOCR init failed: {e}") from e
         except Exception as e:
             raise RuntimeError(f"PaddleOCR init failed: {e}") from e
 
@@ -13417,6 +13435,9 @@ class OcrHandler:
                 except Exception as e:
                     logger.info("OCR engine unavailable: tesseract (%s)", e)
             elif engine_name == "paddleocr":
+                if not OcrHandler._paddle_runtime_usable():
+                    logger.info("OCR engine unavailable: paddleocr (paddle runtime is not usable)")
+                    continue
                 try:
                     runtime["available"]["paddleocr"] = OcrHandler._init_paddleocr()
                     logger.info("OCR engine ready: paddleocr")
@@ -13493,7 +13514,12 @@ class OcrHandler:
 
     @staticmethod
     def _any_engine_installed(engine_chain):
-        """Cheap availability probe that never imports the heavy OCR engines."""
+        """Cheap availability probe that never imports the heavy OCR engines.
+
+        PaddleOCR is probed through its interpreter-level runtime guard (see
+        OcrHandler._paddle_runtime_usable) because importing PaddlePaddle can
+        kill the process outright.
+        """
         import importlib.util
 
         module_for_engine = {
@@ -13506,11 +13532,40 @@ class OcrHandler:
             if not module_name:
                 continue
             try:
-                if importlib.util.find_spec(module_name) is not None:
-                    return True
+                if importlib.util.find_spec(module_name) is None:
+                    continue
             except Exception:
                 continue
+            if engine_name == "paddleocr" and not OcrHandler._paddle_runtime_usable():
+                continue
+            return True
         return False
+
+    @staticmethod
+    def _paddle_runtime_usable(timeout=60):
+        """Check that `import paddle` survives in a child interpreter.
+
+        Returns False when the runtime is missing or the process dies with a
+        CPU/ABI level fault, so the OCR chain can fall through to RapidOCR or
+        Tesseract instead of crashing Surf.
+        """
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", "import paddle"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+            )
+        except Exception as e:
+            logger.debug("PaddleOCR runtime probe failed: %s", e)
+            return False
+        if completed.returncode != 0:
+            logger.info(
+                "OCR engine unavailable: paddleocr (paddle runtime probe exited %s)",
+                completed.returncode,
+            )
+            return False
+        return True
 
     @staticmethod
     def _ocr_worker_path():

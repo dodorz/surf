@@ -39,6 +39,14 @@ uv sync
 That installs the core dependencies, including the OCR engines (PaddleOCR, RapidOCR,
 pytesseract — the Tesseract binary itself is a system package).
 
+Surf needs a CPython where every binary dependency publishes wheels, so the
+interpreter is pinned to **3.13** in `.python-version` (the newest version covered by
+PaddlePaddle, ONNX Runtime and RapidOCR on Linux, macOS and Windows). `uv sync` and
+`uv run` download that interpreter automatically when it is missing — you do not need
+to install Python yourself, and `uv run surf ...` keeps working on every platform. On
+interpreters or CPUs where the PaddlePaddle runtime is unavailable, PaddleOCR is
+skipped automatically and the OCR chain falls back to RapidOCR and Tesseract.
+
 Optional extras, only if you need them:
 
 | Extra | Adds | Install |

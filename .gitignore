@@ -97,8 +97,8 @@ target/
 profile_default/
 ipython_config.py
 
-# pyenv
-.python-version
+# pyenv / uv: the interpreter pin is part of the project, keep it tracked
+# (see pyproject.toml [tool.uv])
 
 # pipenv
 Pipfile.lock
