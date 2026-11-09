@@ -13544,16 +13544,21 @@ class OcrHandler:
         value = str(value).strip().lower()
         return value or "paddleocr"
 
+    # Default number of images OCR'd per article.
+    DEFAULT_MAX_IMAGES = 20
+
     @staticmethod
     def _get_ocr_max_images(args, config):
         """Per-article OCR image limit; 0 or a negative value means no limit."""
         override = getattr(args, "ocr_max_images", None)
         if override is None:
-            override = OcrHandler._get_int_config(config, "max_images", 8)
+            override = OcrHandler._get_int_config(
+                config, "max_images", OcrHandler.DEFAULT_MAX_IMAGES
+            )
         try:
             limit = int(override)
         except (TypeError, ValueError):
-            limit = 8
+            limit = OcrHandler.DEFAULT_MAX_IMAGES
         return max(limit, 0)
 
     @staticmethod
@@ -18328,7 +18333,7 @@ Exit status is 0 on success and non-zero when the input could not be processed.
         "--ocr-max-images",
         type=int,
         metavar="N",
-        help="OCR at most N images per article (default: [OCR] max_images, 8); 0 means no limit",
+        help="OCR at most N images per article (default: [OCR] max_images, 20); 0 means no limit",
     )
 
     # -------------------------------------------------------------- search

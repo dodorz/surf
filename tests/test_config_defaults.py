@@ -113,3 +113,46 @@ def test_web_index_default_config_checks_auto_extractor_only(tmp_path, monkeypat
     assert 'id="archiveSource" name="archive_source" checked' not in html
     assert 'id="noFrontMatter" name="no_front_matter" checked' not in html
     assert 'id="htmlInline" name="html_inline" checked' not in html
+
+
+# --- OCR image limit -------------------------------------------------------
+
+
+def test_web_ocr_max_images_defaults_to_twenty(tmp_path):
+    config = _make_config(tmp_path)
+    assert surf_web.resolve_web_ocr_max_images(config) == 20
+    context = surf_web.get_web_ui_context(config)
+    assert context["default_ocr_max_images"] == 20
+
+
+def test_web_ocr_max_images_reads_config(tmp_path):
+    config = _make_config(tmp_path)
+    config.set("OCR", "max_images", "0")
+    assert surf_web.resolve_web_ocr_max_images(config) == 0
+    assert surf_web.get_web_ui_context(config)["default_ocr_max_images"] == 0
+
+    config.set("OCR", "max_images", "42")
+    assert surf_web.resolve_web_ocr_max_images(config) == 42
+
+    config.set("OCR", "max_images", "not-a-number")
+    assert surf_web.resolve_web_ocr_max_images(config) == 20
+
+
+def test_web_ocr_args_pass_the_form_limit():
+    assert surf_web.build_web_ocr_args({"ocr_max_images": "5"}).ocr_max_images == 5
+    assert surf_web.build_web_ocr_args({"ocr_max_images": "0"}).ocr_max_images == 0
+    # Empty/blank field means "use the configured default".
+    assert surf_web.build_web_ocr_args({"ocr_max_images": ""}).ocr_max_images is None
+    assert surf_web.build_web_ocr_args({}).ocr_max_images is None
+
+
+def test_web_index_renders_the_ocr_max_images_field(tmp_path, monkeypatch):
+    config = _make_config(tmp_path)
+    config.set("OCR", "max_images", "12")
+    monkeypatch.setattr(surf_web, "get_config", lambda: config)
+
+    client = surf_web.app.test_client()
+    html = client.get("/").get_data(as_text=True)
+    assert 'name="ocr_max_images"' in html
+    assert 'id="ocrMaxImages"' in html
+    assert 'value="12"' in html

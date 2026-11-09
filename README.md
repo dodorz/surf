@@ -418,8 +418,8 @@ OCR appends recognised text below each article image. The default engine is `aut
 (PaddleOCR → RapidOCR → Tesseract); `--ocr-engine` forces one — with `rapidocr`, Tesseract
 is still the fallback. `--ocr-lang` applies to Tesseract only. Xiaohongshu enables OCR by
 default; every other site needs `--ocr` or `[OCR] enabled = true`. At most `[OCR] max_images`
-images per article are OCR'd (default 8, `--ocr-max-images N`, `0` means no limit); the run
-log reports how many images the limit skipped. Xiaohongshu notes also
+images per article are OCR'd (default 20, `--ocr-max-images N`, `0` means no limit; the Web UI
+exposes the same field); the run log reports how many images the limit skipped. Xiaohongshu notes also
 move their `#hashtags` into front matter `tags` (the in-body tag links are dropped) and turn
 the footer's relative date (`3天前`, `2周前`, ...) into an absolute `created`. A failing image is
 skipped rather than aborting the fetch, and engines run in a short-lived child process so
@@ -666,6 +666,9 @@ lives in the collapsible options panel, whose header summarises the current choi
   original language hide the LLM provider until you choose a translation mode, sites whose
   effective OCR default is off hide the engine selector, and the podcast transcription
   toggle only appears for Pocket Casts and Xiaoyuzhou episodes.
+- **OCR image budget.** Next to the OCR engine selector there is a 最多识别图片数 field that
+  sets how many images per article are OCR'd (`0` = no limit); it starts at `[OCR] max_images`
+  (default 20) and is sent with the run, so a long image gallery is no longer cut off silently.
 - **Proxy default.** The Web UI starts at `no` proxy (see [Proxy](#proxy)). Pick another
   mode when your deployment needs it.
 - **Keyboard.** `Ctrl`/`Cmd` + `Enter` submits the composer.
@@ -765,7 +768,7 @@ curlcffi_mode = auto                ; false, true, auto
 enabled = false                     ; Xiaohongshu overrides this to true
 engine = auto                       ; auto, paddleocr, rapidocr, tesseract
 lang = chi_sim+eng
-max_images = 8                      ; 0 = no limit; --ocr-max-images overrides
+max_images = 20                     ; 0 = no limit; --ocr-max-images overrides
 
 [publish.pastebin]
 api_dev_key = your_pastebin_api_key_here

@@ -50,9 +50,10 @@ def test_unknown_engine_falls_back_to_auto_chain():
     ]
 
 
-def test_max_images_defaults_to_config_value():
+def test_max_images_defaults_to_twenty():
     args = argparse.Namespace(ocr_max_images=None)
-    assert OcrHandler._get_ocr_max_images(args, _config()) == 8
+    assert OcrHandler._get_ocr_max_images(args, _config()) == 20
+    assert OcrHandler.DEFAULT_MAX_IMAGES == 20
 
 
 def test_max_images_config_value_is_used():
@@ -71,5 +72,5 @@ def test_max_images_zero_or_negative_means_no_limit():
 
 
 def test_max_images_tolerates_bad_input():
-    assert OcrHandler._get_ocr_max_images(argparse.Namespace(ocr_max_images="many"), _config()) == 8
-    assert OcrHandler._get_ocr_max_images(argparse.Namespace(), _config(max_images="x")) == 8
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(ocr_max_images="many"), _config()) == 20
+    assert OcrHandler._get_ocr_max_images(argparse.Namespace(), _config(max_images="x")) == 20

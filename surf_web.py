@@ -534,6 +534,13 @@ HTML_TEMPLATE = """
             margin-bottom: 8px;
         }
 
+        .field-hint {
+            display: block;
+            margin-top: 6px;
+            font-size: 11.5px;
+            color: var(--ink-3);
+        }
+
         .input, select.input {
             width: 100%;
             padding: 9px 12px;
@@ -1398,6 +1405,12 @@ HTML_TEMPLATE = """
                             {% endfor %}
                         </div>
                     </div>
+
+                    <label class="field" id="ocrMaxImagesGroup" {% if not default_ocr_enabled %}style="display: none;"{% endif %}>
+                        <span class="field-label">最多识别图片数</span>
+                        <input type="number" id="ocrMaxImages" name="ocr_max_images" class="input" min="0" max="500" step="1" value="{{ default_ocr_max_images }}" placeholder="{{ default_ocr_max_images }}">
+                        <span class="field-hint">0 表示不限制；留空使用配置默认值</span>
+                    </label>
                 </div>
 
                 <div class="options-group">
@@ -1806,6 +1819,14 @@ HTML_TEMPLATE = """
             document.querySelectorAll('input[name="ocr_lang"]').forEach((input) => {
                 input.disabled = !showOcrLang;
             });
+            const ocrMaxImagesGroup = document.getElementById('ocrMaxImagesGroup');
+            if (ocrMaxImagesGroup) {
+                ocrMaxImagesGroup.style.display = disabled ? 'none' : 'block';
+            }
+            const ocrMaxImagesInput = document.getElementById('ocrMaxImages');
+            if (ocrMaxImagesInput) {
+                ocrMaxImagesInput.disabled = disabled;
+            }
         }
 
         document.querySelectorAll('input[name="ocr_mode"], input[name="ocr_engine"]').forEach((input) => {
@@ -3001,16 +3022,28 @@ def build_text_post_html(text, title):
     )
 
 
+def resolve_web_ocr_max_images(config):
+    """Effective per-article OCR image limit used as the web UI default."""
+    try:
+        value = int(config.get("OCR", "max_images", fallback=str(OcrHandler.DEFAULT_MAX_IMAGES)))
+    except (TypeError, ValueError):
+        value = OcrHandler.DEFAULT_MAX_IMAGES
+    return max(value, 0)
+
+
 def build_web_ocr_args(data):
     """Build an args-like object for OCR settings reused from the CLI pipeline."""
     ocr_mode = str(data.get("ocr_mode", "default")).strip().lower()
     max_images = str(data.get("ocr_max_images") or "").strip()
+    if not max_images:
+        # An empty field means "use the configured default".
+        max_images = None
     return SimpleNamespace(
         ocr=ocr_mode == "on",
         no_ocr=ocr_mode == "off",
         ocr_lang=(data.get("ocr_lang") or "").strip() or None,
         ocr_engine=(data.get("ocr_engine") or "").strip() or None,
-        ocr_max_images=int(max_images) if max_images.lstrip("-").isdigit() else None,
+        ocr_max_images=int(max_images) if max_images and max_images.lstrip("-").isdigit() else None,
     )
 
 
@@ -3030,6 +3063,8 @@ def get_web_ui_context(config):
     default_ocr_lang = (config.get("OCR", "lang", fallback="chi_sim+eng") or "").strip()
     if not default_ocr_lang:
         default_ocr_lang = "chi_sim+eng"
+
+    default_ocr_max_images = resolve_web_ocr_max_images(config)
 
     config_browser_backend = (
         config.get("Browser", "backend", fallback="obscura").strip().lower() or "obscura"
@@ -3098,6 +3133,7 @@ def get_web_ui_context(config):
         "llm_providers": llm_providers,
         "default_ocr_engine": default_ocr_engine,
         "ocr_lang_options": ocr_lang_options,
+        "default_ocr_max_images": default_ocr_max_images,
         "config_browser_backend": config_browser_backend,
         "default_extractor": default_extractor,
         "default_html_inline": default_html_inline,

@@ -215,7 +215,7 @@ lang = chi_sim+eng
 ; On Windows, '~/Tools/tesseract.exe' also works and resolves under %USERPROFILE%.
 tesseract_cmd =
 ; OCR at most this many images per article (0 = no limit; --ocr-max-images overrides)
-max_images = 8
+max_images = 20
 ; Skip very small images
 min_width = 240
 min_height = 120

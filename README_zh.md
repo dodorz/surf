@@ -335,7 +335,7 @@ uv run surf "https://www.xiaohongshu.com/explore/..." --no-ocr
 uv run surf --ocr /path/to/image.png                 # 直接对本地图片 OCR
 ```
 
-OCR 会把识别文本附在每张插图下方。默认引擎是 `auto`（PaddleOCR → RapidOCR → Tesseract）；`--ocr-engine` 可强制其中一个——即使选 `rapidocr`，Tesseract 仍是回退项。`--ocr-lang` 只对 Tesseract 生效。小红书默认开启 OCR，其它站点需要 `--ocr` 或 `[OCR] enabled = true`。每篇文章最多 OCR `[OCR] max_images` 张图（默认 8，可用 `--ocr-max-images N` 调整，`0` 表示不限制），被上限跳过的图片数量会写进运行日志。小红书笔记还会把正文里的 `#话题` 提取为 front matter 的 `tags`（正文中的标签链接会被移除），并把文末的相对时间（`3天前`、`2周前` 等）换算成绝对日期写入 `created`。单张图片失败只会跳过它，不会中断抓取；引擎在短生命周期子进程中运行，内存不会被 Web worker 长期占住。
+OCR 会把识别文本附在每张插图下方。默认引擎是 `auto`（PaddleOCR → RapidOCR → Tesseract）；`--ocr-engine` 可强制其中一个——即使选 `rapidocr`，Tesseract 仍是回退项。`--ocr-lang` 只对 Tesseract 生效。小红书默认开启 OCR，其它站点需要 `--ocr` 或 `[OCR] enabled = true`。每篇文章最多 OCR `[OCR] max_images` 张图（默认 20，可用 `--ocr-max-images N` 调整，`0` 表示不限制，Web UI 里也有对应输入框），被上限跳过的图片数量会写进运行日志。小红书笔记还会把正文里的 `#话题` 提取为 front matter 的 `tags`（正文中的标签链接会被移除），并把文末的相对时间（`3天前`、`2周前` 等）换算成绝对日期写入 `created`。单张图片失败只会跳过它，不会中断抓取；引擎在短生命周期子进程中运行，内存不会被 Web worker 长期占住。
 
 OCR 文本按原文档的段落还原，而不是按识别出的每一行硬插换行：Tesseract 返回纯文本，段落内的折行会被重新拼接，只有空行才作为段落分隔；PaddleOCR / RapidOCR 每行返回一个检测框，因此按检测框几何关系重组——与上一行保持正常行距且左边界对齐的行视为同一段的续行，行距明显变大（段间距）、首行缩进或字号明显变化则视为新段落。这样折行的句子不会被切断，也不会把每一行都变成独立的段落。
 
@@ -499,6 +499,7 @@ uv run python surf_web.py --host 0.0.0.0 --root /surf
 - **实时翻译。** 开启翻译时卡片先显示原文，后台翻译任务完成后原地刷新。
 - **保存队列。** 后台保存任务列出状态（排队中 / 保存中 / 已完成 / 失败），顶栏有任务计数；队列清空后面板自动隐藏。
 - **站点感知默认值。** 输入 URL 会应用该站点默认值——默认保留原文的站点会隐藏 LLM provider，直达你手动选择翻译模式；有效 OCR 默认为关闭时隐藏引擎选择；播客转写开关只在 Pocket Casts 和小宇宙剧集 URL 下出现。
+- **OCR 图片数预算。** OCR 引擎选择器下面有一个「最多识别图片数」输入框，控制每篇文章识别多少张图（`0` 表示不限制），默认取 `[OCR] max_images`（20），随本次任务提交，长图集不会再被静默截断。
 - **代理默认值。** Web 界面默认 `no` 代理（见[代理](#代理)），部署确实需要时再切换。
 - **键盘。** `Ctrl`/`Cmd` + `Enter` 提交输入区。
 
@@ -589,7 +590,7 @@ curlcffi_mode = auto                ; false, true, auto
 enabled = false                     ; 小红书会覆盖为 true
 engine = auto                       ; auto, paddleocr, rapidocr, tesseract
 lang = chi_sim+eng
-max_images = 8                      ; 0 表示不限制；--ocr-max-images 可覆盖
+max_images = 20                     ; 0 表示不限制；--ocr-max-images 可覆盖
 
 [publish.pastebin]
 api_dev_key = your_pastebin_api_key_here
