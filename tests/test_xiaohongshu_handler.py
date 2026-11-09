@@ -305,3 +305,95 @@ def test_web_extract_url_from_text_uses_shared_helper():
 
     share_text = "打开App查看 https://xhslink.com/o/abc，复制本条信息"
     assert surf_web.extract_url_from_text(share_text) == "https://xhslink.com/o/abc"
+
+
+def test_rednote_urls_are_recognized_as_xiaohongshu():
+    note = "https://www.rednote.com/discovery/item/6ae7acbb000000001202d751?xsec_token=x="
+    assert Fetcher._is_xiaohongshu_note_url(note)
+    assert Fetcher._is_xiaohongshu_content_url(note)
+    assert Fetcher._xiaohongshu_host(note) == "rednote.com"
+    _, site_name, _ = surf._get_handler_for_url(note)
+    assert site_name == "xiaohongshu"
+    assert surf._get_handler_for_url("https://www.rednote.com/user/profile/5f0c")[1] == "xiaohongshu"
+
+
+def test_xiaohongshu_login_url_detection_includes_rednote():
+    assert Fetcher._is_xiaohongshu_login_url("https://www.rednote.com/login?redirectPath=x")
+    assert Fetcher._is_xiaohongshu_login_url("https://www.xiaohongshu.com/login?redirectPath=x")
+    assert not Fetcher._is_xiaohongshu_login_url(
+        "https://www.xiaohongshu.com/explore/abc?xsec_token=x="
+    )
+    assert not Fetcher._is_xiaohongshu_login_url("https://example.com/login")
+
+
+def test_note_fetch_urls_prefer_xiaohongshu_over_rednote():
+    rednote = "https://www.rednote.com/discovery/item/6ae7acbb000000001202d751?xsec_token=x="
+    urls = Fetcher._xiaohongshu_note_fetch_urls(rednote)
+    assert urls[0].startswith("https://www.xiaohongshu.com/discovery/item/6ae7acbb000000001202d751")
+    assert urls[-1] == rednote
+
+    xhs = "https://www.xiaohongshu.com/explore/abc?xsec_token=x="
+    assert Fetcher._xiaohongshu_note_fetch_urls(xhs) == [xhs]
+
+
+def test_canonicalize_xiaohongshu_source_url_maps_rednote():
+    canonical = Fetcher._canonicalize_xiaohongshu_source_url(
+        "https://www.rednote.com/discovery/item/6abc?xsec_token=CB_x%3D&share_id=1&type=normal"
+    )
+    assert canonical.startswith("https://www.xiaohongshu.com/discovery/item/6abc?")
+    assert "xsec_token=CB_x%3D" in canonical
+    assert "share_id" not in canonical
+
+
+def test_unwrap_xiaohongshu_login_redirect_handles_rednote():
+    login_url = (
+        "https://www.rednote.com/login?redirectPath="
+        "http%3A%2F%2Fwww.rednote.com%2Fdiscovery%2Fitem%2F6ae7acbb000000001202d751"
+        "%3Fxsec_token%3Dabc%3D"
+    )
+    unwrapped = Fetcher._unwrap_xiaohongshu_login_redirect(login_url)
+    assert unwrapped.startswith(
+        "https://www.rednote.com/discovery/item/6ae7acbb000000001202d751?"
+    )
+    assert Fetcher._is_xiaohongshu_note_url(unwrapped)
+
+
+def test_ssr_note_title_strips_rednote_suffix():
+    html = _SSR_HTML.replace(
+        "<title>笔记标题 - 小红书</title>", "<title>笔记标题 - rednote</title>"
+    ).replace(
+        '<meta property="og:title" content="笔记标题 - 小红书">',
+        '<meta property="og:title" content="笔记标题 - rednote">',
+    ).replace('<h1 id="detail-title" class="title">笔记标题</h1>', "")
+    title, _content, _images = Fetcher._extract_xiaohongshu_ssr_note(html)
+    assert title == "笔记标题"
+
+
+def test_resolve_xhslink_passes_cookies_and_recovers_note_url(monkeypatch):
+    note_url = "https://www.xiaohongshu.com/discovery/item/6ae7acbb000000001202d751?xsec_token=x="
+    seen = {}
+
+    class _Hop:
+        def __init__(self, url, location):
+            self.url = url
+            self.headers = {"location": location}
+
+    class _Response:
+        def __init__(self):
+            self.url = "https://www.rednote.com/login?redirectPath=http%3A%2F%2Fwww.rednote.com%2F"
+            self.status_code = 200
+            self.text = ""
+            self.history = [_Hop("https://xhslink.cn/o/abc", note_url)]
+
+    def _fake_get(session, url, **kwargs):
+        seen["cookies"] = dict(session.cookies)
+        return _Response()
+
+    monkeypatch.setattr(surf, "_session_get_interruptibly", _fake_get)
+
+    resolved, cleaned = Fetcher._resolve_xhslink_short_url(
+        "https://xhslink.cn/o/abc", cookies={"a1": "v"}
+    )
+    assert seen["cookies"].get("a1") == "v"
+    assert resolved.startswith("https://www.xiaohongshu.com/discovery/item/6ae7acbb000000001202d751")
+    assert cleaned.endswith("xsec_token=x%3D")

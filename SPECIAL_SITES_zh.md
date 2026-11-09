@@ -341,13 +341,16 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 
 ### 5. 小红书 (Xiaohongshu)
 
-**域名**: `xiaohongshu.com`
+**域名**: `xiaohongshu.com`、`rednote.com`（国际版前端，同一后端）
 
 **匹配规则**:
 ```regex
 ^https?://(www\.)?xiaohongshu\.com/explore/
 ^https?://(www\.)?xiaohongshu\.com/discovery/item/
 ^https?://(www\.)?xiaohongshu\.com/user/profile/
+^https?://(www\.)?rednote\.com/explore/
+^https?://(www\.)?rednote\.com/discovery/item/
+^https?://(www\.)?rednote\.com/user/profile/
 ^https?://xhslink\.com/
 ^https?://xhslink\.cn/
 ```
@@ -357,9 +360,10 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 **特点**:
 - 需要登录才能访问完整内容
 - **SSR 快速路径优先**：笔记 URL（`explore` / `discovery/item`）先用已保存的 Cookie 直接请求服务端渲染的 HTML（约 1 秒内完成、无需浏览器），从 `.note-content` DOM 提取标题/正文、从 `og:image` meta 提取有序图集；仅当该路径不可用时才回退到浏览器抓取
-- 支持短链接自动解析（`xhslink.com` / `xhslink.cn` → `xiaohongshu.com`）
+- 支持短链接自动解析（`xhslink.com` / `xhslink.cn` → `xiaohongshu.com`），解析时带上已保存的 Cookie：未登录的短链请求现在会被跳到 `shard.xiaohongshu.com` 再落到 `rednote.com/login`，丢失笔记地址；带登录态则直接 302 到笔记页
+- 同时支持 `rednote.com`（小红书国际版前端，与 `xiaohongshu.com` 同后端）：`rednote.com` 的笔记页常被登录墙或精简页替换，因此遇到 `rednote.com` 笔记 URL 时会先尝试等价的 `www.xiaohongshu.com` 地址，拿到完整正文与图集后再回退到原地址
 - 支持直接粘贴完整分享文本（如 `打开App查看 https://xhslink.cn/o/xxx，复制本条信息`），命令行会先提取其中的 URL
-- 短链解析时若小红书把未登录请求重定向到 `/login?redirectPath=<笔记URL>`，会自动解包 `redirectPath` 还原真实笔记地址（否则会匹配不到处理规则而输出登录页噪音）
+- 短链解析时若小红书把未登录请求重定向到 `/login?redirectPath=<笔记URL>`（含 `rednote.com/login`），会自动解包 `redirectPath` 还原真实笔记地址（否则会匹配不到处理规则而输出登录页噪音）
 - 抓取后自动识别风控/验证拦截页（如 `/punish`、`/captcha` 链接、HTTP 412/429，或页面出现“当前环境异常”“请完成验证”等提示），命中时直接报错并提示刷新登录态，而不是输出验证页的界面噪音
 - 若页面被弹回首页/搜索页（已不在 `explore`、`discovery/item`、`user/profile` 内容路径上），同样直接报错，避免把导航栏等 UI 当作正文输出
 - 处理失败时不进行通用抓取回退（`no_generic_fallback`），避免登录壳/验证页被当成正文
@@ -418,7 +422,7 @@ surf "https://mp.weixin.qq.com/s/..." -l trans
 - 笔记抓取顺序：SSR 快速路径（`requests` + Cookie + `.note-content`/`og:image` 解析）→ 浏览器路径（Playwright 加载 `__INITIAL_STATE__`/DOM 提取）→ 失败即报错；登录态过期与风控命中在 SSR 阶段即快速失败，不会白白启动浏览器
 - SSR 提取时会去掉与合成 `<h1>` 重复的正文内标题；`og:image` 中的站点 logo（`picasso-static`）与头像（`sns-avatar-qc`）会被过滤，仅保留笔记图集
 - 无 GUI Linux 上不会再在抓取流程中自动启动交互登录；如果状态缺失或过期，会提示用户先刷新并导入登录态
-- 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数
+- 生成 front matter 的 `source` 时会规范化小红书分享链接，只保留主路径和 `xsec_token`，移除 `source=webshare`、`xhsshare=pc_web` 等分享跟踪参数；`rednote.com` 会归一化为 `xiaohongshu.com`
 
 **内容提取**:
 - 标题：从 `h1` 或页面标题提取

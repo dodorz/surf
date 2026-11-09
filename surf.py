@@ -7279,6 +7279,30 @@ class Fetcher:
             host = host[4:]
         return host in {"xhslink.com", "xhslink.cn"}
 
+    # Xiaohongshu serves the same site from xiaohongshu.com (mainland) and
+    # rednote.com (international). Both hosts must be recognized, otherwise
+    # redirects between them look like "not a Xiaohongshu page".
+    _XHS_HOSTS = {"xiaohongshu.com", "rednote.com", "xhslink.com", "xhslink.cn"}
+
+    @staticmethod
+    def _xiaohongshu_host(url):
+        """Normalized (www-stripped, lowercase) host of a Xiaohongshu URL."""
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return ""
+        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+
+    @staticmethod
+    def _is_xiaohongshu_host(url):
+        """Whether URL is served by a Xiaohongshu host (incl. rednote.com)."""
+        return Fetcher._xiaohongshu_host(url) in Fetcher._XHS_HOSTS
+
     @staticmethod
     def _is_xiaohongshu_risk_url(url):
         """Whether URL points at a Xiaohongshu anti-bot / risk-control page."""
@@ -7303,12 +7327,25 @@ class Fetcher:
             parsed = urlparse(url)
         except Exception:
             return False
-        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
-        if host.startswith("www."):
-            host = host[4:]
-        if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
+        if not Fetcher._is_xiaohongshu_host(url):
             return False
         return bool(re.match(r"^/(?:explore/|discovery/item/|user/profile/)", parsed.path or ""))
+
+    @staticmethod
+    def _is_xiaohongshu_login_url(url):
+        """Whether URL is a Xiaohongshu login wall (mainland or rednote)."""
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if not Fetcher._is_xiaohongshu_host(url):
+            return False
+        path = (parsed.path or "").rstrip("/").lower()
+        return path in {"/login", "/signin", "/login/", "/signin/"} or path.startswith(
+            ("/login/", "/signin/")
+        )
 
     # Visible text markers of Xiaohongshu risk-control / verification interstitials.
     # Kept specific so genuine note text (e.g. tech posts mentioning "captcha")
@@ -7381,16 +7418,13 @@ class Fetcher:
             return url
         current = url
         for _ in range(3):
+            if not Fetcher._is_xiaohongshu_host(current):
+                return current
             try:
                 parsed = urlparse(current)
             except Exception:
                 return current
-            host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
-            if host.startswith("www."):
-                host = host[4:]
-            if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
-                return current
-            if (parsed.path or "").rstrip("/").lower() not in {"/login", "/signin"}:
+            if not Fetcher._is_xiaohongshu_login_url(current):
                 return current
             params = parse_qs(parsed.query)
             target = (params.get("redirectPath") or params.get("redirect_path") or [""])[0]
@@ -7417,7 +7451,33 @@ class Fetcher:
         return current
 
     @staticmethod
-    def _resolve_xhslink_short_url(url, proxies=None, timeout=30):
+    def _recover_xiaohongshu_note_url(source_url, final_url, response=None):
+        """Recover a note URL when a short-link hop lost the note id.
+
+        xhslink can bounce through ``shard.xiaohongshu.com`` (or the rednote
+        login wall) instead of the note. The note id is normally carried by the
+        redirect chain, so the first hop that has one wins.
+        """
+        if final_url and Fetcher._is_xiaohongshu_note_url(final_url):
+            return final_url
+
+        candidates = []
+        for hop in getattr(response, "history", None) or []:
+            location = (hop.headers or {}).get("location") or ""
+            if location:
+                candidates.append(urljoin(getattr(hop, "url", "") or source_url, location))
+        if response is not None and getattr(response, "url", None):
+            candidates.append(response.url)
+
+        for candidate in candidates:
+            unwrapped = Fetcher._unwrap_xiaohongshu_login_redirect(candidate)
+            if Fetcher._is_xiaohongshu_note_url(unwrapped):
+                logger.info(f"Recovered Xiaohongshu note URL from redirect chain: {unwrapped[:120]}")
+                return unwrapped
+        return final_url
+
+    @staticmethod
+    def _resolve_xhslink_short_url(url, proxies=None, timeout=30, cookies=None):
         """
         Resolve xhslink.com / xhslink.cn short URL to full xiaohongshu.com URL.
         Only keeps xsec_token parameter in the final URL.
@@ -7426,6 +7486,10 @@ class Fetcher:
             url: The short URL (e.g., http://xhslink.com/o/xxxxx)
             proxies: Proxy configuration for requests
             timeout: Request timeout in seconds
+            cookies: Optional saved auth cookies. Xiaohongshu now bounces
+                anonymous short-link hits to shard.xiaohongshu.com even for
+                public notes; with the saved session the redirect lands on the
+                note itself.
 
         Returns:
             tuple: (resolved_url, cleaned_url) or (None, None) if resolution fails
@@ -7449,6 +7513,8 @@ class Fetcher:
 
             # First, make a HEAD request to check the redirect chain
             session = requests.Session()
+            if cookies:
+                session.cookies.update(cookies)
             # Don't use allow_redirects=True initially to see the redirect chain
             response = _session_get_interruptibly(
                 session, url, headers=headers, proxies=proxies, timeout=timeout, allow_redirects=True
@@ -7457,11 +7523,22 @@ class Fetcher:
 
             logger.info(f"Resolved to: {final_url}")
 
+            # The short-link redirect can bounce through shard.xiaohongshu.com
+            # (an intermediate hop that carries no note id) before the real
+            # target; follow the note id when the final URL has none.
+            final_url = Fetcher._recover_xiaohongshu_note_url(url, final_url, response)
+
             # Unauthenticated resolution may land on /login?redirectPath=<note URL>
             unwrapped_url = Fetcher._unwrap_xiaohongshu_login_redirect(final_url)
             if unwrapped_url != final_url:
                 logger.info(f"Unwrapped Xiaohongshu login redirect: {unwrapped_url}")
                 final_url = unwrapped_url
+
+            # rednote.com is the international front end of xiaohongshu.com; the
+            # HTML + cookies work on both, but the note id in the path is what
+            # matters, so keep whichever host the redirect chose.
+            if Fetcher._xiaohongshu_host(final_url) in {"rednote.com"}:
+                logger.info(f"Xiaohongshu served by rednote.com: {final_url[:120]}")
 
             # Risk-control interstitial (412/429 or verification/punish page)
             if response.status_code in (412, 429) or Fetcher._is_xiaohongshu_risk_url(final_url):
@@ -7472,19 +7549,19 @@ class Fetcher:
                 return None, None
 
             # Check if we got a valid xiaohongshu URL
-            if "xiaohongshu.com" not in final_url:
-                logger.warning(f"Resolved URL does not contain xiaohongshu.com: {final_url}")
+            if not Fetcher._is_xiaohongshu_host(final_url):
+                logger.warning(f"Resolved URL is not a Xiaohongshu URL: {final_url}")
                 # The URL might still be a redirect page, let's check the response content
                 response_text_lower = response.text.lower()
-                if "xiaohongshu" in response_text_lower or "redirect" in response_text_lower:
+                if "xiaohongshu" in response_text_lower or "rednote" in response_text_lower:
                     logger.warning(
                         "Response appears to contain xiaohongshu or redirect, trying to extract URL from content"
                     )
                     # Try to find redirect URL in the HTML - look for various patterns
                     patterns = [
-                        r'https://[^"\s<>]+xiaohongshu\.com/explore/[^"\s<>]*',
-                        r'https://[^"\s<>]+xiaohongshu\.com/discovery/item/[^"\s<>]*',
-                        r'https://[^"\s<>]+xiaohongshu\.com[^"\s<>]*',
+                        r'https://[^"\s<>]+(?:xiaohongshu|rednote)\.com/explore/[^"\s<>]*',
+                        r'https://[^"\s<>]+(?:xiaohongshu|rednote)\.com/discovery/item/[^"\s<>]*',
+                        r'https://[^"\s<>]+(?:xiaohongshu|rednote)\.com[^"\s<>]*',
                     ]
                     for pattern in patterns:
                         redirect_match = re.search(pattern, response.text)
@@ -7521,12 +7598,19 @@ class Fetcher:
         """
         Normalize Xiaohongshu source URLs to keep only the canonical path and xsec_token.
         This strips share-tracking query params such as source/webshare/xhsshare.
+
+        rednote.com is the international front end of the same site; it is mapped
+        back to xiaohongshu.com so a note keeps one canonical source URL.
         """
         if not url:
             return url
 
         parsed = urlparse(url)
         hostname = (parsed.netloc or "").lower()
+        if "rednote.com" in hostname:
+            netloc = hostname.replace("rednote.com", "xiaohongshu.com")
+            parsed = parsed._replace(netloc=netloc)
+            hostname = netloc
         if "xiaohongshu.com" not in hostname:
             return url
 
@@ -7602,10 +7686,7 @@ class Fetcher:
             parsed = urlparse(url)
         except Exception:
             return False
-        host = (parsed.netloc or "").split("@")[-1].split(":")[0].lower()
-        if host.startswith("www."):
-            host = host[4:]
-        if host not in {"xiaohongshu.com", "xhslink.com", "xhslink.cn"}:
+        if not Fetcher._is_xiaohongshu_host(url):
             return False
         return bool(re.match(r"^/(?:explore|discovery/item)/[^/?#]+", parsed.path or ""))
 
@@ -7631,7 +7712,8 @@ class Fetcher:
         if not title:
             og_title = soup.find("meta", property="og:title")
             title = (og_title.get("content") or "").strip() if og_title else ""
-            title = re.sub(r"\s*-\s*小红书\s*$", "", title)
+        # The <title> is "<note title> - 小红书" or "... - rednote".
+        title = re.sub(r"\s*-\s*(?:小红书|rednote)\s*$", "", title, flags=re.IGNORECASE).strip()
         if not title:
             return None
 
@@ -7683,6 +7765,8 @@ class Fetcher:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": "https://www.xiaohongshu.com/",
         }
+        # xiaohongshu.com and rednote.com share the same backend; a note may be
+        # served from either host, so accept both and let requests follow along.
         try:
             response = _requests_get_interruptibly(
                 url,
@@ -7708,7 +7792,7 @@ class Fetcher:
             return None, (
                 f"Xiaohongshu risk control during fetch (HTTP {status}): {final_url}. {auth_hint}"
             )
-        if "/login" in final_url or "/signin" in final_url:
+        if Fetcher._is_xiaohongshu_login_url(final_url):
             return None, f"Saved auth state appears expired for xiaohongshu. {auth_hint}"
         if Fetcher._is_xiaohongshu_risk_url(final_url):
             return None, (
@@ -7754,6 +7838,41 @@ class Fetcher:
         return Fetcher._clean_xiaohongshu_content(html_content), None
 
     @staticmethod
+    def _xiaohongshu_alternate_host_url(url):
+        """Same Xiaohongshu note URL on the other front-end host, or None.
+
+        xiaohongshu.com and rednote.com mirror each other but their server-rendered
+        pages differ: www.xiaohongshu.com still ships the full note (body + gallery)
+        to cookied requests, while rednote.com often returns the login shell or a
+        stripped page.
+        """
+        if not url:
+            return None
+        host = Fetcher._xiaohongshu_host(url)
+        if host not in {"xiaohongshu.com", "rednote.com"}:
+            return None
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return None
+        other = "rednote.com" if host == "xiaohongshu.com" else "xiaohongshu.com"
+        return urlunparse(parsed._replace(netloc=f"www.{other}", fragment=""))
+
+    @staticmethod
+    def _xiaohongshu_note_fetch_urls(url):
+        """Ordered note URLs to try: xiaohongshu.com first, rednote.com second."""
+        urls = []
+        if not url:
+            return urls
+        host = Fetcher._xiaohongshu_host(url)
+        if host == "rednote.com":
+            preferred = Fetcher._xiaohongshu_alternate_host_url(url)
+            if preferred:
+                urls.append(preferred)
+        urls.append(url)
+        return urls
+
+    @staticmethod
     def _fetch_xiaohongshu(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
         Fetch Xiaohongshu (小红书) content with authentication support.
@@ -7761,16 +7880,6 @@ class Fetcher:
         Requires prior login using --login xiaohongshu
         """
         req_proxies, pw_proxy = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-
-        # Check if this is a short link and resolve it
-        original_short_url = None
-        if Fetcher._is_xhslink_short_url(url):
-            original_short_url = url
-            _, url = Fetcher._resolve_xhslink_short_url(url, proxies=req_proxies)
-            if not url:
-                logger.error("Failed to resolve xhslink short URL")
-                return None
-            logger.info(f"Using resolved URL for fetching: {url}")
 
         # Xiaohongshu fetches require an already prepared login state.
         state = AuthHandler.load_state("xiaohongshu")
@@ -7783,20 +7892,32 @@ class Fetcher:
             )
             return None
 
+        cookies = {c.get("name"): c.get("value") for c in state.get("cookies", []) if c.get("name")}
+
+        # Short links must be resolved with the saved session: anonymous hits now
+        # bounce to shard.xiaohongshu.com / the rednote login wall and lose the note.
+        if Fetcher._is_xhslink_short_url(url):
+            original_short_url = url
+            _, url = Fetcher._resolve_xhslink_short_url(url, proxies=req_proxies, cookies=cookies)
+            if not url:
+                logger.error("Failed to resolve xhslink short URL")
+                return None
+            logger.info(f"Using resolved URL for fetching: {url}")
+
         # Fast path: server-side rendered note page fetched with the saved cookies,
         # no browser needed. Falls back to the browser path below when unavailable.
         if Fetcher._is_xiaohongshu_note_url(url):
-            cookies = {
-                c.get("name"): c.get("value")
-                for c in state.get("cookies", [])
-                if c.get("name")
-            }
-            ssr_html, fatal_reason = Fetcher._fetch_xiaohongshu_ssr(
-                url, cookies, proxies=req_proxies
-            )
-            if ssr_html:
-                logger.info("Xiaohongshu note fetched via SSR fast path (no browser)")
-                return ssr_html
+            fatal_reason = None
+            for candidate in Fetcher._xiaohongshu_note_fetch_urls(url):
+                if candidate != url:
+                    logger.info("Xiaohongshu: trying the primary host: %s", candidate[:120])
+                ssr_html, reason = Fetcher._fetch_xiaohongshu_ssr(
+                    candidate, cookies, proxies=req_proxies
+                )
+                if ssr_html:
+                    logger.info("Xiaohongshu note fetched via SSR fast path (no browser)")
+                    return ssr_html
+                fatal_reason = reason or fatal_reason
             if fatal_reason:
                 logger.error(fatal_reason)
                 return None
@@ -7825,7 +7946,7 @@ class Fetcher:
                 current_url = page.url
                 logger.info(f"Current page URL: {current_url}")
 
-                if "/login" in current_url or "/signin" in current_url:
+                if Fetcher._is_xiaohongshu_login_url(current_url):
                     logger.warning(
                         "Saved auth state appears expired for xiaohongshu. Refresh it with "
                         "`surf --login xiaohongshu`, then re-run the fetch. On headless servers, "
@@ -12256,6 +12377,11 @@ SPECIAL_SITE_HANDLERS = {
             r"^https?://(www\.)?xiaohongshu\.com/explore/",
             r"^https?://(www\.)?xiaohongshu\.com/discovery/item/",
             r"^https?://(www\.)?xiaohongshu\.com/user/profile/",
+            # rednote.com is the international front end of the same service and
+            # short links now redirect there before landing on the note.
+            r"^https?://(www\.)?rednote\.com/explore/",
+            r"^https?://(www\.)?rednote\.com/discovery/item/",
+            r"^https?://(www\.)?rednote\.com/user/profile/",
             r"^https?://xhslink\.com/",
             r"^https?://xhslink\.cn/",
         ],
@@ -17249,8 +17375,11 @@ def _save_single_result(prepared, args, config, filename_prefix="", search_query
             # Output to stdout
             _configure_stdout_utf8()
             sys.stdout.write(f"# {title}\n\n")
-            sys.stdout.write(md_content)
-            if not md_content.endswith("\n"):
+            # Some handlers (Xiaohongshu, WeChat) keep the in-page <h1> inside the
+            # extracted body; drop it so stdout does not repeat the title.
+            body = _strip_leading_markdown_heading(md_content, title)
+            sys.stdout.write(body)
+            if not body.endswith("\n"):
                 sys.stdout.write("\n")
         else:
             OutputHandler.save_markdown(
@@ -17386,8 +17515,9 @@ def _save_merged_search_results(prepared_results, args, config, keywords, filena
     if output_path == "-":
         _configure_stdout_utf8()
         sys.stdout.write(f"# {title}\n\n")
-        sys.stdout.write(merged_markdown)
-        if not merged_markdown.endswith("\n"):
+        body = _strip_leading_markdown_heading(merged_markdown, title)
+        sys.stdout.write(body)
+        if not body.endswith("\n"):
             sys.stdout.write("\n")
         return
 
