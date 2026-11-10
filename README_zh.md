@@ -41,7 +41,8 @@ PaddleOCR 会被自动跳过，OCR 链回落到 RapidOCR 和 Tesseract。
 | `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium` |
 | `pdf` | WeasyPrint：不依赖浏览器的 PDF 渲染 | `uv sync --extra pdf` |
 | `transcribe` | 通过 transcribe.cpp 在本地转写播客 | `uv sync --extra transcribe` |
-| `curlcffi` | 模拟浏览器 TLS 指纹，绕过部分 Cloudflare 拦截 | `uv sync --extra curlcffi` |
+
+`curl_cffi`（模拟浏览器 TLS 指纹）现在属于核心依赖：Cloudflare/DataDome 拦截与 archive.today 付费墙快照查询都依赖它。`curlcffi` extra 仅为兼容旧安装保留。
 
 Surf 默认的无头后端是 **Obscura**，它是一个独立二进制。请从
 [Obscura Releases](https://github.com/h4ckf0r0day/obscura/releases) 安装并确保它在 `PATH` 中（或设置 `[Browser] obscura_executable`）。Surf 会按需启动并复用受管理的 `obscura serve` 进程，通过 Chrome DevTools Protocol 通信，因此普通动态页面不需要安装 Playwright。
@@ -387,7 +388,8 @@ Surf 内置 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公�
 - **小红书** 先用已保存 Cookie 抓服务端渲染的笔记页，失败才回退浏览器；登录态过期与风控响应会作为错误报告，而不会被当作正文输出。
 - **GitHub** 从解析后的 README/blob 文件取内容，但 front matter 的 `source` 保留你输入的页面 URL；Markdown 里内嵌的 HTML 片段会转回 Markdown，围栏代码示例原样保留。
 - **Foreign Affairs** 会移除分享/引用弹窗和订阅推销，避免可免费阅读的文章被误判为付费墙。
-- **付费墙** 触发归档优先的回退：先试 `archive.today/newest/<url>` 的普通 HTTP 跳转，再查 Wayback availability API 并下载无工具栏的 `id_` 文档，最后通过浏览器依次尝试 `archive.ph` / `archive.is` / `archive.fo` / …，仍失败则打开可见窗口等待人工过 CAPTCHA。查询快照时会去掉跟踪参数与 fragment；若 Readability 只抓到摘要，还会再跑一次 Trafilatura。
+- **付费墙** 触发归档优先的回退：先用 curl-cffi 请求 `archive.today/newest/<url>`（archive.today 会丢弃普通 `requests` 的 TLS 指纹，同一 URL 用普通请求只会超时，换成浏览器握手后一秒即跳转到快照），再查 Wayback availability API 并下载无工具栏的 `id_` 文档，最后通过浏览器依次尝试 `archive.ph` / `archive.is` / `archive.fo` / …，仍失败则打开可见窗口等待人工过 CAPTCHA。查询快照时会去掉跟踪参数与 fragment；若 Readability 只抓到摘要，还会再跑一次 Trafilatura。
+- **反爬拦截** 会轮换 TLS 指纹（Chrome → Safari）重试：DataDome（nytimes.com）拒绝 Chromium 握手但放行 Safari，Cloudflare（theatlantic.com）则相反，固定单一指纹必然会在某一边失败。
 
 完整的匹配规则、处理动作和维护要求见 `SPECIAL_SITES_zh.md`（中文）与 `SPECIAL_SITES.md`（English），请与代码保持同步。
 

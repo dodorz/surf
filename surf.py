@@ -1333,23 +1333,38 @@ def _requests_get_with_system_trust_interruptibly(*args, **kwargs):
     """Requests.get via a session that uses the system default trust chain."""
     return _session_get_interruptibly(_SYSTEM_TRUST_REQUESTS_SESSION, *args, **kwargs)
 
-# curl-cffi TLS fingerprint impersonation support
-_CURLCFFI_SESSION = None
+# curl-cffi TLS fingerprint impersonation support.
+#
+# Anti-bot vendors fingerprint the TLS/JA3 handshake, so a single profile is not
+# enough: DataDome (nytimes.com) rejects Chromium fingerprints but lets a Safari
+# one through, while Cloudflare (theatlantic.com) does the opposite. The order
+# below is "most common first"; callers that can retry walk the whole list.
+_CURLCFFI_IMPERSONATIONS = ("chrome131", "safari15_5", "safari17_2_ios")
+_CURLCFFI_SESSIONS = {}
 _CURLCFFI_SESSION_LOCK = threading.Lock()
 
-def _get_curlcffi_session():
-    """Lazy-initialize a persistent curl-cffi Session with browser impersonation."""
-    global _CURLCFFI_SESSION
-    if _CURLCFFI_SESSION is None:
-        if not _HAS_CURL_CFFI:
-            raise ImportError("curl_cffi is not installed. Install with: uv sync --extra curlcffi")
+
+def _get_curlcffi_session(impersonate="chrome131"):
+    """Lazy-initialize a persistent curl-cffi Session for one browser profile."""
+    if not _HAS_CURL_CFFI:
+        raise ImportError("curl_cffi is not installed. Install with: uv sync --extra curlcffi")
+    session = _CURLCFFI_SESSIONS.get(impersonate)
+    if session is None:
         with _CURLCFFI_SESSION_LOCK:
-            if _CURLCFFI_SESSION is None:
-                _CURLCFFI_SESSION = CurlCffiSession(
-                    impersonate="chrome131",
-                    timeout=15,
-                )
-    return _CURLCFFI_SESSION
+            session = _CURLCFFI_SESSIONS.get(impersonate)
+            if session is None:
+                session = CurlCffiSession(impersonate=impersonate, timeout=15)
+                _CURLCFFI_SESSIONS[impersonate] = session
+    return session
+
+
+def _curlcffi_impersonation_order(preferred=None):
+    """Browser profiles to try, the caller's preference first."""
+    profiles = []
+    for profile in (preferred, *_CURLCFFI_IMPERSONATIONS):
+        if profile and profile not in profiles:
+            profiles.append(profile)
+    return profiles
 
 def _curlcffi_enabled(config):
     """Determine if curl-cffi should be used based on config."""
@@ -1409,13 +1424,13 @@ def _clear_all_cloudflare_cookies(config):
         with open(config_path, "w", encoding="utf-8") as f:
             config.config.write(f)
 
-def _curlcffi_get_interruptibly(url, headers=None, proxies=None, timeout=15):
+def _curlcffi_get_interruptibly(url, headers=None, proxies=None, timeout=15, impersonate="chrome131"):
     """Perform a GET request using curl-cffi with TLS fingerprint impersonation.
-    
+
     Returns a curl_cffi Response object (has .content, .text, .status_code, .raise_for_status()).
     Runs in a daemon thread for Ctrl+C responsiveness.
     """
-    session = _get_curlcffi_session()
+    session = _get_curlcffi_session(impersonate)
     
     kwargs = {}
     if headers:
@@ -2947,52 +2962,60 @@ class Fetcher:
                 if needs_browser:
                     logger.info("Content seems short, requires JS, is a Cloudflare challenge, or returned HTTP %d.", response.status_code)
                     
-                    # Try curl-cffi before browser (lighter weight)
+                    # Try curl-cffi before browser (lighter weight). Anti-bot
+                    # vendors fingerprint the TLS handshake, and a single
+                    # profile is not enough (DataDome wants Safari, Cloudflare
+                    # rejects it), so every profile gets a turn.
                     if _curlcffi_enabled(config):
                         logger.warning("Trying curl-cffi TLS impersonation before browser fallback...")
-                        try:
-                            curl_headers = {
-                                "User-Agent": (
-                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                                ),
-                                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                                "Accept-Language": "en-US,en;q=0.9",
-                            }
-                            # Inject Cloudflare cookies into curl-cffi request
-                            if cf_cookie:
-                                curl_headers["Cookie"] = cf_cookie
-                            curl_resp = _curlcffi_get_interruptibly(
-                                url,
-                                headers=curl_headers,
-                                proxies=req_proxies,
-                                timeout=15,
-                            )
-                            pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
-                            if pdf_result is not None:
-                                return pdf_result
-                            curl_text = Fetcher._decode_response_text(curl_resp)
-                            curl_is_ok = (
-                                curl_resp.status_code < 400
-                                and not Fetcher._fetched_html_needs_browser(
-                                    curl_text, curl_resp.status_code >= 400
-                                )
-                            )
-                            if curl_is_ok:
-                                logger.warning("curl-cffi succeeded (status %d), avoiding browser fallback", curl_resp.status_code)
-                                return curl_text
-                            else:
+                        for impersonate in _curlcffi_impersonation_order():
+                            try:
+                                curl_headers = {
+                                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                                    "Accept-Language": "en-US,en;q=0.9",
+                                }
+                                # Inject Cloudflare cookies into curl-cffi request
                                 if cf_cookie:
-                                    logger.warning(
-                                        "Cloudflare cookies for %s may be expired (still challenged). "
-                                        "Extract fresh cookies from Chrome DevTools.",
-                                        urlparse(url).hostname
+                                    curl_headers["Cookie"] = cf_cookie
+                                curl_resp = _curlcffi_get_interruptibly(
+                                    url,
+                                    headers=curl_headers,
+                                    proxies=req_proxies,
+                                    timeout=20,
+                                    impersonate=impersonate,
+                                )
+                                pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
+                                if pdf_result is not None:
+                                    return pdf_result
+                                curl_text = Fetcher._decode_response_text(curl_resp)
+                                curl_is_ok = (
+                                    curl_resp.status_code < 400
+                                    and not Fetcher._fetched_html_needs_browser(
+                                        curl_text, curl_resp.status_code >= 400
                                     )
-                                logger.warning("curl-cffi returned status %d or challenge page, falling back to browser", curl_resp.status_code)
-                        except PdfTextExtractionError:
-                            raise
-                        except Exception as e:
-                            logger.warning("curl-cffi fallback failed: %s", e)
+                                )
+                                if curl_is_ok:
+                                    logger.warning(
+                                        "curl-cffi succeeded (status %d, profile %s), avoiding browser fallback",
+                                        curl_resp.status_code,
+                                        impersonate,
+                                    )
+                                    return curl_text
+                                logger.warning(
+                                    "curl-cffi profile %s returned status %d or a challenge page",
+                                    impersonate,
+                                    curl_resp.status_code,
+                                )
+                            except PdfTextExtractionError:
+                                raise
+                            except Exception as e:
+                                logger.warning("curl-cffi profile %s failed: %s", impersonate, e)
+                        if cf_cookie:
+                            logger.warning(
+                                "Cloudflare cookies for %s may be expired (still challenged). "
+                                "Extract fresh cookies from Chrome DevTools.",
+                                urlparse(url).hostname,
+                            )
                     
                     logger.info("Switching to browser...")
                     should_use_browser = True
@@ -3089,33 +3112,44 @@ class Fetcher:
             if _curlcffi_enabled(config):
                 import time as _time
                 _time.sleep(1)
-                try:
-                    curl_headers = {
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                        ),
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                    }
-                    curl_resp = _curlcffi_get_interruptibly(
-                        url,
-                        headers=curl_headers,
-                        proxies=req_proxies,
-                        timeout=15,
-                    )
-                    pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
-                    if pdf_result is not None:
-                        return pdf_result
-                    curl_resp.raise_for_status()
-                    curl_text = Fetcher._decode_response_text(curl_resp)
-                    if curl_text and not Fetcher._is_cloudflare_challenge(curl_text):
-                        logger.info("curl-cffi TLS impersonation succeeded after browser challenge")
-                        return curl_text
-                except PdfTextExtractionError:
-                    raise
-                except Exception as _curl_err:
-                    logger.warning("curl-cffi attempt also failed: %s", _curl_err)
+                for impersonate in _curlcffi_impersonation_order():
+                    try:
+                        curl_headers = {
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                            "Accept-Language": "en-US,en;q=0.9",
+                        }
+                        curl_resp = _curlcffi_get_interruptibly(
+                            url,
+                            headers=curl_headers,
+                            proxies=req_proxies,
+                            timeout=20,
+                            impersonate=impersonate,
+                        )
+                        pdf_result = Fetcher._handle_pdf_response(curl_resp, url, pdf_mode)
+                        if pdf_result is not None:
+                            return pdf_result
+                        curl_resp.raise_for_status()
+                        curl_text = Fetcher._decode_response_text(curl_resp)
+                        if (
+                            curl_text
+                            and not Fetcher._is_cloudflare_challenge(curl_text)
+                            and not Fetcher._is_antibot_challenge_page(curl_text)
+                        ):
+                            logger.info(
+                                "curl-cffi TLS impersonation succeeded after browser challenge "
+                                "(profile %s)",
+                                impersonate,
+                            )
+                            return curl_text
+                        logger.warning(
+                            "curl-cffi profile %s still returned a challenge page", impersonate
+                        )
+                    except PdfTextExtractionError:
+                        raise
+                    except Exception as _curl_err:
+                        logger.warning(
+                            "curl-cffi profile %s also failed: %s", impersonate, _curl_err
+                        )
             
             # --- Existing plain-requests retries (unchanged) ---
             logger.warning("Retrying with plain requests after delay...")
@@ -12188,6 +12222,84 @@ class Fetcher:
         return False
 
     @staticmethod
+    def _fetch_archive_newest_via_curlcffi(url, archive_domains, proxies=None):
+        """Same ``/newest/`` fast path, fetched through curl-cffi's TLS profiles.
+
+        archive.today answers plain ``requests`` calls from many networks with a
+        read timeout (its edge drops non-browser TLS fingerprints), while the
+        same URL over an impersonated TLS handshake redirects to the snapshot in
+        about a second. This is the difference between "no snapshot" and a full
+        capture for NYT/Atlantic articles.
+        """
+        if not _HAS_CURL_CFFI:
+            return None, None
+
+        variants = Fetcher._archive_lookup_variants(url)
+        preferred = ("archive.ph", "archive.today")
+        fast_domains = [d for d in archive_domains if d in preferred]
+        if not fast_domains:
+            fast_domains = list(archive_domains)
+
+        for candidate_url in variants:
+            for archive_domain in fast_domains:
+                newest_url = f"https://{archive_domain}/newest/{quote(candidate_url, safe='')}"
+                for impersonate in _curlcffi_impersonation_order():
+                    logger.info(
+                        f"{archive_domain}: trying /newest via curl-cffi ({impersonate})"
+                    )
+                    try:
+                        response = _curlcffi_get_interruptibly(
+                            newest_url,
+                            timeout=30,
+                            proxies=proxies,
+                            impersonate=impersonate,
+                        )
+                    except Exception as exc:
+                        logger.info(f"{archive_domain}: curl-cffi request failed: {exc}")
+                        break
+
+                    final_url = response.url or ""
+                    if response.status_code != 200 or "/newest/" in final_url:
+                        logger.info(
+                            f"{archive_domain}: /newest (curl-cffi) did not redirect to a snapshot "
+                            f"(HTTP {response.status_code})"
+                        )
+                        continue
+                    if not Fetcher._is_archive_snapshot_url(final_url):
+                        logger.info(
+                            f"{archive_domain}: /newest (curl-cffi) is not a snapshot URL"
+                        )
+                        continue
+
+                    html_content = Fetcher._decode_response_text(response)
+                    if not html_content or len(html_content) < 5000:
+                        logger.info(f"{archive_domain}: /newest snapshot is too small")
+                        continue
+                    if Fetcher._is_antibot_challenge_page(html_content):
+                        logger.info(
+                            f"{archive_domain}: /newest returned an archive challenge page"
+                        )
+                        continue
+
+                    text_length = len(
+                        BeautifulSoup(html_content, "html.parser").get_text(" ", strip=True)
+                    )
+                    if text_length < 1200:
+                        logger.info(
+                            f"{archive_domain}: /newest snapshot has too little text "
+                            f"({text_length} chars)"
+                        )
+                        continue
+
+                    logger.info(
+                        f"{archive_domain}: snapshot fetched via curl-cffi/{impersonate}: "
+                        f"{final_url} ({len(html_content)} bytes, {text_length} text chars)"
+                    )
+                    return html_content, final_url
+
+        return None, None
+
+    @staticmethod
     def _fetch_archive_newest_via_requests(url, archive_domains, proxies=None):
         """Fetch the latest snapshot through archive.today's ``/newest/`` redirect.
 
@@ -12378,6 +12490,14 @@ class Fetcher:
         # Fast path: /newest/<url> redirects directly to the latest capture and
         # works without JavaScript. This is substantially faster and more
         # reliable than scraping the listing page for NYT/Atlantic archives.
+        # curl-cffi goes first: archive.today drops plain requests TLS
+        # fingerprints, so the requests attempt would only time out.
+        newest_html, newest_url = Fetcher._fetch_archive_newest_via_curlcffi(
+            url, archive_domains, req_proxies
+        )
+        if newest_html:
+            return newest_html, newest_url
+
         newest_html, newest_url = Fetcher._fetch_archive_newest_via_requests(
             url, archive_domains, req_proxies
         )

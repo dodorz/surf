@@ -181,3 +181,81 @@ def test_wayback_fallback_uses_id_document(monkeypatch):
         "https://web.archive.org/web/20261009161156/https://example.com/article"
     )
     assert any("/web/20261009161156id_/" in url for url in requested)
+
+
+# --- curl-cffi /newest fast path -------------------------------------------
+# archive.today drops plain requests TLS fingerprints from many networks, so
+# the archive snapshot only comes back when the request carries a browser
+# handshake. These tests pin the profile rotation and the acceptance checks.
+
+
+class _CurlFakeResponse:
+    def __init__(self, url, body, status_code=200):
+        self.url = url
+        self.status_code = status_code
+        self.content = body.encode("utf-8")
+        self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+
+def _archive_body():
+    return (
+        "<html><head><title>Archived Article</title></head><body>"
+        + "<p>archived body text</p>" * 200
+        + "</body></html>"
+    )
+
+
+def test_curlcffi_newest_fast_path_is_skipped_without_curl_cffi(monkeypatch):
+    monkeypatch.setattr(surf, "_HAS_CURL_CFFI", False)
+    html, url = Fetcher._fetch_archive_newest_via_curlcffi(
+        "https://example.com/article", ("archive.ph",), None
+    )
+    assert html is None and url is None
+
+
+def test_curlcffi_newest_fast_path_rotates_tls_profiles(monkeypatch):
+    monkeypatch.setattr(surf, "_HAS_CURL_CFFI", True)
+    snapshot_url = "https://archive.ph/20261030112301/https://example.com/article"
+    profiles = []
+
+    def fake_get(url, headers=None, proxies=None, timeout=15, impersonate="chrome131"):
+        profiles.append(impersonate)
+        # The first two profiles are rejected by the CDN, the third answers.
+        if impersonate == "safari17_2_ios":
+            return _CurlFakeResponse(snapshot_url, _archive_body())
+        return _CurlFakeResponse(url, "<html><body>blocked</body></html>", status_code=403)
+
+    monkeypatch.setattr(surf, "_curlcffi_get_interruptibly", fake_get)
+
+    html, url = Fetcher._fetch_archive_newest_via_curlcffi(
+        "https://example.com/article", ("archive.ph",), None
+    )
+
+    assert html == _archive_body()
+    assert url == snapshot_url
+    assert profiles == ["chrome131", "safari15_5", "safari17_2_ios"]
+
+
+def test_curlcffi_newest_fast_path_rejects_listing_pages(monkeypatch):
+    monkeypatch.setattr(surf, "_HAS_CURL_CFFI", True)
+    listing_url = "https://archive.ph/newest/https%3A%2F%2Fexample.com%2Farticle"
+
+    monkeypatch.setattr(
+        surf,
+        "_curlcffi_get_interruptibly",
+        lambda url, **kwargs: _CurlFakeResponse(listing_url, "<html></html>"),
+    )
+
+    html, url = Fetcher._fetch_archive_newest_via_curlcffi(
+        "https://example.com/article", ("archive.ph",), None
+    )
+    assert html is None and url is None
+
+
+def test_curlcffi_impersonation_order_prefers_the_requested_profile():
+    assert surf._curlcffi_impersonation_order() == list(surf._CURLCFFI_IMPERSONATIONS)
+    assert surf._curlcffi_impersonation_order("safari15_5")[0] == "safari15_5"
+    # No duplicates even when the preference is already in the list.
+    order = surf._curlcffi_impersonation_order("chrome131")
+    assert order.count("chrome131") == 1
+    assert set(order) == set(surf._CURLCFFI_IMPERSONATIONS)

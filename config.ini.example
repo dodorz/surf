@@ -172,6 +172,10 @@ chrome_executable =
 ; Use curl-cffi TLS fingerprint impersonation to bypass Cloudflare challenges
 ; Requires: uv sync --extra curlcffi
 ; Values: false (default), true (always use), auto (use as fallback only)
+; auto/true: use curl-cffi TLS impersonation before falling back to a browser.
+; Several browser profiles are rotated (Chrome -> Safari) because anti-bot
+; vendors fingerprint the handshake: DataDome (nytimes.com) only lets Safari
+; through, while Cloudflare (theatlantic.com) rejects it.
 curlcffi_mode = auto
 
 [Network]

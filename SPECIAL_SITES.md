@@ -9,6 +9,8 @@ Chinese version: `SPECIAL_SITES_zh.md`
 ## Overview
 
 Surf uses the `SPECIAL_SITE_HANDLERS` mapping to apply custom logic for specific domains.
+
+Anti-bot interstitials are retried with rotated TLS fingerprints before a browser is launched: the curl-cffi profiles go Chrome → Safari, because DataDome (`nytimes.com`) rejects the Chromium handshake while Cloudflare (`theatlantic.com`) rejects Safari. A single fixed profile always fails on one side or the other.
 Before this mapping is checked, common short URLs such as `t.co`, `bit.ly`, `tinyurl.com`, `xhslink.com`, `xhslink.cn`, and `pca.st` are resolved to their final long URL so matching, default policies, fetching, and front matter `source` all use the canonical target. When the input itself is not a URL but free-form share text containing one (for example a copied Xiaohongshu share message), the first URL is extracted before this resolution runs. Xiaohongshu short links are special: anonymous requests are bounced to `shard.xiaohongshu.com` and then to the `rednote.com` login wall, so an `xhslink` input that resolves to a `rednote.com` note is retried on the equivalent `www.xiaohongshu.com` address by the handler.
 
 > Browser backend note: the headless browser steps described for the handlers below (including Twitter/X, WeChat, Xiaohongshu, NCPSSD, GitHub, Wikipedia, Weibo/Threads, and the paywall archive-snapshot fallback) all use the backend configured by `[Browser] backend` (`playwright` or `obscura`). These handlers automate a real page (locators, waits, downloads), so they require the optional Playwright extra (`uv sync --extra browser`); the generic headless dynamic-page fetch does not — it drives Obscura over the raw DevTools protocol. Zhihu's browser fallback is an exception: it always launches the visible Playwright browser, because Zhihu's `zse-ck` challenge does not resolve in a headless session. Only headed interactive login, PDF generation (with a local Chrome/Chromium CLI fallback), and the NCPSSD full-text PDF download use Playwright outside those handlers.
@@ -22,7 +24,7 @@ Each site entry may define:
 
 ### Paywalled Articles
 
-When Surf detects a paywall, it looks up an existing archive snapshot before failing the extraction. The archive domains are attempted in this order: `archive.ph`, `archive.today`, `archive.is`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md`. Each domain is tried through the configured proxy and then directly. If no headless attempt succeeds, Surf cycles through the same domains in visible browsers for manual CAPTCHA completion. The successful snapshot URL is written to front matter `archive`.
+When Surf detects a paywall, it looks up an existing archive snapshot before failing the extraction. The archive domains are attempted in this order: `archive.ph`, `archive.today`, `archive.is`, `archive.fo`, `archive.li`, `archive.vn`, and `archive.md`. The `https://<domain>/newest/<url>` redirect is fetched first through curl-cffi with rotated TLS profiles (`chrome131`, `safari15_5`, `safari17_2_ios`): archive.today drops plain `requests` TLS fingerprints from many networks, so the same URL times out there and returns the capture over an impersonated handshake. The plain-requests attempt is kept as a fallback for hosts where curl-cffi is unavailable. Each domain is tried through the configured proxy and then directly. If no headless attempt succeeds, Surf cycles through the same domains in visible browsers for manual CAPTCHA completion. The successful snapshot URL is written to front matter `archive`.
 
 ---
 

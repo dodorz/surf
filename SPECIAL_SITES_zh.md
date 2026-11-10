@@ -20,7 +20,9 @@
 
 ### 付费墙文章
 
-Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
+Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。其中 `https://<域名>/newest/<url>` 跳转优先用 curl-cffi 并轮换 TLS 指纹（`chrome131`、`safari15_5`、`safari17_2_ios`）请求：archive.today 会丢弃很多网络环境下普通 `requests` 的 TLS 指纹，同一 URL 用普通请求只会超时，换成模拟浏览器的握手后才会返回快照；普通 requests 仅在 curl-cffi 不可用时作为回退。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
+
+目标站点自身的反爬拦截也会先轮换 TLS 指纹再启动浏览器：curl-cffi 的指纹顺序是 Chrome → Safari，因为 DataDome（`nytimes.com`）拒绝 Chromium 握手而放行 Safari，Cloudflare（`theatlantic.com`）则正好相反。固定单一指纹必然会在其中一边失败。
 
 ---
 

@@ -56,7 +56,10 @@ Optional extras, only if you need them:
 | `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` |
 | `pdf` | WeasyPrint: browser-less PDF rendering | `uv sync --extra pdf` |
 | `transcribe` | Local podcast transcription via transcribe.cpp | `uv sync --extra transcribe` |
-| `curlcffi` | Browser-like TLS fingerprint to get past some Cloudflare blocks | `uv sync --extra curlcffi` |
+
+`curl_cffi` (browser TLS fingerprints) is part of the core dependencies: Cloudflare/DataDome
+blocks and the archive.today paywall lookup both depend on it. The `curlcffi` extra is kept
+only for older installs.
 
 Surf's default headless backend is **Obscura**, a separate binary. Install it from the
 [Obscura releases](https://github.com/h4ckf0r0day/obscura/releases) and make sure it is on
@@ -505,11 +508,16 @@ of those defaults can be overridden by an explicit flag.
   Markdown; fenced code examples are preserved.
 - **Foreign Affairs** strips the share/citation modal and subscription pitch so freely
   readable essays are not mistaken for paywalled ones.
-- **Paywalls** trigger an archive-first fallback: `archive.today/newest/<url>` over plain
-  HTTP, then the Wayback availability API with the toolbar-free `id_` document, then the
-  `archive.ph` / `archive.is` / `archive.fo` / … chain through a browser, ending with a
-  visible CAPTCHA window. Tracking parameters and fragments are stripped when looking up
-  snapshots, and if Readability only recovers a teaser, Trafilatura is run as well.
+- **Paywalls** trigger an archive-first fallback: `archive.today/newest/<url>` through
+  curl-cffi (archive.today drops plain `requests` TLS fingerprints, so the same URL times
+  out there and redirects to the capture over an impersonated handshake), then the Wayback
+  availability API with the toolbar-free `id_` document, then the `archive.ph` / `archive.is`
+  / `archive.fo` / … chain through a browser, ending with a visible CAPTCHA window. Tracking
+  parameters and fragments are stripped when looking up snapshots, and if Readability only
+  recovers a teaser, Trafilatura is run as well.
+- **Anti-bot blocks** are retried with rotated TLS profiles (Chrome → Safari): DataDome
+  (nytimes.com) rejects the Chromium handshake but accepts Safari, while Cloudflare
+  (theatlantic.com) does the reverse, so one fixed profile always fails somewhere.
 
 Matching rules, per-site actions, and maintenance notes live in `SPECIAL_SITES.md`
 (English) and `SPECIAL_SITES_zh.md` (中文). Keep them in sync with the code.
