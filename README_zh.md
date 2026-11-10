@@ -44,6 +44,23 @@ PaddleOCR 会被自动跳过，OCR 链回落到 RapidOCR 和 Tesseract。
 
 #### Playwright 安装说明
 
+**什么时候需要它。** 默认安装（`uv sync`）已经能覆盖绝大部分功能：普通 HTTP 抓取、
+动态页面用的 Obscura 后端、走 curl-cffi 的 archive 快照查询，以及通过本机
+Chrome/Chromium 命令行、WeasyPrint、typst 或 pandoc 渲染 PDF。只有下面这些情况才需要
+装 `browser` extra：
+
+| 需要 Playwright 的场景 | 为什么 Obscura / 普通 HTTP 覆盖不了 |
+| --- | --- |
+| `--login 站点`（以及由它产出的 `--export-auth`） | 交互式登录要开一个**有头**浏览器窗口（Obscura 只有无头模式），由人手动输入账号、过 CAPTCHA |
+| 知乎 | 它的 `zse-ck` 挑战在无头 Obscura 会话里永远过不去，兜底会主动切到可见的 Playwright 窗口——即使 `[Browser] backend = obscura` 也会发生 |
+| `[Browser] backend = playwright`、`-B playwright` 或 `[Browser] obscura_fetch = playwright` | 你显式要求用 Playwright 而不是 Obscura 原生 CDP。此时特殊站点处理器（小红书、微信公众号、NCPSSD、GitHub README、Wikipedia、Twitter/X thread、archive.today）也会走 Playwright |
+| `[Output] pdf_engine = playwright`，或 `auto` 且本机没有 Chrome/Chromium 二进制 | 用 Playwright 的 Chromium 渲染文档（`page.pdf`） |
+| archive.today 的可见 CAPTCHA 窗口 | 这是最后一层兜底窗口，由 Playwright 打开；没有桌面会话时 Surf 直接跳过并报错 |
+
+不需要它的场景：普通与动态页面抓取（Obscura 原生 CDP 客户端）、付费墙快照
+（curl-cffi）、Wayback Machine、OCR、翻译，以及用 Chrome / WeasyPrint / typst /
+pandoc 渲染的 PDF。
+
 Surf 只会驱动 **Chromium**，因此只装这一个浏览器即可——不带参数的
 `uv run playwright install` 会连 Firefox 和 WebKit 一起下载：
 
@@ -343,11 +360,11 @@ uv run surf "https://example.com" -B auto          # 跟随 [Browser] backend
 
 `--browser` 强制用无头浏览器渲染而不是普通 HTTP，`-B/--browser-backend` 选择用哪一个。Obscura 是默认后端，不需要任何 Python extra：
 
-- `[Browser] obscura_fetch = auto` 走原生 CDP，协议出错时回退 Playwright 客户端；`native` 从不回退；`playwright` 使用旧版客户端。
+- `[Browser] obscura_fetch = auto` 走原生 CDP，协议出错时回退 Playwright 客户端；`native` 从不回退；`playwright` 使用旧版客户端——因此 `auto` 只是「有 Playwright 时用它兜底」，而 `playwright` 必须装（见 [Playwright 安装说明](#playwright-安装说明)）。
 - 配置的 CDP endpoint 若已在运行，会被视为外部服务：只连接，不启动也不停止。
 - Web 服务器不同线程会协调访问；代理变化时，受管理的 Obscura 服务会被安全替换。
 - Bloomberg 系列站点即使 `obscura_stealth = false` 也会强制开启 Obscura 隐身模式，因为默认无头配置过不了 PerimeterX。
-- 知乎是例外：它的浏览器兜底始终打开可见的 Playwright 窗口，因为 `zse-ck` 挑战在无头会话中无法通过，Linux 上需要图形会话。
+- 知乎是例外：它的浏览器兜底始终打开可见的 Playwright 窗口，因为 `zse-ck` 挑战在无头会话中无法通过；这需要 `browser` extra 与 Chromium，Linux 上还需要图形会话。
 
 如果根本无法启动有头浏览器，archive.today 的 CAPTCHA 兜底现在会快速失败，而不是启动一个注定失败的浏览器。
 

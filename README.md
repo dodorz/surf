@@ -59,6 +59,23 @@ Optional extras, only if you need them:
 
 #### Playwright setup
 
+**When you need it.** The default install (`uv sync`) fetches nearly everything
+without Playwright: plain HTTP, the Obscura browser backend for dynamic pages, archive
+snapshot lookups over curl-cffi, and PDF rendering through a local Chrome/Chromium CLI,
+WeasyPrint, typst or pandoc. Install the `browser` extra when you want any of these:
+
+| Need Playwright for | Why Obscura / plain HTTP cannot cover it |
+| --- | --- |
+| `--login SITE`, `--export-auth` as a result of it | Interactive login is a *headed* browser window (Obscura is headless-only) in which a human types credentials and passes CAPTCHAs |
+| Zhihu pages | Its `zse-ck` challenge never clears in a headless Obscura session, so the fallback deliberately switches to a visible Playwright window — this happens even with `[Browser] backend = obscura` |
+| `[Browser] backend = playwright`, `-B playwright`, or `[Browser] obscura_fetch = playwright` | You asked for Playwright instead of Obscura's native CDP client. The special-site handlers (Xiaohongshu, WeChat, NCPSSD, GitHub README, Wikipedia, Twitter/X threads, archive.today) then drive Playwright too |
+| `[Output] pdf_engine = playwright`, or `auto` on a host with no Chrome/Chromium binary | Renders the document with Playwright's Chromium (`page.pdf`) |
+| Archive.today's visible CAPTCHA window | That last-resort window is Playwright; without a desktop session Surf skips it and reports the failure instead |
+
+You do **not** need it for: ordinary and dynamic page fetching (Obscura's native CDP
+client), paywall snapshots (curl-cffi), the Wayback Machine, OCR, translation, or PDFs
+rendered with Chrome, WeasyPrint, typst or pandoc.
+
 Surf only ever drives **Chromium**, so install that one browser — a bare
 `uv run playwright install` also downloads Firefox and WebKit:
 
@@ -424,7 +441,9 @@ Use `--browser` to force rendering through a headless browser instead of plain H
 extra:
 
 - `[Browser] obscura_fetch = auto` uses raw CDP and falls back to the Playwright client on
-  protocol errors; `native` never falls back; `playwright` uses the legacy client.
+  protocol errors; `native` never falls back; `playwright` uses the legacy client — so
+  `auto` needs Playwright installed only as a fallback, while `playwright` always does
+  (see [Playwright setup](#playwright-setup)).
 - A configured CDP endpoint that is already alive is treated as external: Surf connects
   to it but does not start or stop it.
 - Requests from different web-server threads coordinate access, and a managed Obscura
@@ -432,8 +451,8 @@ extra:
 - Bloomberg-family sites force Obscura stealth mode even when `obscura_stealth = false`,
   because the default headless profile cannot pass PerimeterX.
 - Zhihu is the exception: its browser fallback always opens a visible Playwright window,
-  because the `zse-ck` challenge does not resolve headlessly. That needs a graphical
-  session on Linux.
+  because the `zse-ck` challenge does not resolve headlessly. That needs the `browser`
+  extra with Chromium, plus a graphical session on Linux.
 
 If a headed browser is impossible, archive.today's CAPTCHA fallback now fails fast instead
 of launching a browser that cannot work.
