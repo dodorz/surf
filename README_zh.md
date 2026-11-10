@@ -38,9 +38,33 @@ PaddleOCR 会被自动跳过，OCR 链回落到 RapidOCR 和 Tesseract。
 
 | Extra | 提供 | 安装 |
 | --- | --- | --- |
-| `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium`（裸 Linux 服务器请加 `--with-deps` 安装系统库） |
+| `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium` |
 | `pdf` | WeasyPrint：不依赖浏览器的 PDF 渲染 | `uv sync --extra pdf` |
 | `transcribe` | 通过 transcribe.cpp 在本地转写播客 | `uv sync --extra transcribe` |
+
+#### Playwright 安装说明
+
+Surf 只会驱动 **Chromium**，因此只装这一个浏览器即可——不带参数的
+`uv run playwright install` 会连 Firefox 和 WebKit 一起下载：
+
+```bash
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+裸 Linux 服务器（没有 GTK/X 相关库）用下面的命令，连同 Chromium 需要的系统库一起装：
+
+```bash
+uv run playwright install --with-deps chromium
+```
+
+否则 Playwright 会报 `Host system is missing dependencies … libgtk-3.so.0, libgdk-3.so.0`。
+这条警告针对的是 Firefox/WebKit，而 Surf 从不启动它们：无头 Chromium 照常可用。
+有头功能（交互式登录、可见的 CAPTCHA 窗口）另外需要 X server——请在桌面会话或
+`xvfb-run` 下运行。
+
+真正启动失败时，Surf 会用一行说明原因，而不是甩出 Playwright 的框线横幅，因此
+「Chromium 没下载」「系统库缺失」「没有 X server」三种情况可以区分开。
 
 `curl_cffi`（模拟浏览器 TLS 指纹）现在属于核心依赖：Cloudflare/DataDome 拦截与 archive.today 付费墙快照查询都依赖它。`curlcffi` extra 仅为兼容旧安装保留。
 
@@ -183,7 +207,7 @@ PDF 由文档的 HTML 渲染而来，因此并不强制需要浏览器。`[Outpu
 
 | 引擎 | 使用什么 | 依赖 |
 | --- | --- | --- |
-| `playwright` | 通过 Playwright 调用已安装的 Chromium | `--extra browser` |
+| `playwright` | 通过 Playwright 调用已安装的 Chromium | `--extra browser`（见 [Playwright 安装说明](#playwright-安装说明)） |
 | `chrome` | 本机 `google-chrome` / `chromium` / Edge 的 `--headless=new --print-to-pdf` | 一个 Chrome 二进制 |
 | `weasyprint` | 纯 Python 的 HTML/CSS 渲染器，远程图片会下载后内嵌 | `--extra pdf`、系统 Pango |
 | `typst` | 把 HTML 转成 Typst 标记后调用 `typst` | `typst` 二进制 |
@@ -410,7 +434,7 @@ uv run surf --clear-auth all
 
 支持的站点：`xiaohongshu`、`twitter`（别名 `x`）、`reddit`、`zhihu`、`douban`、`ncpssd`。登录态在 Windows 上位于 `%LOCALLAPPDATA%\surf\`，在 Linux/macOS 上位于 `~/.local/cache/surf/`。
 
-`--login` 需要图形会话。在无头 Linux 上它会快速失败而不是尝试打开浏览器——请在桌面机器登录，再用 `--export-auth` / `--import-auth` 迁移登录态。
+`--login` 需要图形会话（X server 或 `xvfb-run`），并且要装 `browser` extra 与 Chromium，见 [Playwright 安装说明](#playwright-安装说明)。在无头 Linux 上它会快速失败而不是尝试打开浏览器——请在桌面机器登录，再用 `--export-auth` / `--import-auth` 迁移登录态。
 
 各站点说明：
 
@@ -549,6 +573,8 @@ location /surf/ {
 ```ini
 [LLM]
 provider = LLM1                     ; 默认 provider 名称
+; Web UI：排队中的翻译任务最长可运行多久，超时后保存放弃等待（秒）
+translation_job_timeout = 1800
 
 [LLM.LLM1]
 api_style = chat                    ; chat、responses 或 anthropic

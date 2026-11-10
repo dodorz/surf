@@ -53,9 +53,35 @@ Optional extras, only if you need them:
 
 | Extra | Adds | Install |
 | --- | --- | --- |
-| `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` (on a bare Linux server add `--with-deps` for its system libraries) |
+| `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` |
 | `pdf` | WeasyPrint: browser-less PDF rendering | `uv sync --extra pdf` |
 | `transcribe` | Local podcast transcription via transcribe.cpp | `uv sync --extra transcribe` |
+
+#### Playwright setup
+
+Surf only ever drives **Chromium**, so install that one browser — a bare
+`uv run playwright install` also downloads Firefox and WebKit:
+
+```bash
+uv sync --extra browser
+uv run playwright install chromium
+```
+
+On a bare Linux server (no GTK/X libraries) install Chromium together with the system
+libraries it needs:
+
+```bash
+uv run playwright install --with-deps chromium
+```
+
+Without them Playwright reports `Host system is missing dependencies … libgtk-3.so.0,
+libgdk-3.so.0`. That warning is about Firefox/WebKit, which Surf never launches: headless
+Chromium runs fine. Headed features (interactive login, the visible CAPTCHA window) also
+need an X server — run them on a desktop session or under `xvfb-run`.
+
+When a launch does fail, Surf prints the cause in one line rather than Playwright's
+banner, so you can tell "Chromium not downloaded", "system libraries missing" and "no X
+server" apart.
 
 `curl_cffi` (browser TLS fingerprints) is part of the core dependencies: Cloudflare/DataDome
 blocks and the archive.today paywall lookup both depend on it. The `curlcffi` extra is kept
@@ -227,7 +253,7 @@ PDFs are rendered from the document's HTML, so a browser is not strictly require
 
 | Engine | What it uses | Needs |
 | --- | --- | --- |
-| `playwright` | Installed Chromium through Playwright | `--extra browser` |
+| `playwright` | Installed Chromium through Playwright | `--extra browser` ([setup](#playwright-setup)) |
 | `chrome` | Local `google-chrome` / `chromium` / Edge with `--headless=new --print-to-pdf` | a Chrome binary |
 | `weasyprint` | Pure-Python HTML/CSS renderer, downloads and embeds remote images | `--extra pdf`, system Pango |
 | `typst` | Converts the HTML to Typst markup and runs `typst` | the `typst` binary |
@@ -545,9 +571,10 @@ Supported sites: `xiaohongshu`, `twitter` (alias `x`), `reddit`, `zhihu`, `douba
 `ncpssd`. State lives in `%LOCALLAPPDATA%\surf\` on Windows and
 `~/.local/cache/surf/` on Linux and macOS.
 
-`--login` needs a desktop session. On headless Linux it fails fast instead of trying to
-open a browser — log in on a desktop machine and move the state with `--export-auth` /
-`--import-auth`.
+`--login` needs a desktop session (an X server or `xvfb-run`) plus the `browser` extra with
+Chromium installed — see [Playwright setup](#playwright-setup). On headless Linux it fails
+fast instead of trying to open a browser: log in on a desktop machine and move the state
+with `--export-auth` / `--import-auth`.
 
 Notes per site:
 
@@ -741,6 +768,8 @@ required.
 ```ini
 [LLM]
 provider = LLM1                     ; default provider name
+; web UI: how long a queued translation job may run before the save gives up
+translation_job_timeout = 1800
 
 [LLM.LLM1]
 api_style = chat                    ; chat, responses, or anthropic
