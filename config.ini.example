@@ -10,7 +10,8 @@ pdf_dir = ./pdf
 ; auto = playwright, chrome, weasyprint, typst, pandoc
 ; Values: auto, playwright, chrome (chromium), weasyprint, typst, pandoc;
 ;   combine with commas, e.g. pdf_engine = typst,weasyprint
-; playwright needs `uv sync --extra browser` + `uv run playwright install chromium`;
+; playwright needs `uv sync --extra browser` + `uv run playwright install chromium`
+;   (bare Linux servers: add --with-deps for libgtk-3 and friends);
 ; chrome uses a local Chrome/Chromium/Edge binary (see [Browser] chrome_executable);
 ; weasyprint needs `uv sync --extra pdf` and needs no browser at all;
 ; typst and pandoc are external binaries (see the options below).

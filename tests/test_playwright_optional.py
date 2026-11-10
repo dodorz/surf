@@ -199,3 +199,47 @@ def test_find_chrome_executable_prefers_configured_path(tmp_path):
     binary = tmp_path / "chrome"
     binary.write_text("")
     assert OutputHandler._find_chrome_executable(_FakeConfig(tmp_path, str(binary))) == str(binary)
+
+
+# --- launch failures carry an actionable hint -------------------------------
+
+
+def test_missing_browser_binary_hint():
+    error = Exception(
+        "BrowserType.launch: Executable doesn't exist at "
+        "/home/u/.cache/ms-playwright/chromium_headless_shell-1223/chrome-headless-shell"
+    )
+    hint = surf._playwright_launch_error_hint(error, "dynamic page rendering")
+    assert hint and "playwright install chromium" in hint
+    assert "dynamic page rendering" in hint
+
+
+def test_missing_system_libraries_hint():
+    # What `playwright install` prints on a slim Linux image without GTK.
+    error = Exception(
+        "BrowserType.launch: \n"
+        "Host system is missing dependencies to run browsers.\n"
+        "Missing libraries:\n    libgtk-3.so.0\n    libgdk-3.so.0"
+    )
+    hint = surf._playwright_launch_error_hint(error, "browser sessions")
+    assert hint and "--with-deps" in hint
+
+
+def test_headed_without_xserver_hint():
+    error = Exception(
+        "BrowserType.launch: Target page, context or browser has been closed\n"
+        "Looks like you launched a headed browser without having a XServer running."
+    )
+    hint = surf._playwright_launch_error_hint(error, "interactive login")
+    assert hint and "xvfb-run" in hint
+
+
+def test_unknown_launch_error_has_no_hint():
+    assert surf._playwright_launch_error_hint(Exception("boom"), "x") is None
+
+
+def test_install_hint_mentions_only_chromium():
+    message = surf._PLAYWRIGHT_INSTALL_HINT.format(feature="a feature")
+    assert "playwright install chromium" in message
+    # Surf never launches Firefox/WebKit, so they must not be advertised.
+    assert "Firefox and WebKit are not needed" in message

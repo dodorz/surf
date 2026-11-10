@@ -38,7 +38,7 @@ PaddleOCR 会被自动跳过，OCR 链回落到 RapidOCR 和 Tesseract。
 
 | Extra | 提供 | 安装 |
 | --- | --- | --- |
-| `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium` |
+| `browser` | Playwright：交互式登录、特殊站点页面自动化、NCPSSD 全文 PDF、Playwright PDF 引擎 | `uv sync --extra browser && uv run playwright install chromium`（裸 Linux 服务器请加 `--with-deps` 安装系统库） |
 | `pdf` | WeasyPrint：不依赖浏览器的 PDF 渲染 | `uv sync --extra pdf` |
 | `transcribe` | 通过 transcribe.cpp 在本地转写播客 | `uv sync --extra transcribe` |
 

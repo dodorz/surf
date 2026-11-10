@@ -53,7 +53,7 @@ Optional extras, only if you need them:
 
 | Extra | Adds | Install |
 | --- | --- | --- |
-| `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` |
+| `browser` | Playwright: interactive login, special-site page automation, NCPSSD full-text PDF, the Playwright PDF engine | `uv sync --extra browser && uv run playwright install chromium` (on a bare Linux server add `--with-deps` for its system libraries) |
 | `pdf` | WeasyPrint: browser-less PDF rendering | `uv sync --extra pdf` |
 | `transcribe` | Local podcast transcription via transcribe.cpp | `uv sync --extra transcribe` |
 

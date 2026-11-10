@@ -65,8 +65,48 @@ _PLAYWRIGHT_INSTALL_HINT = (
     "Playwright is not installed, but {feature} needs it. Install the optional "
     "browser extra and its Chromium build: `uv sync --extra browser` then "
     "`uv run playwright install chromium` "
-    "(pip: `pip install 'surf[browser]'` then `playwright install chromium`)."
+    "(pip: `pip install 'surf[browser]'` then `playwright install chromium`). "
+    "Surf only drives Chromium, so Firefox and WebKit are not needed."
 )
+
+# Surf only ever drives Chromium; Firefox/WebKit downloads are wasted disk and,
+# on headless Linux hosts, `playwright install` (no browser argument) warns
+# about missing GTK libraries for browsers Surf never launches.
+_PLAYWRIGHT_LAUNCH_HINT = (
+    "Playwright could not launch Chromium, but {feature} needs it. On a server "
+    "run `uv run playwright install --with-deps chromium` (the --with-deps part "
+    "installs the system libraries); headed features additionally need an X "
+    "server or xvfb-run."
+)
+
+
+def _playwright_launch_error_hint(error, feature):
+    """Return an actionable hint for a Chromium launch failure, or None.
+
+    Playwright raises a single ``Error`` type for missing browser binaries, for
+    missing system libraries (libgtk-3 on slim Linux images) and for headed
+    launches without an X server. The raw message is a boxed banner; turning it
+    into one line makes the cause obvious in Surf's logs.
+    """
+    text = str(error or "")
+    lowered = text.lower()
+    if "executable doesn't exist" in lowered:
+        return (
+            "the Chromium build for Playwright is missing: run "
+            f"`uv run playwright install chromium` ({feature})."
+        )
+    if "libgtk-3" in lowered or "libgdk-3" in lowered or "missing dependencies" in lowered:
+        return (
+            "Chromium's system libraries are missing (libgtk-3 / libgdk-3): run "
+            "`uv run playwright install --with-deps chromium` or install the "
+            f"packages with your system package manager ({feature})."
+        )
+    if "xserver" in lowered or "headed browser without having a" in lowered:
+        return (
+            "a headed browser was requested but no X server is available: use a "
+            f"desktop session, or run under `xvfb-run` ({feature})."
+        )
+    return None
 
 
 def _require_playwright(feature):
@@ -6467,7 +6507,15 @@ class Fetcher:
             kwargs = {"headless": headless, "args": list(launch_args or [])}
             if use_proxy and pw_proxy:
                 kwargs["proxy"] = pw_proxy
-            browser = p.chromium.launch(**kwargs)
+            try:
+                browser = p.chromium.launch(**kwargs)
+            except Exception as exc:
+                hint = _playwright_launch_error_hint(
+                    exc, "special-site page automation"
+                )
+                if hint:
+                    raise RuntimeError(f"Chromium launch failed: {hint}") from exc
+                raise
             try:
                 yield browser
             finally:
@@ -6609,7 +6657,13 @@ class Fetcher:
                 if pw_proxy:
                     launch_args["proxy"] = pw_proxy
 
-                browser = p.chromium.launch(**launch_args)
+                try:
+                    browser = p.chromium.launch(**launch_args)
+                except Exception as exc:
+                    hint = _playwright_launch_error_hint(exc, "dynamic page rendering")
+                    if hint:
+                        raise RuntimeError(f"Chromium launch failed: {hint}") from exc
+                    raise
 
                 # Attach persisted auth state for sites with saved login sessions.
                 auth_site_name = None
@@ -15972,7 +16026,14 @@ class OutputHandler:
             sync_playwright, _ = _require_playwright("the Playwright PDF engine")
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                try:
+                    browser = p.chromium.launch(headless=True)
+                except Exception as exc:
+                    hint = _playwright_launch_error_hint(exc, "the Playwright PDF engine")
+                    if hint:
+                        logger.warning("Playwright PDF engine unavailable: %s", hint)
+                        return False
+                    raise
                 page = browser.new_page()
                 page.set_content(full_html)
                 page.pdf(path=filepath, format="A4")
@@ -16827,8 +16888,8 @@ class OutputHandler:
             logger.error(
                 "Failed to generate PDF. Configure [Output] pdf_engine (playwright, chrome, "
                 "weasyprint) and make sure one of them is usable: the optional Playwright "
-                "extra (`uv sync --extra browser` + `uv run playwright install chromium`), a "
-                "local Chrome/Chromium build ([Browser] chrome_executable / "
+                "extra (`uv sync --extra browser` + `uv run playwright install --with-deps "
+                "chromium`), a local Chrome/Chromium build ([Browser] chrome_executable / "
                 "SURF_CHROME_EXECUTABLE), or the optional WeasyPrint extra (`uv sync --extra pdf`)."
             )
 
@@ -17632,7 +17693,11 @@ print(json.dumps(cookies, ensure_ascii=False))
                     context = p.chromium.launch_persistent_context(profile_dir, channel="chrome", **persistent_args)
                 except Exception as e:
                     logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
-                    context = p.chromium.launch_persistent_context(profile_dir, **persistent_args)
+                    try:
+                        context = p.chromium.launch_persistent_context(profile_dir, **persistent_args)
+                    except Exception as launch_error:
+                        hint = _playwright_launch_error_hint(launch_error, "interactive login")
+                        raise RuntimeError(f"Chromium launch failed: {hint or launch_error}") from launch_error
             else:
                 launch_args = {"headless": False}
                 if pw_proxy:
@@ -17641,7 +17706,11 @@ print(json.dumps(cookies, ensure_ascii=False))
                     browser = p.chromium.launch(channel="chrome", **launch_args)
                 except Exception as e:
                     logger.info(f"Chrome channel unavailable for login, fallback to Chromium: {e}")
-                    browser = p.chromium.launch(**launch_args)
+                    try:
+                        browser = p.chromium.launch(**launch_args)
+                    except Exception as launch_error:
+                        hint = _playwright_launch_error_hint(launch_error, "interactive login")
+                        raise RuntimeError(f"Chromium launch failed: {hint or launch_error}") from launch_error
 
                 if normalized_site_name == "zhihu":
                     context = Fetcher._create_stealth_context(browser, login_url)
