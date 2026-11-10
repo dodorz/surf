@@ -508,6 +508,11 @@ of those defaults can be overridden by an explicit flag.
   Markdown; fenced code examples are preserved.
 - **Foreign Affairs** strips the share/citation modal and subscription pitch so freely
   readable essays are not mistaken for paywalled ones.
+- **Boilerplate is stripped after extraction**: ad slots and ad labels, "editors'
+  picks", "related content", "most popular"/"trending" rails, podcast and newsletter
+  promos, share bars and navigation. This matters most on paywalled/archived pages, where
+  Readability only finds a teaser and the original container (which still holds all of it)
+  is used instead; duplicate hero copies of the title and standfirst go too.
 - **Paywalls** trigger an archive-first fallback: `archive.today/newest/<url>` through
   curl-cffi (archive.today drops plain `requests` TLS fingerprints, so the same URL times
   out there and redirects to the capture over an impersonated handshake), then the Wayback

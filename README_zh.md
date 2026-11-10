@@ -388,6 +388,7 @@ Surf 内置 Twitter/X、Reddit、Bluesky、微博、Threads、V2EX、微信公�
 - **小红书** 先用已保存 Cookie 抓服务端渲染的笔记页，失败才回退浏览器；登录态过期与风控响应会作为错误报告，而不会被当作正文输出。
 - **GitHub** 从解析后的 README/blob 文件取内容，但 front matter 的 `source` 保留你输入的页面 URL；Markdown 里内嵌的 HTML 片段会转回 Markdown，围栏代码示例原样保留。
 - **Foreign Affairs** 会移除分享/引用弹窗和订阅推销，避免可免费阅读的文章被误判为付费墙。
+- **正文抽取后会统一清理样板内容**：广告位与广告标签、「编辑精选」「相关内容」「最受欢迎 / 热门」等推荐栏、播客与新闻简报推广、分享栏和导航。这在付费墙/归档页面上最关键——那里 Readability 只抓到摘要，改用原始容器时这些内容都在正文里；重复的英雄区标题与导语也会被合并。
 - **付费墙** 触发归档优先的回退：先用 curl-cffi 请求 `archive.today/newest/<url>`（archive.today 会丢弃普通 `requests` 的 TLS 指纹，同一 URL 用普通请求只会超时，换成浏览器握手后一秒即跳转到快照），再查 Wayback availability API 并下载无工具栏的 `id_` 文档，最后通过浏览器依次尝试 `archive.ph` / `archive.is` / `archive.fo` / …，仍失败则打开可见窗口等待人工过 CAPTCHA。查询快照时会去掉跟踪参数与 fragment；若 Readability 只抓到摘要，还会再跑一次 Trafilatura。
 - **反爬拦截** 会轮换 TLS 指纹（Chrome → Safari）重试：DataDome（nytimes.com）拒绝 Chromium 握手但放行 Safari，Cloudflare（theatlantic.com）则相反，固定单一指纹必然会在某一边失败。
 

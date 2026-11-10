@@ -7,6 +7,8 @@
 
 ## 概述
 
+正文抽取完成后有一个统一的清理步骤，用来去掉正文周围的样板内容：广告位与广告标签、“编辑精选 / 相关内容 / 最受欢迎 / 热门”等推荐栏、播客与新闻简报推广、分享栏，以及导航（`nav`/`footer`/`form`/`button`）。它在付费墙与归档页面上最关键——那里 Readability 往往只抓到摘要，Surf 会退回使用原始容器，而那些内容全在里面。付费墙页面重复渲染的标题与导语（英雄区各一份）也会被合并掉。清理不会把正文删空：结果为空白、或长页面被削掉 70% 以上时会放弃清理并保留原文。
+
 本文档中的常见短网址（包括 `pca.st`）会在特殊网站匹配前解析为最终长网址，匹配规则、抓取和 front matter 的 `source` 默认使用 canonical URL。
 
 > 浏览器后端说明：下文处理器中描述的无头浏览器步骤（含 Twitter/X、知乎、微信公众号、小红书、NCPSSD、GitHub、Wikipedia、微博/Threads、付费墙 archive 快照等）统一使用配置文件 `[Browser] backend` 指定的后端（`playwright` 或 `obscura`）。这些处理器会做真实页面自动化（定位元素、等待、下载），因此需要可选的 Playwright extra（`uv sync --extra browser`）；通用无头动态页抓取不需要——它通过原生 DevTools 协议驱动 Obscura。只有有头交互式登录、PDF 生成（未装 Playwright 时回退到本机 Chrome/Chromium 命令行），以及 NCPSSD 全文 PDF 下载仍使用 Playwright。

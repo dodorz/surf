@@ -13442,6 +13442,220 @@ class ContentProcessor:
                     break
         return soup
 
+    # Boilerplate that surrounds an article body: advertising, "editors' picks",
+    # "related content" rails, podcast/newsletter promos and share bars.
+    # Readability removes most of it, but the rescue path returns the *original*
+    # container (that is what happens whenever Readability only finds a short
+    # summary - exactly the paywalled/archived pages), so those blocks would leak
+    # into the document.
+    _BOILERPLATE_MARKERS = (
+        "adslot", "adunit", "adcontainer", "adwrapper", "adregion", "adplaceholder",
+        "advert", "advertisement", "advertising", "sponsor", "promoted", "promo",
+        "dfp", "googlead", "doubleclick",
+        "editorspick", "edpick", "recirculation", "recirc",
+        "relatedcontent", "relatedarticle", "relatedstories", "relatedlink",
+        "relatedpodcast", "readnext", "mostpopular", "trending", "morestories",
+        "recommendedcontent", "newsletter", "signup", "subscribe", "subscription",
+        "paywall", "commentbutton", "sharetools", "socialshare", "sharebuttons",
+        "globalnav", "sitenav", "topnav", "navbar", "navigation", "breadcrumb",
+        "hamburger", "sectionbutton", "skiplink", "skipcontent",
+    )
+    # Elements whose whole text is nothing but an ad label.
+    _BOILERPLATE_LABELS = {
+        "advertisement", "advertisements", "ad", "ads", "sponsored", "sponsor",
+        "skip advertisement", "story continues below advertisement",
+        "skip to content", "skip to main content", "skip to site index",
+        "广告", "赞助", "赞助内容", "跳过广告",
+    }
+    # Headings that introduce a recommendation rail. Used as a second signal,
+    # because several sites give those containers a neutral id/class.
+    _BOILERPLATE_HEADING_RE = re.compile(
+        r"^(?:related(?: content| articles?| stories| podcasts?)?"
+        r"|more (?:from|in|on) [^\n]{0,80}"
+        r"|editors?[’'\u2019]? ?picks?"
+        r"|recommended(?: for you| stories| reading)?"
+        r"|trending(?: in [^\n]{0,60})?"
+        r"|most popular|most read|read next|read more"
+        r"|the great read|you may also like|elsewhere"
+        r"|相关(?:内容|阅读|文章|推荐|新闻|播客)"
+        r"|编辑精选|精选推荐|猜你喜欢|热门(?:文章|推荐)?|延伸阅读)$",
+        re.IGNORECASE,
+    )
+    # UI chrome that never carries story text: navigation containers, forms,
+    # and buttons (share/save/section menus are rendered as buttons).
+    _BOILERPLATE_CONTAINER_TAGS = ("nav", "footer", "form", "button")
+    _PROSE_TAGS = ("p", "blockquote", "pre", "table")
+
+    @staticmethod
+    def _compact_marker(value):
+        """Lowercase alphanumerics of an id/class list, for substring matching."""
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    @classmethod
+    def _strip_boilerplate_blocks(cls, html):
+        """Remove advertising, recommendation rails and promo blocks from article HTML.
+
+        Only ever runs on already-extracted article markup, and the callers check
+        that the body survived, so a wrong guess cannot silently delete a story.
+        """
+        if not html:
+            return html
+
+        soup = BeautifulSoup(html, "html.parser")
+        before_len = len(soup.get_text(" ", strip=True))
+        removed = 0
+
+        for tag_name in cls._BOILERPLATE_CONTAINER_TAGS:
+            for element in soup.find_all(tag_name):
+                element.decompose()
+                removed += 1
+
+        seeds = []
+        for element in soup.find_all(True):
+            attrs = element.attrs or {}
+            marker_source = " ".join(
+                str(value)
+                for key, value in attrs.items()
+                if key in {"id", "class", "data-testid", "aria-label", "role"}
+            )
+            if marker_source:
+                compact = cls._compact_marker(marker_source)
+                if compact and any(marker in compact for marker in cls._BOILERPLATE_MARKERS):
+                    seeds.append(element)
+                    continue
+            if element.name in {"p", "div", "span", "h1", "h2", "h3", "h4", "a", "aside"}:
+                label = " ".join(element.get_text(" ", strip=True).split()).lower()
+                if label in cls._BOILERPLATE_LABELS:
+                    seeds.append(element)
+        for heading in soup.find_all(["h2", "h3", "h4"]):
+            if cls._BOILERPLATE_HEADING_RE.match(" ".join(heading.get_text(" ", strip=True).split())):
+                seeds.append(heading)
+
+        for element in seeds:
+            if element.parent is not None:
+                target = element
+                # A button/link seed (e.g. "Skip to content") sits inside a
+                # wrapper that carries no marker of its own; drop that wrapper
+                # too so the label does not survive as a bare text node.
+                if element.name in {"a", "button", "span"}:
+                    parent = element.parent
+                    if parent is not None and parent.name in {"div", "span", "p", "section"}:
+                        if len(parent.find_all(["a", "button"])) <= 2 and not parent.find(
+                            cls._PROSE_TAGS
+                        ):
+                            target = parent
+                target.decompose()
+                removed += 1
+
+        # Grow the removal around what is left: a container with no readable
+        # prose whose text is mostly anchors is a navigation rail, not content.
+        for _ in range(4):
+            trimmed = False
+            for element in soup.find_all(["div", "section", "ul", "ol", "aside", "header", "span"]):
+                long_prose = [
+                    node
+                    for node in element.find_all(cls._PROSE_TAGS)
+                    if len(node.get_text(" ", strip=True)) > 40
+                ]
+                if long_prose:
+                    continue
+                text = element.get_text("", strip=True)
+                if not text:
+                    element.decompose()
+                    removed += 1
+                    trimmed = True
+                    continue
+                anchors = element.find_all("a")
+                if len(anchors) < 3:
+                    continue
+                anchor_text = "".join(a.get_text("", strip=True) for a in anchors)
+                # A block made almost entirely of link text is a navigation or
+                # recommendation rail; real prose keeps a low anchor ratio even
+                # when a paragraph happens to be short.
+                if len(anchor_text) / len(text) >= 0.6:
+                    element.decompose()
+                    removed += 1
+                    trimmed = True
+            if not trimmed:
+                break
+
+        if not removed:
+            return html
+
+        after_len = len(soup.get_text(" ", strip=True))
+        # Safety net: on a substantial document the story itself must survive.
+        # (Short pages legitimately lose a large share to ad/nav blocks.)
+        if before_len and (after_len == 0 or (before_len >= 1000 and after_len < before_len * 0.3)):
+            logger.warning(
+                "Boilerplate stripping would drop %d%% of the article text; keeping the original",
+                round(100 - (after_len / before_len) * 100),
+            )
+            return html
+
+        logger.info(
+            "Removed %d boilerplate block(s) (ads / related / podcast / newsletter); "
+            "article text %d -> %d chars",
+            removed,
+            before_len,
+            after_len,
+        )
+        return str(soup)
+
+    @classmethod
+    def _dedupe_repeated_headings(cls, html):
+        """Drop duplicate copies of the same heading (paywalled pages repeat them).
+
+        Paywall/archive markup often renders the title twice - once in the hero
+        block and once in the article header - which then shows up as two
+        identical ``# Title`` lines in the Markdown output.
+        """
+        if not html:
+            return html
+        soup = BeautifulSoup(html, "html.parser")
+        removed = 0
+        seen_headings = set()
+        for heading in soup.find_all(["h1", "h2"]):
+            text = " ".join(heading.get_text(" ", strip=True).split()).lower()
+            if not text:
+                continue
+            if text in seen_headings:
+                heading.decompose()
+                removed += 1
+                continue
+            seen_headings.add(text)
+
+        # Paywalled/archive markup also repeats the standfirst: once as an
+        # overlay inside the hero <figure>, once in the article header. The
+        # overlay copy is the redundant one, so drop it (never the header copy,
+        # and never a caption whose text is unique).
+        overlay_texts = {}
+        for figure in soup.find_all("figure"):
+            for node in figure.find_all(["div", "p", "span", "figcaption"]):
+                if node.find(["div", "p", "figcaption"]):
+                    continue
+                text = " ".join(node.get_text(" ", strip=True).split()).lower()
+                if len(text) >= 40:
+                    overlay_texts.setdefault(text, []).append(node)
+        if overlay_texts:
+            outside_texts = set()
+            for node in soup.find_all(["div", "p", "h2", "h3"]):
+                if node.find(["div", "p", "figcaption"]):
+                    continue
+                if node.find_parent("figure"):
+                    continue
+                outside_texts.add(" ".join(node.get_text(" ", strip=True).split()).lower())
+            for text, nodes in overlay_texts.items():
+                if text not in outside_texts:
+                    continue
+                for node in nodes:
+                    node.decompose()
+                    removed += 1
+
+        if not removed:
+            return html
+        logger.info(f"Removed {removed} duplicated heading/standfirst block(s)")
+        return str(soup)
+
     @staticmethod
     def _rescue_content(preprocessed_soup, summary_html):
         """
@@ -13559,6 +13773,7 @@ class ContentProcessor:
             try:
                 content_html = _get_trafilatura().extract(str(preprocessed_soup), output_format="html", include_images=True)
                 if content_html:
+                    content_html = ContentProcessor._strip_boilerplate_blocks(content_html)
                     img_count = content_html.count("<img")
                     logger.info(f"Trafilatura extracted {img_count} images. Content length: {len(content_html)}")
                     return Document(html).title(), content_html
@@ -13577,6 +13792,11 @@ class ContentProcessor:
 
             # 2. Rescue uncleaned content using fingerprint
             rescued_html = ContentProcessor._rescue_content(preprocessed_soup, summary_html)
+            # The rescue path returns the original container, which still holds
+            # ads, "editors' picks", "related content" and podcast/newsletter
+            # promos. Drop them here so they never reach the Markdown/HTML output.
+            rescued_html = ContentProcessor._strip_boilerplate_blocks(rescued_html)
+            rescued_html = ContentProcessor._dedupe_repeated_headings(rescued_html)
 
             img_count = rescued_html.count("<img")
             logger.info(f"Extracted {img_count} images. Rescued HTML length: {len(rescued_html)}")
@@ -13610,7 +13830,9 @@ class ContentProcessor:
                                     f"({len(trafilatura_text)} vs {len(rescued_text)} chars); "
                                     "using Trafilatura result"
                                 )
-                                return title, content_html
+                                return title, ContentProcessor._strip_boilerplate_blocks(
+                                    content_html
+                                )
                     except Exception as exc:
                         logger.debug(f"Trafilatura comparison failed: {exc}")
 
@@ -13618,7 +13840,7 @@ class ContentProcessor:
         except Exception as e:
             if extractor == "readability":
                 logger.warning(f"Readability extraction failed: {e}. Returning original HTML.")
-                return Document(html).title(), html
+                return Document(html).title(), ContentProcessor._strip_boilerplate_blocks(html)
             logger.warning(f"Readability/Rescue failed: {e}. Falling back to Trafilatura.")
 
         # Final Fallback: Trafilatura
