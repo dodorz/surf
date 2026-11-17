@@ -3892,17 +3892,23 @@ def _process_web_request(data, translate_sync=False):
                 f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
                 f"{paywall_result.get('reason', 'unknown')}"
             )
-            logger.info("Attempting to fetch from archive domains...")
-            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+            _plan = (
+                "wallhop.io, then archive domains"
+                if Fetcher._wallhop_enabled(config)
+                else "archive domains (third-party bypass disabled)"
+            )
+            logger.info(f"Attempting to bypass the paywall ({_plan})...")
+            bypass_html, snapshot_url, bypass_source = Fetcher._fetch_paywall_bypass(
                 url,
                 config=config,
                 proxy_mode_override=proxy_override,
                 custom_proxy_override=custom_proxy,
+                html_content=html_content,
             )
-            if archived_html:
-                logger.info("Archive snapshot fetched successfully, using it as content source.")
+            if bypass_html:
+                logger.info(f"Paywall bypassed via {bypass_source}; using it as content source.")
                 archive_is_url = snapshot_url
-                html_content = archived_html
+                html_content = bypass_html
             else:
                 raise ValueError("内容受付费墙控制，未抓取全文")
 

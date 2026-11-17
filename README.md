@@ -558,13 +558,23 @@ of those defaults can be overridden by an explicit flag.
   promos, share bars and navigation. This matters most on paywalled/archived pages, where
   Readability only finds a teaser and the original container (which still holds all of it)
   is used instead; duplicate hero copies of the title and standfirst go too.
-- **Paywalls** trigger an archive-first fallback: `archive.today/newest/<url>` through
-  curl-cffi (archive.today drops plain `requests` TLS fingerprints, so the same URL times
-  out there and redirects to the capture over an impersonated handshake), then the Wayback
-  availability API with the toolbar-free `id_` document, then the `archive.ph` / `archive.is`
-  / `archive.fo` / … chain through a browser, ending with a visible CAPTCHA window. Tracking
-  parameters and fragments are stripped when looking up snapshots, and if Readability only
-  recovers a teaser, Trafilatura is run as well.
+- **Paywalls** are bypassed in two steps. First `wallhop.io`, which fetches the article
+  from its own network and so sees content your IP is denied (DataDome/Cloudflare) or gated
+  behind a paywall; its response is validated before use (still paywalled, still a challenge,
+  a stub, or no longer than the blocked page already gave means it is discarded) and its own
+  UI and `WallHop | ` title prefix are stripped.
+  Then the archive chain: `archive.today/newest/<url>` through curl-cffi (archive.today
+  drops plain `requests` TLS fingerprints, so the same URL times out there and redirects to
+  the capture over an impersonated handshake), the Wayback availability API with the
+  toolbar-free `id_` document, and finally the `archive.ph` / `archive.is` / `archive.fo` / …
+  chain through a browser, ending with a visible CAPTCHA window. Tracking parameters and
+  fragments are stripped when looking up snapshots, and if Readability only recovers a
+  teaser, Trafilatura is run as well.
+
+  The article URL is sent to wallhop.io when it is enabled; `[Paywall] bypass` in
+  `config.ini` disables third-party bypasses (`bypass = none`) so only the archive chain
+  runs. Front matter `archive` is only set for a real archive capture — wallhop serves live
+  content, not a snapshot.
 - **Anti-bot blocks** are retried with rotated TLS profiles (Chrome → Safari): DataDome
   (nytimes.com) rejects the Chromium handshake but accepts Safari, while Cloudflare
   (theatlantic.com) does the reverse, so one fixed profile always fails somewhere.
@@ -809,6 +819,9 @@ html_inline = false                 ; default for --html-inline
 
 [Content]
 extractor = auto                    ; auto, readability, trafilatura, raw
+
+[Paywall]
+bypass = wallhop                   ; third-party bypass before archive.today; none = off
 
 [Network]
 proxy_mode = env                    ; env, win, custom, no

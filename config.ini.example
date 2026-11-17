@@ -202,6 +202,21 @@ custom_proxy =
 ; Example: queue.acm.org = abc123def456...
 ; queue.acm.org =
 
+[Paywall]
+; Third-party paywall bypass services, tried in order before the archive
+; snapshot lookup (archive.today / Wayback Machine).
+;
+;   wallhop  - https://wallhop.io fetches the article from its own network, so
+;              it sees content your IP is denied (DataDome/Cloudflare) or gated
+;              behind a paywall. Every response is validated first: a wallhop
+;              answer that is still paywalled, still a challenge, or just a
+;              stub falls through to the archive chain instead.
+;
+; Set to none/false/off (or leave empty) to disable third-party bypasses and
+; go straight to archive.today. The article URL is sent to wallhop.io when it
+; is enabled, so disable it if you do not want that.
+bypass = wallhop
+
 [Twitter]
 ; Backend selection: cli (prefer uvx --from twitter-cli twitter), auto (CLI first, then native fallback), native (Surf built-in only)
 backend = cli

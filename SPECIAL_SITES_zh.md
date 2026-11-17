@@ -22,7 +22,9 @@
 
 ### 付费墙文章
 
-Surf 检测到付费墙后，会先查询已有 Archive 快照，再判定抓取失败。Archive 域名按以下顺序轮换：`archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。其中 `https://<域名>/newest/<url>` 跳转优先用 curl-cffi 并轮换 TLS 指纹（`chrome131`、`safari15_5`、`safari17_2_ios`）请求：archive.today 会丢弃很多网络环境下普通 `requests` 的 TLS 指纹，同一 URL 用普通请求只会超时，换成模拟浏览器的握手后才会返回快照；普通 requests 仅在 curl-cffi 不可用时作为回退。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
+Surf 检测到付费墙后会先请求 `wallhop.io`（依次尝试 `https://wallhop.io/raw/<url>` 与 `https://wallhop.io/<url>`）：它从自己的网络抓取文章，因此能看到本机 IP 被拒（DataDome/Cloudflare）或被付费墙挡住的内容。每个候选结果都要先通过校验才会替换现有文档：HTTP 200、至少 5000 字节、不含反爬挑战标记、可见文本至少 1200 字符且至少比被拦页面多出 500 字符（wallhop 必须真的有增量），并且 `_detect_paywall` 不得判定文档不完整——被截断的摘要、反爬插页或空壳域名页都会回落到归档链。会在正常可读页面上也命中的信号（已知付费墙域名、付费墙 CSS 脚手架、付费墙 meta 关键词、付费墙文案）被有意排除在失败条件之外。wallhop 自带的界面（`div.bar`、`p.foot`）以及 `WallHop | ` 标题/og:title 前缀会从结果中剥离。该服务由 `[Paywall] bypass` 控制（默认 `wallhop`；`none`/`false`/`off`/留空表示关闭第三方绕过）。由于 wallhop 提供的是实时内容而非快照，使用它时 front matter 的 `archive` 保持为空，只有真正用到归档快照时才写入。
+
+如果 wallhop 也无法解决，才会查询已有 Archive 快照并据此判定抓取失败。Archive 域名按以下顺序轮换：`archive.ph`、`archive.today`、`archive.is`、`archive.fo`、`archive.li`、`archive.vn`、`archive.md`。其中 `https://<域名>/newest/<url>` 跳转优先用 curl-cffi 并轮换 TLS 指纹（`chrome131`、`safari15_5`、`safari17_2_ios`）请求：archive.today 会丢弃很多网络环境下普通 `requests` 的 TLS 指纹，同一 URL 用普通请求只会超时，换成模拟浏览器的握手后才会返回快照；普通 requests 仅在 curl-cffi 不可用时作为回退。每个域名都会先经已配置代理尝试，再尝试直连。所有无头浏览器尝试均失败后，Surf 会按相同顺序打开各域名的可见浏览器窗口，等待人工完成 CAPTCHA。成功快照的 URL 会写入 front matter 的 `archive` 字段。
 
 目标站点自身的反爬拦截也会先轮换 TLS 指纹再启动浏览器：curl-cffi 的指纹顺序是 Chrome → Safari，因为 DataDome（`nytimes.com`）拒绝 Chromium 握手而放行 Safari，Cloudflare（`theatlantic.com`）则正好相反。固定单一指纹必然会在其中一边失败。
 

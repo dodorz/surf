@@ -11961,14 +11961,7 @@ class Fetcher:
         # Different selectors can point at different nodes (e.g. a tiny download
         # card inside <article> and the real body inside <main>), so take the
         # longest candidate instead of the first one.
-        body_text = ""
-        for sel in ("article", "[role='main']", "main",
-                    ".post-content", ".article-content", ".story-content",
-                    ".article-body", ".post-body", ".entry-content"):
-            for element in soup.select(sel):
-                candidate = element.get_text(" ", strip=True)
-                if len(candidate) > len(body_text):
-                    body_text = candidate
+        body_text = Fetcher._readable_body_text(soup)
         text_content = soup.get_text(" ", strip=True)
         if not body_text:
             body_text = text_content
@@ -12519,6 +12512,252 @@ class Fetcher:
             return html_content, snapshot_url
 
         return None, None
+
+    # wallhop.io is a third-party paywall bypass: it fetches the article from
+    # its own network, so it sees content our IP is denied (DataDome/Cloudflare)
+    # or gated behind a paywall. Two response shapes exist: ``/raw/<url>`` is
+    # wallhop's reader output, ``/<url>`` is the original document with only the
+    # title rewritten to "WallHop | ...".
+    _WALLHOP_BASE = "https://wallhop.io"
+    _WALLHOP_PATHS = ("raw/", "")
+    _WALLHOP_TIMEOUT = (10, 45)
+
+    @staticmethod
+    def _wallhop_enabled(config):
+        """Whether wallhop.io may be used as a paywall bypass (default: yes).
+
+        ``[Paywall] bypass`` is a comma-separated list of third-party services;
+        an empty value (or ``none``/``false``/``off``) disables them all.
+        """
+        if config is None:
+            return True
+        raw = config.get("Paywall", "bypass", fallback="wallhop")
+        if raw is None:
+            raw = "wallhop"
+        value = str(raw).strip().lower()
+        if value in {"", "none", "false", "off", "0"}:
+            return False
+        return "wallhop" in {part.strip() for part in value.split(",")}
+
+    # Containers that hold the article body rather than navigation, ads and
+    # footers. The longest one wins so a tiny download card inside <article>
+    # does not shadow the real body in <main>.
+    _BODY_SELECTORS = (
+        "article",
+        "[role='main']",
+        "main",
+        ".post-content",
+        ".article-content",
+        ".story-content",
+        ".article-body",
+        ".post-body",
+        ".entry-content",
+    )
+
+    @staticmethod
+    def _readable_body_text(soup):
+        """Longest article-body candidate in *soup*, or '' when none is found."""
+        best = ""
+        for selector in Fetcher._BODY_SELECTORS:
+            try:
+                elements = soup.select(selector)
+            except Exception:
+                continue
+            for element in elements:
+                candidate = element.get_text(" ", strip=True)
+                if len(candidate) > len(best):
+                    best = candidate
+        return best
+
+    @staticmethod
+    def _readable_body_chars(html):
+        """Article-body length of *html*, ignoring navigation and chrome.
+
+        This is the right yardstick for the wallhop comparison: the blocked page
+        and the wallhop answer are both measured on their article text, so a
+        paywalled page padded with comments and related links cannot set an
+        unreachable bar.
+        """
+        if not html:
+            return 0
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return 0
+        body = Fetcher._readable_body_text(soup)
+        return len(body) if body else len(soup.get_text(" ", strip=True))
+
+    @staticmethod
+    def _strip_wallhop_chrome(html):
+        """Drop wallhop.io's own UI and the "WallHop | " title prefix.
+
+        The plain endpoint proxies the original document and only rewrites the
+        title metadata; the ``/raw/`` endpoint additionally wraps the article in
+        wallhop's reader shell (``div.bar`` with the download links and the
+        Ko-fi footer). Both would otherwise leak into the saved note.
+        """
+        if not html or "wallhop" not in html.lower():
+            return html
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return html
+
+        for element in soup.select("div.bar, p.foot"):
+            text = element.get_text(" ", strip=True).lower()
+            if "wallhop" in text or "download as" in text or "ko-fi" in text:
+                element.decompose()
+
+        def _strip_prefix(value):
+            return re.sub(r"^\s*wallhop\s*\|\s*", "", value or "", flags=re.IGNORECASE).strip()
+
+        title = soup.find("title")
+        if title is not None:
+            cleaned = _strip_prefix(title.get_text(" ", strip=True))
+            if cleaned:
+                title.string = cleaned
+        for meta in soup.find_all("meta"):
+            key = (meta.get("property") or meta.get("name") or "").lower()
+            if key in {"og:title", "twitter:title"}:
+                cleaned = _strip_prefix(meta.get("content") or "")
+                if cleaned:
+                    meta["content"] = cleaned
+
+        return str(soup)
+
+    # Detection signals that mean the document itself is incomplete: a teaser
+    # that stops mid-article, a bot interstitial or a bare-domain shell. The
+    # remaining signals (known paywall domain, paywall CSS scaffolding, paywall
+    # meta keywords, paywall text patterns) are present on fully readable pages
+    # too - a footer's "Already a subscriber? Sign in" is enough to trip the
+    # text patterns - so they must not reject a response that delivered the
+    # article.
+    _WALLHOP_INCOMPLETE_MARKERS = (
+        "truncated content",
+        "anti-bot",
+        "bare-domain title",
+    )
+    # A response that is not at least this much longer than what we already
+    # fetched did not bypass anything: let the archive chain have a turn.
+    _WALLHOP_MIN_IMPROVEMENT = 500
+
+    @classmethod
+    def _wallhop_content_is_incomplete(cls, reason):
+        lowered = str(reason or "").lower()
+        return any(marker in lowered for marker in cls._WALLHOP_INCOMPLETE_MARKERS)
+
+    @staticmethod
+    def _fetch_wallhop_bypass(url, proxies=None, timeout=None, baseline_chars=0):
+        """Return the article HTML as served by wallhop.io, or None.
+
+        Every candidate is validated before it is accepted: a wallhop response
+        that is still paywalled, still a bot challenge, or just a stub must not
+        replace the document we already have. ``baseline_chars`` is how much
+        visible text the blocked fetch already produced - wallhop has to beat it
+        by a margin, otherwise it bought nothing and the archive chain still
+        deserves its turn.
+        """
+        if not url or not str(url).lower().startswith(("http://", "https://")):
+            return None
+        timeout = timeout or Fetcher._WALLHOP_TIMEOUT
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        for path in Fetcher._WALLHOP_PATHS:
+            target = f"{Fetcher._WALLHOP_BASE}/{path}{url}"
+            try:
+                response = _requests_get_interruptibly(
+                    target, headers=headers, proxies=proxies, timeout=timeout
+                )
+            except Exception as exc:
+                logger.info(f"wallhop: request failed ({path or 'plain'} path): {exc}")
+                continue
+
+            if response.status_code != 200:
+                logger.info(
+                    f"wallhop: HTTP {response.status_code} for the {path or 'plain'} path"
+                )
+                continue
+
+            html = Fetcher._decode_response_text(response)
+            if not html or len(html) < 5000:
+                logger.info(
+                    f"wallhop: {path or 'plain'} path returned only {len(html or '')} bytes"
+                )
+                continue
+            if Fetcher._is_cloudflare_challenge(html) or Fetcher._is_antibot_challenge_page(html):
+                logger.info(f"wallhop: {path or 'plain'} path returned a bot challenge page")
+                continue
+
+            try:
+                visible = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+            except Exception:
+                visible = ""
+            body_chars = Fetcher._readable_body_chars(html)
+            required = max(1200, int(baseline_chars or 0) + Fetcher._WALLHOP_MIN_IMPROVEMENT)
+            if len(visible) < 1200 or body_chars < required:
+                logger.info(
+                    f"wallhop: {path or 'plain'} path has {len(visible)} visible chars "
+                    f"({body_chars} in the article body), need at least {required}"
+                )
+                continue
+            paywall = Fetcher._detect_paywall(html, url=url)
+            if paywall.get("detected") and Fetcher._wallhop_content_is_incomplete(
+                paywall.get("reason") or ""
+            ):
+                logger.info(
+                    f"wallhop: {path or 'plain'} path is still paywalled or blocked "
+                    f"({paywall.get('reason')})"
+                )
+                continue
+
+            logger.info(
+                f"wallhop: fetched {body_chars} article-body chars via the {path or 'plain'} path "
+                f"(blocked page had {int(baseline_chars or 0)}; {len(visible)} visible in total)"
+            )
+            return Fetcher._strip_wallhop_chrome(html)
+
+        return None
+
+    @staticmethod
+    def _fetch_paywall_bypass(
+        url, config, proxy_mode_override=None, custom_proxy_override=None, html_content=None
+    ):
+        """Bypass a paywall: wallhop.io first, then the archive snapshot chain.
+
+        ``html_content`` is the blocked document we already fetched; its length
+        sets the bar wallhop has to clear. Returns
+        ``(html, snapshot_url, source_label)``. ``snapshot_url`` is None unless an
+        archive capture was used, so front matter ``archive`` only ever records a
+        real archive URL; wallhop content is live, not archived.
+        """
+        proxies = None
+        if config is not None:
+            proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
+
+        if Fetcher._wallhop_enabled(config):
+            baseline_chars = Fetcher._readable_body_chars(html_content)
+            bypass_html = Fetcher._fetch_wallhop_bypass(
+                url, proxies=proxies, baseline_chars=baseline_chars
+            )
+            if bypass_html:
+                return bypass_html, None, "wallhop.io"
+
+        archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+            url,
+            config=config,
+            proxy_mode_override=proxy_mode_override,
+            custom_proxy_override=custom_proxy_override,
+        )
+        if archived_html:
+            return archived_html, snapshot_url, "archive snapshot"
+        return None, None, None
 
     @staticmethod
     def _fetch_archiveis_snapshot(
@@ -18265,17 +18504,23 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy, filename
                 f"Paywall detected (confidence: {paywall_result['confidence']:.0%}): "
                 f"{paywall_result.get('reason', 'unknown')}"
             )
-            logger.info("Attempting to fetch from archive domains...")
-            archived_html, snapshot_url = Fetcher._fetch_archiveis_snapshot(
+            _plan = (
+                "wallhop.io, then archive domains"
+                if Fetcher._wallhop_enabled(config)
+                else "archive domains (third-party bypass disabled)"
+            )
+            logger.info(f"Attempting to bypass the paywall ({_plan})...")
+            bypass_html, snapshot_url, bypass_source = Fetcher._fetch_paywall_bypass(
                 args.url,
                 config=config,
                 proxy_mode_override=proxy_mode,
                 custom_proxy_override=custom_proxy,
+                html_content=html_content,
             )
-            if archived_html:
-                logger.info("Archive snapshot fetched successfully, using it as content source.")
+            if bypass_html:
+                logger.info(f"Paywall bypassed via {bypass_source}; using it as content source.")
                 archive_is_url = snapshot_url
-                html_content = archived_html
+                html_content = bypass_html
             else:
                 logger.error("内容受付费墙控制，未抓取全文")
                 logger.error(f"  原始 URL: {args.url}")
