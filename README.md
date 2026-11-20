@@ -157,9 +157,14 @@ uv run surf "https://example.com/article"
 ```
 
 If the argument is text that contains a URL — a Xiaohongshu share message, for instance —
-the first `http(s)` URL is extracted. Common short links (`t.co`, `bit.ly`,
-`tinyurl.com`, `xhslink.com`, `xhslink.cn`, `pca.st/episode/...`) are resolved to their
-final URL before site rules run, and the resolved URL is what lands in the front matter.
+the first `http(s)` URL is extracted. Common short links (`t.co`, `bit.ly`, `tinyurl.com`,
+`xhslink.com`, `xhslink.cn`, `pca.st/episode/...`, and the publishers' own shorteners
+`nyti.ms`, `wapo.st`, `on.wsj.com`, `bloom.bg`, `tny.sh`, `econ.st`, …) are resolved to
+their final URL **before** site rules and paywall detection run, and the resolved URL is
+what lands in the front matter. That order matters: a paywall must be judged on the
+article's host, not on the shortener. Shorteners that answer with a click-through page
+instead of a redirect (da.gd, t.ly) are handled too — the destination is read from that
+page.
 
 The CLI handles one URL per invocation; use a shell loop or `-S/--search` for batches. The
 Web UI does accept several URLs at once and renders one card per URL.

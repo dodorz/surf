@@ -127,3 +127,83 @@ def test_web_process_resolves_short_url_before_fetch_and_metadata(monkeypatch):
     payload = response.get_json()
     assert payload["success"] is True
     assert payload["metadata"]["source_url"] == long_url
+
+
+# --- click-through interstitials --------------------------------------------
+# Some shorteners stop redirecting and render "this link was created recently,
+# click through" instead. The destination is still in the markup, and the
+# paywall decision must happen on that destination - never on the shortener.
+
+
+_INTERSTITIAL = """
+<html><head><title>da.gd: shorten</title>
+<meta name="keywords" content="dagd,da.gd,url,shorten"></head><body>
+<p>This short url was created recently. In order to help fight phishing and
+abuse, fresh short urls require an explicit click-through before we redirect
+you.</p>
+<a href="/help">help</a>
+<a href="https://codeberg.org/dagd/dagd">open source</a>
+<a href="https://buymeacoffee.com/relrod">donate</a>
+<a href="{}">{}</a>
+</body></html>
+"""
+
+_TARGET = "https://www.nytimes.com/2026/10/30/world/asia/china-tiananmen-kristof.html"
+
+
+def test_interstitial_target_is_extracted():
+    html = _INTERSTITIAL.format(_TARGET, _TARGET)
+    assert Fetcher._extract_short_url_target(html, "https://da.gd/DSm8") == _TARGET
+
+
+def test_interstitial_extraction_ignores_navigation_links():
+    # "open source"/"donate" point at other hosts but are not printed URLs.
+    html = _INTERSTITIAL.format("/x", "")  # no destination link at all
+    assert Fetcher._extract_short_url_target(html, "https://da.gd/DSm8") is None
+
+
+def test_interstitial_extraction_needs_an_interstitial_marker():
+    html = (
+        "<html><body><a href='https://www.nytimes.com/x'>"
+        "https://www.nytimes.com/x</a></body></html>"
+    )
+    assert Fetcher._extract_short_url_target(html, "https://da.gd/DSm8") is None
+    assert Fetcher._extract_short_url_target("", "https://da.gd/DSm8") is None
+
+
+def test_short_url_resolution_falls_back_to_the_interstitial(monkeypatch):
+    monkeypatch.setattr(Fetcher, "_get_proxies", staticmethod(lambda *args, **kwargs: ({}, None)))
+    monkeypatch.setattr(
+        Fetcher, "_resolve_url_with_redirects", staticmethod(lambda *args, **kwargs: "https://da.gd/DSm8")
+    )
+
+    class _Response:
+        url = "https://da.gd/DSm8"
+
+        def __init__(self):
+            self.content = _INTERSTITIAL.format(_TARGET, _TARGET).encode()
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+
+    monkeypatch.setattr(
+        surf, "_requests_get_with_system_trust_interruptibly", lambda *a, **k: _Response()
+    )
+
+    resolved = Fetcher._resolve_common_short_url("https://da.gd/DSm8", _FakeConfig())
+    assert resolved == _TARGET
+    # The paywall decision then runs against the destination host.
+    _, site_name, _ = surf._get_handler_for_url(resolved)
+    assert site_name is None or site_name != "da.gd"
+
+
+def test_publisher_shortener_hosts_are_recognized():
+    for url in (
+        "https://nyti.ms/abc",
+        "https://wapo.st/abc",
+        "https://on.wsj.com/abc",
+        "https://bloom.bg/abc",
+        "https://tny.sh/abc",
+        "https://econ.st/abc",
+        "https://da.gd/abc",
+    ):
+        assert Fetcher._is_common_short_url(url), url
+    assert not Fetcher._is_common_short_url("https://www.nytimes.com/2026/10/30/x.html")

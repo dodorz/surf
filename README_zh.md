@@ -132,7 +132,7 @@ Surf 只有一个位置参数，它是什么由内容本身决定。
 uv run surf "https://example.com/article"
 ```
 
-参数是带有 URL 的说明文字（比如小红书分享文案）时，会提取其中第一个 `http(s)` URL。常见短链（`t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...`）会先解析成最终地址，front matter 里记录的也是解析后的地址。
+参数是带有 URL 的说明文字（比如小红书分享文案）时，会提取其中第一个 `http(s)` URL。常见短链（`t.co`、`bit.ly`、`tinyurl.com`、`xhslink.com`、`xhslink.cn`、`pca.st/episode/...`，以及媒体自己的短链 `nyti.ms`、`wapo.st`、`on.wsj.com`、`bloom.bg`、`tny.sh`、`econ.st` 等）会**先**解析成最终地址，再做站点规则匹配与付费墙判断，front matter 里记录的也是解析后的地址——顺序很关键：付费墙要按文章的域名判断，而不是按短链域名。对不跳转、改用点击确认页的短链（`da.gd`、`t.ly`），会从该页面里读出目标地址。
 
 命令行一次只处理一个 URL；批量请用 shell 循环或 `-S/--search`。Web 界面可以一次输入多个 URL，并为每个 URL 生成一张卡片。
 

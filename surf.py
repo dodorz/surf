@@ -2349,6 +2349,21 @@ class Fetcher:
         "xhslink.com",
         "xhslink.cn",
         "pca.st",
+        # Publisher shorteners: these redirect to the full article URL, so the
+        # redirect has to be followed before paying-attention to paywalls.
+        "nyti.ms",
+        "wapo.st",
+        "bloom.bg",
+        "on.wsj.com",
+        "tny.sh",
+        "ti.me",
+        "reut.rs",
+        "lat.ms",
+        "theatl.re",
+        "econ.st",
+        # Generic shorteners whose click-through page is parsed below.
+        "da.gd",
+        "t.ly",
     }
 
     _HTML_META_CHARSET_RE = re.compile(rb'<meta\s+charset\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE)
@@ -4692,6 +4707,36 @@ class Fetcher:
         return last_resolved
 
     @staticmethod
+    def _resolve_url_with_final_body(url, proxies=None, timeout=30):
+        """Follow redirects and return ``(final_url, body_html)``.
+
+        Like :meth:`_resolve_url_with_redirects`, but when the shortener does
+        *not* redirect (some render a click-through page instead) the body of
+        that page is returned too, so the destination can be read from it.
+        """
+        if not url:
+            return None, None
+        resolved = Fetcher._resolve_url_with_redirects(url, proxies=proxies, timeout=timeout)
+        if resolved and resolved != url:
+            return resolved, None
+
+        # No redirect: fetch once and hand the markup back for inspection.
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            response = _requests_get_with_system_trust_interruptibly(
+                url, headers=headers, proxies=proxies, timeout=timeout
+            )
+            return (response.url or resolved or url), Fetcher._decode_response_text(response)
+        except Exception as exc:
+            logger.debug(f"Could not read the short-link page for {url}: {exc}")
+            return resolved or url, None
+
+    @staticmethod
     def _is_common_short_url(url):
         if not url:
             return False
@@ -4705,6 +4750,57 @@ class Fetcher:
         if host.startswith("www."):
             host = host[4:]
         return host in Fetcher._COMMON_SHORT_URL_HOSTS
+
+    # Link shorteners that show a click-through interstitial instead of a plain
+    # 302 (da.gd does this for fresh links to fight phishing). The destination
+    # is still in the page, so the redirect can be recovered from it.
+    _SHORT_URL_INTERSTITIAL_MARKERS = (
+        "require an explicit click-through",
+        "click-through before we redirect",
+        "short url was created recently",
+        "please click the link below",
+        "checking your browser before redirecting",
+    )
+
+    @staticmethod
+    def _extract_short_url_target(html, short_url):
+        """Destination link inside a shortener's click-through page, or None.
+
+        Only an absolute http(s) link that is *not* the shortener itself counts,
+        and the link text must either be the destination or name a different
+        host, so a "donate"/"source code" link cannot be mistaken for it.
+        """
+        if not html:
+            return None
+        lower = html.lower()
+        if not any(marker in lower for marker in Fetcher._SHORT_URL_INTERSTITIAL_MARKERS):
+            return None
+        try:
+            parsed_short = urlparse(short_url)
+            short_host = (parsed_short.netloc or "").split("@")[-1].split(":")[0].lower()
+            short_host = short_host.removeprefix("www.")
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return None
+
+        # Shortener interstitials print the destination as the link text, so an
+        # anchor whose text *is* an http(s) URL on another host is the winner.
+        # Navigation links ("help", "open source", "donate") never look like that.
+        for anchor in soup.find_all("a"):
+            href = (anchor.get("href") or "").strip()
+            text = anchor.get_text(" ", strip=True)
+            if not href.lower().startswith(("http://", "https://")):
+                continue
+            if not text.lower().startswith(("http://", "https://")):
+                continue
+            try:
+                target_host = (urlparse(href).netloc or "").split("@")[-1].split(":")[0].lower()
+            except Exception:
+                continue
+            if not target_host or target_host.removeprefix("www.") == short_host:
+                continue
+            return href
+        return None
 
     @staticmethod
     def _resolve_common_short_url(
@@ -4728,7 +4824,9 @@ class Fetcher:
             return url
 
         req_proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
-        resolved = Fetcher._resolve_url_with_redirects(url, proxies=req_proxies, timeout=timeout)
+        resolved, resolved_html = Fetcher._resolve_url_with_final_body(
+            url, proxies=req_proxies, timeout=timeout
+        )
         if resolved:
             unwrapped = Fetcher._unwrap_xiaohongshu_login_redirect(resolved)
             if unwrapped != resolved:
@@ -4737,6 +4835,13 @@ class Fetcher:
         if resolved and resolved != url:
             logger.info(f"Resolved short URL for processing: {url} -> {resolved}")
             return resolved
+
+        # Some shorteners answer with a click-through page instead of a 302;
+        # the destination is still in the markup.
+        target = Fetcher._extract_short_url_target(resolved_html, url)
+        if target:
+            logger.info(f"Resolved short URL from its click-through page: {url} -> {target}")
+            return target
         return url
 
     @staticmethod
