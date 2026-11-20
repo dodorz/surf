@@ -574,7 +574,10 @@ of those defaults can be overridden by an explicit flag.
   toolbar-free `id_` document, and finally the `archive.ph` / `archive.is` / `archive.fo` / …
   chain through a browser, ending with a visible CAPTCHA window. Tracking parameters and
   fragments are stripped when looking up snapshots, and if Readability only recovers a
-  teaser, Trafilatura is run as well.
+  teaser, Trafilatura is run as well. Paywall text signals cover both the English and the
+  Chinese wording (`订阅《华尔街日报》，畅读全文`, `订阅后继续阅读`, `本文为付费文章`, …) so the
+  Chinese editions of WSJ/FT/NYT are detected too; generic footer words like `订阅` /
+  `请登录` are deliberately not markers.
 
   The article URL is sent to wallhop.io when it is enabled; `[Paywall] bypass` in
   `config.ini` disables third-party bypasses (`bypass = none`) so only the archive chain

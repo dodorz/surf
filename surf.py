@@ -11886,6 +11886,20 @@ class Fetcher:
         re.compile(r"Enjoying\s+this\s+article\?", re.IGNORECASE),
         re.compile(r"Subscribe\s+for\s+unlimited\s+access", re.IGNORECASE),
     ]
+    # Chinese subscriber CTAs. Kept to multi-character phrases that mean "the
+    # rest of this article is behind the wall": the generic "订阅"/"请登录"
+    # appear in every WSJ footer, including on fully readable pages.
+    _PAYWALL_CJK_TEXT_PATTERNS = [
+        re.compile(r"畅读全文"),
+        re.compile(r"继续阅读全文"),
+        re.compile(r"订阅(?:后|即可)?继续阅读"),
+        re.compile(r"阅读全文(?:需|请)?订阅"),
+        re.compile(r"(?:订阅|会员)专享|专享(?:内容|文章)"),
+        re.compile(r"本文(?:为|属于)付费(?:文章|内容)"),
+        re.compile(r"已是订阅用户|已经是订阅用户"),
+        re.compile(r"登录(?:后|以)?(?:继续)?阅读全文"),
+        re.compile(r"剩余\s*\d+\s*字"),
+    ]
     _PAYWALL_META_KEYWORDS = {
         "paywall", "metered", "premium", "subscriber-only", "subscription", "gated",
     }
@@ -12152,6 +12166,14 @@ class Fetcher:
         for pattern in Fetcher._PAYWALL_TEXT_PATTERNS:
             if pattern.search(text_content.lower()):
                 text_matches += 1
+        # Chinese editions of the same sites word their CTA differently
+        # ("订阅《华尔街日报》，畅读全文"), so the English patterns never fire there
+        # and a WSJ-Chinese teaser looked like a complete page.
+        cjk_matches = sum(
+            1 for pattern in Fetcher._PAYWALL_CJK_TEXT_PATTERNS if pattern.search(text_content)
+        )
+        text_matches += cjk_matches
+
         if text_matches and substantial_body:
             # Long, readable bodies usually carry these strings inside toolbars
             # ("Subscribe to unlock this feature", "Already a subscriber? Sign
@@ -13876,7 +13898,12 @@ class ContentProcessor:
         r"|most popular|most read|read next|read more"
         r"|the great read|you may also like|elsewhere"
         r"|相关(?:内容|阅读|文章|推荐|新闻|播客)"
-        r"|编辑精选|精选推荐|猜你喜欢|热门(?:文章|推荐)?|延伸阅读)$",
+        r"|编辑精选|精选推荐|猜你喜欢|热门(?:文章|推荐)?|延伸阅读"
+        # Recommendation rails on Chinese-language editions of the big sites.
+        r"|推荐(?:阅读|内容|文章|视频)"
+        r"|热门(?:文章|视频|评论)"
+        r"|相关(?:报道|链接|专题)"
+        r"|更多(?:内容|文章))$",
         re.IGNORECASE,
     )
     # UI chrome that never carries story text: navigation containers, forms,
