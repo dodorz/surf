@@ -3884,6 +3884,9 @@ def _process_web_request(data, translate_sync=False):
                 custom_proxy_override=custom_proxy,
             )
 
+        if Fetcher._is_not_found_page(html_content):
+            raise ValueError("页面不存在或已删除（抓取到的是错误页）")
+
         # Paywall detection and archive-domain fallback
         archive_is_url = None
         paywall_result = Fetcher._detect_paywall(html_content, url=url)

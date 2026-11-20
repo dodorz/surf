@@ -577,7 +577,12 @@ of those defaults can be overridden by an explicit flag.
   teaser, Trafilatura is run as well. Paywall text signals cover both the English and the
   Chinese wording (`订阅《华尔街日报》，畅读全文`, `订阅后继续阅读`, `本文为付费文章`, …) so the
   Chinese editions of WSJ/FT/NYT are detected too; generic footer words like `订阅` /
-  `请登录` are deliberately not markers.
+  `请登录` are deliberately not markers. `cn.nytimes.com` is exempt: it serves the full
+  article for free (60 sampled articles carried no subscriber CTA), whereas `cn.wsj.com`
+  and `cn.ft.com` do gate theirs.
+- **Error pages are not articles.** A fetch that lands on "页面没有找到" / "Page Not
+  Found" (or an HTTP 4xx) is reported as a missing page instead of being saved as a note,
+  so a deleted or mistyped URL no longer produces a document full of recommendation links.
 
   The article URL is sent to wallhop.io when it is enabled; `[Paywall] bypass` in
   `config.ini` disables third-party bypasses (`bypass = none`) so only the archive chain

@@ -11803,9 +11803,61 @@ class Fetcher:
             logger.warning(f"Reddit handler failed: {e}")
             return None
 
+    # Error/empty pages that a fetch can land on (a deleted article, a guessed
+    # URL). Saving them as notes hides the real failure and, worse, makes an
+    # archive-lookup decision look like a paywall.
+    _NOT_FOUND_TEXT_PATTERNS = [
+        re.compile(r"\bpage\s+not\s+found\b", re.IGNORECASE),
+        re.compile(r"\b404\b\s*(?:error|-\s*not\s+found)?", re.IGNORECASE),
+        re.compile(r"\bthis\s+page\s+(?:could\s+not|does\s+not)\s+exist", re.IGNORECASE),
+        re.compile(r"页面(?:没有|不存在|未)找到"),
+        re.compile(r"您访问的页面(?:未找到|不存在)"),
+        re.compile(r"页面不存在"),
+        re.compile(r"ページが見つかりません"),
+        re.compile(r"페이지를 찾을 수 없습니다"),
+    ]
+
+    @staticmethod
+    def _is_not_found_page(html_content, status_code=None):
+        """Whether *html_content* is an error page rather than an article.
+
+        Two independent signals: an HTTP 4xx status, or one of the "page not
+        found" phrases in either the title or the first part of the text. The
+        phrase is only consulted for short documents so an article *about* 404
+        error pages is not misread.
+        """
+        if not html_content:
+            return False
+        if status_code is not None and 400 <= int(status_code) < 500:
+            return True
+        try:
+            soup = BeautifulSoup(html_content, "html.parser")
+        except Exception:
+            return False
+        title = soup.find("title")
+        title_text = title.get_text(" ", strip=True) if title else ""
+        body_text = soup.get_text(" ", strip=True)
+        # Long documents are real articles even if they quote "404".
+        if len(body_text) > 3000:
+            return False
+        for pattern in Fetcher._NOT_FOUND_TEXT_PATTERNS:
+            if pattern.search(title_text) or pattern.search(body_text):
+                return True
+        return False
+
     # ─────────────────────────────────────────────────────────────────
     # Paywall detection signals
     # ─────────────────────────────────────────────────────────────────
+    # Chinese-language editions that serve the full article for free even though
+    # their parent domain is paywalled. cn.nytimes.com is the case in practice:
+    # 60 sampled articles carried no subscriber CTA at all, while cn.wsj.com and
+    # cn.ft.com do gate theirs. Without this list a short Chinese article on
+    # cn.nytimes.com trips "known paywall domain + truncated content" and Surf
+    # then reports a paywall for a page that was complete.
+    _FREE_SIBLING_HOSTS = {
+        "cn.nytimes.com",
+    }
+
     _KNOWN_PAYWALL_DOMAINS = {
         "medium.com", "nytimes.com", "wsj.com", "bloomberg.com",
         "ft.com", "economist.com", "washingtonpost.com", "latimes.com",
@@ -12063,7 +12115,15 @@ class Fetcher:
             try:
                 host = urlparse(url).netloc.lower().split("@")[-1].split(":")[0]
                 host = ".".join(host.rsplit(".", 2)[-3:]) if host.count(".") >= 2 else host
+                free_host = any(
+                    host == free or host.endswith("." + free)
+                    for free in Fetcher._FREE_SIBLING_HOSTS
+                )
+                if free_host:
+                    signals.append(f"free-edition host: {host}")
                 for domain in Fetcher._KNOWN_PAYWALL_DOMAINS:
+                    if free_host:
+                        break
                     if host.endswith(domain):
                         signals.append(f"known paywall domain: {domain}")
                         confidence += 0.3
@@ -18628,6 +18688,14 @@ def _prepare_single_url(args, config, parser, proxy_mode, custom_proxy, filename
             except Exception as exc:
                 logger.error(f"Podcast transcription failed: {exc}")
                 sys.exit(1)
+
+        # An error page is a missing article, not a paywalled one: report it
+        # instead of saving the "page not found" text as a note.
+        if Fetcher._is_not_found_page(html_content):
+            logger.error(f"Page not found (or empty) at {args.url}")
+            logger.error("The URL may be wrong, or the article was removed or moved.")
+            _save_failed_url_note(args.url, config)
+            sys.exit(1)
 
         # ── Paywall detection and archive-domain fallback ──
         paywall_result = Fetcher._detect_paywall(html_content, url=args.url)

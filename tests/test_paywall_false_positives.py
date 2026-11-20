@@ -1,5 +1,7 @@
 """Paywall detection must not treat framework markup as a paywall."""
 
+from bs4 import BeautifulSoup
+
 from surf import Fetcher
 
 WISPTERM_URL = "https://wispterm.com/"
@@ -140,3 +142,95 @@ def test_generic_chinese_footer_words_are_not_markers():
     result = Fetcher._detect_paywall(html, url="https://cn.wsj.com/articles/free")
 
     assert result["detected"] is False
+
+
+# --- free Chinese sibling editions ------------------------------------------
+# cn.nytimes.com serves the full article for free although nytimes.com is a
+# paywalled domain; without an exemption a short Chinese article would trip
+# "known paywall domain + truncated content" and Surf would report a paywall
+# for a page it already had in full.
+
+
+def _short_cn_article():
+    paragraphs = "".join(
+        '<div class="article-paragraph">据新华社报道，双方就贸易问题交换了意见。</div>'
+        for _ in range(6)
+    )
+    return (
+        "<html><head><title>简讯：中美经贸磋商 - 纽约时报中文网</title></head>"
+        f"<body><article><h1>简讯</h1>{paragraphs}</article></body></html>"
+    )
+
+
+def test_free_chinese_nytimes_edition_is_not_a_paywall():
+    result = Fetcher._detect_paywall(
+        _short_cn_article(), url="https://cn.nytimes.com/china/20261120/brief/"
+    )
+
+    assert result["detected"] is False
+    assert "free-edition host" in (result["reason"] or "")
+
+
+def test_english_nytimes_stays_paywalled():
+    result = Fetcher._detect_paywall(
+        _short_cn_article(), url="https://www.nytimes.com/2026/11/20/brief.html"
+    )
+
+    assert result["detected"] is True
+    assert "known paywall domain: nytimes.com" in (result["reason"] or "")
+
+
+def test_chinese_wsj_and_ft_editions_stay_paywalled():
+    # These do gate their content, so they must not inherit the exemption.
+    for url in (
+        "https://cn.wsj.com/articles/x",
+        "https://cn.ft.com/story/001111395",
+    ):
+        result = Fetcher._detect_paywall(_short_cn_article(), url=url)
+        assert result["detected"] is True, url
+
+
+def test_free_edition_exemption_needs_a_real_subdomain():
+    # "cn.nytimes.com.evil.example" must not be treated as the free edition.
+    result = Fetcher._detect_paywall(
+        _short_cn_article(), url="https://cn.nytimes.com.evil.example/x"
+    )
+    assert "free-edition host" not in (result["reason"] or "")
+    assert result["detected"] is False  # unknown domain, no other marker
+
+
+# --- error pages are not articles ------------------------------------------
+
+
+def test_page_not_found_text_is_detected():
+    html = (
+        "<html><head><title>页面没有找到 - 纽约时报中文网</title></head><body>"
+        "<article><h1>页面没有找到</h1><p>对不起，您访问的页面未找到！</p></article>"
+        "</body></html>"
+    )
+    assert Fetcher._is_not_found_page(html) is True
+    assert Fetcher._is_not_found_page("<html><body><h1>Page Not Found</h1></body></html>") is True
+
+
+def test_http_4xx_is_not_found():
+    assert Fetcher._is_not_found_page("<html><body>anything</body></html>", status_code=404) is True
+    assert Fetcher._is_not_found_page("<html><body>fine</body></html>", status_code=200) is False
+
+
+def test_long_article_mentioning_404_is_still_an_article():
+    body = "".join(
+        f"<p>This paragraph discusses HTTP 404 error pages in depth. {i}</p>" for i in range(60)
+    )
+    html = f"<html><head><title>The history of the 404 page</title></head><body>{body}</body></html>"
+    assert len(BeautifulSoup(html, "html.parser").get_text(" ", strip=True)) > 3000
+    assert Fetcher._is_not_found_page(html) is False
+
+
+def test_normal_article_is_not_an_error_page():
+    html = (
+        "<html><head><title>Anthropic创纪录IPO - 纽约时报中文网</title></head><body>"
+        "<article><div class='article-paragraph'>这是史上最大的首次公开募股。</div></article>"
+        "</body></html>"
+    )
+    assert Fetcher._is_not_found_page(html) is False
+    assert Fetcher._is_not_found_page("") is False
