@@ -246,7 +246,8 @@ included.
 
 The default. Files are written to `[Output] md_dir` and named after the title, with a YAML
 front matter block recording `title`, `source`, `created`, `description`, and — when
-translation actually changed the text — `translator`.
+translation actually changed the text — `translator`. GitHub repositories that declare a
+project homepage also get a `github` field (see below).
 
 ```bash
 uv run surf "https://example.com" --no-front-matter   # skip the front matter block
@@ -553,9 +554,11 @@ of those defaults can be overridden by an explicit flag.
 - **Xiaohongshu** fetches the server-rendered note page with saved cookies first and only
   falls back to a browser; expired auth and risk-control responses are reported as errors
   instead of being emitted as content.
-- **GitHub** fetches the resolved README/blob file while keeping the page URL you entered
-  in the front matter `source`. Embedded HTML fragments in Markdown are converted back to
-  Markdown; fenced code examples are preserved.
+- **GitHub** fetches the resolved README/blob file. For a repository root (`/owner/repo`)
+  whose About sidebar declares a project homepage, front matter `source` is that homepage
+  and the GitHub URL moves to its own `github` field; without one, `source` stays on GitHub.
+  Embedded HTML fragments in Markdown are converted back to Markdown; fenced code examples
+  are preserved.
 - **Foreign Affairs** strips the share/citation modal and subscription pitch so freely
   readable essays are not mistaken for paywalled ones.
 - **Boilerplate is stripped after extraction**: ad slots and ad labels, "editors'

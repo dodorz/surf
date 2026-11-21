@@ -2536,6 +2536,17 @@ class Fetcher:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
 
+        homepage = None
+        # A repository root is /owner/repo; anything deeper is a file view, which
+        # has no project homepage of its own in the About sidebar.
+        repo_root_target = next(
+            (
+                target
+                for target in targets
+                if len([p for p in (urlparse(target["source_url"]).path or "").split("/") if p]) <= 2
+            ),
+            None,
+        )
         last_error = None
         for target in targets:
             try:
@@ -2546,12 +2557,23 @@ class Fetcher:
                 response.raise_for_status()
                 markdown_text = Fetcher._decode_response_text(response)
                 if markdown_text and markdown_text.strip():
+                    extra_meta = {"surf-github-url": target["source_url"]}
+                    if homepage is None and repo_root_target is not None:
+                        homepage = Fetcher._fetch_github_homepage(
+                            repo_root_target["source_url"],
+                            headers=headers,
+                            proxies=req_proxies,
+                        ) or ""
+                    if homepage:
+                        extra_meta["surf-github-homepage"] = homepage
+                        logger.info(f"GitHub homepage found: {homepage}")
                     return _build_direct_markdown_payload(
                         markdown_text=markdown_text,
                         title=target["title"],
                         source_url=target["source_url"],
                         site_name="github",
                         base_url=target.get("base_url") or target["source_url"],
+                        extra_meta=extra_meta,
                     )
             except Exception as exc:
                 last_error = exc
@@ -9494,6 +9516,94 @@ class Fetcher:
             finally:
                 context.close()
 
+    # The repository's own "About" sidebar carries the project homepage and the
+    # topics, and the page markup is heavily refactored by GitHub, so the values
+    # are read from the sidebar container rather than from a fixed selector.
+    _GITHUB_HOMEPAGE_REL_BLOCKLIST = (
+        "topic", "readme", "license", "activity", "fork", "contact", "releases",
+        "tag", "tree", "issues", "pull", "security", "pulse", "network",
+        "dependency", "custom-properties", "community", "code-of-conduct",
+        "contributing", "citation", "watching", "stargazer",
+    )
+
+    @staticmethod
+    def _fetch_github_homepage(repo_url, headers=None, proxies=None, timeout=15):
+        """Fetch the repository page and read its About-sidebar homepage.
+
+        Failures are logged and return None: the homepage field is a bonus, it
+        must never fail the fetch.
+        """
+        if not repo_url:
+            return None
+        try:
+            response = _requests_get_interruptibly(
+                repo_url,
+                headers=headers or {"User-Agent": "Mozilla/5.0"},
+                proxies=proxies,
+                timeout=timeout,
+            )
+            if response.status_code != 200:
+                logger.info(f"GitHub homepage lookup skipped: HTTP {response.status_code}")
+                return None
+            soup = BeautifulSoup(Fetcher._decode_response_text(response), "html.parser")
+            return Fetcher._extract_github_homepage(soup)
+        except Exception as exc:
+            logger.debug(f"GitHub homepage lookup failed for {repo_url}: {exc}")
+            return None
+
+    @staticmethod
+    def _extract_github_homepage(soup):
+        """Project homepage from a repository page's About sidebar, or None.
+
+        GitHub renders it as an external link whose text is the bare domain
+        (``preactjs.com``). Only links that leave github.com qualify, and the
+        sidebar's own navigation links (topics, readme anchor, forks, ...) are
+        excluded so they cannot be mistaken for the homepage.
+        """
+        if soup is None:
+            return None
+        # Pick the *innermost* matching block: the page wrapper and <body> also
+        # start with "About" once the sidebar is inside them, and they contain
+        # the site-wide menu ("About Partners Changelog") as well.
+        containers = []
+        for container in soup.find_all(True):
+            text = container.get_text(" ", strip=True)
+            if not text.startswith("About "):
+                continue
+            # The repository sidebar's About block lists the repo's Resources;
+            # the global site menu ("About Partners Changelog") and the page
+            # wrapper are not that block. The length cap is only a sanity bound
+            # (repos with many topics run past 400 chars) - picking the innermost
+            # match below is what keeps the wrapper out.
+            if len(text) > 2000 or "Resources" not in text:
+                continue
+            containers.append((len(text), container))
+        containers.sort(key=lambda item: item[0])
+
+        candidates = []
+        for _length, container in containers[:1]:
+            for anchor in container.find_all("a", href=True):
+                href = (anchor.get("href") or "").strip()
+                if href.startswith("//"):
+                    href = f"https:{href}"
+                if not href.lower().startswith(("http://", "https://")):
+                    continue
+                host = (urlparse(href).netloc or "").split("@")[-1].split(":")[0].lower()
+                if not host or host in {"github.blog", "github.com", "githubusercontent.com"}:
+                    continue
+                if host.endswith((".github.com", ".github.io", ".githubusercontent.com")):
+                    continue
+                if host.endswith(tuple(f".{suffix}" for suffix in ("github.io", "github.com"))):
+                    continue
+                # The sidebar's own navigation (topics, #readme anchor, forks,
+                # activity, ...) is either a github.com path or carries one of
+                # these slugs, so it never reaches this point.
+                path = (urlparse(href).path or "").lower()
+                if any(part in path for part in Fetcher._GITHUB_HOMEPAGE_REL_BLOCKLIST):
+                    continue
+                candidates.append(href)
+        return candidates[0] if candidates else None
+
     @staticmethod
     def _fetch_github_readme(url, config, proxy_mode_override=None, custom_proxy_override=None):
         """
@@ -9643,6 +9753,18 @@ class Fetcher:
                 title = readme_data.get("title", repo)
                 description = readme_data.get("description", "")
 
+                # The About sidebar carries the project homepage; it becomes the
+                # front-matter source, while the GitHub URL moves to `github`.
+                homepage = None
+                if len([part for part in (parsed.path or "").split("/") if part]) <= 2:
+                    try:
+                        page_html = page.content()
+                        homepage = Fetcher._extract_github_homepage(
+                            BeautifulSoup(page_html, "html.parser")
+                        )
+                    except Exception as exc:
+                        logger.debug(f"GitHub homepage extraction failed: {exc}")
+
                 html_parts = [
                     "<!DOCTYPE html>",
                     '<html lang="en"><head>',
@@ -9652,6 +9774,10 @@ class Fetcher:
 
                 if description:
                     html_parts.append(f'<meta name="description" content="{description}">')
+                html_parts.append(f'<meta name="surf-github-url" content="{url}">')
+                if homepage:
+                    html_parts.append(f'<meta name="surf-github-homepage" content="{homepage}">')
+                    logger.info(f"GitHub homepage found: {homepage}")
 
                 html_parts.extend([
                     "</head><body>",
@@ -16034,6 +16160,8 @@ class OutputHandler:
             "source": source_url,
             "translator": translator,
             "archive": archive_url,
+            # Set only for GitHub repositories that declare their own homepage.
+            "github": None,
         }
         if metadata["source"]:
             metadata["source"] = OutputHandler._canonicalize_generic_source_url(metadata["source"])
@@ -16062,6 +16190,16 @@ class OutputHandler:
                 author_value = (zhihu_author_tag.get("content") or "").strip()
                 if author_value:
                     metadata["author"] = OutputHandler.normalize_markdown_encoding(author_value)
+        elif source_site == "github":
+            # A repository with its own homepage: the project site is the real
+            # source, and the GitHub URL moves to its own field.
+            github_url_tag = soup.find("meta", attrs={"name": "surf-github-url"})
+            homepage_tag = soup.find("meta", attrs={"name": "surf-github-homepage"})
+            github_url = (github_url_tag.get("content") or "").strip() if github_url_tag else ""
+            homepage = (homepage_tag.get("content") or "").strip() if homepage_tag else ""
+            if github_url and homepage:
+                metadata["source"] = OutputHandler._normalize_frontmatter_scalar(homepage)
+                metadata["github"] = OutputHandler._normalize_frontmatter_scalar(github_url)
         elif source_site in {"pocketcasts", "xiaoyuzhoufm"}:
             podcast_author_tag = soup.find("meta", attrs={"name": "surf-author"})
             if podcast_author_tag:
@@ -16326,6 +16464,9 @@ class OutputHandler:
             search_query = OutputHandler._normalize_frontmatter_scalar(metadata["search_query"])
             if search_query:
                 lines.append(f"search_query: {search_query}")
+
+        if metadata.get("github"):
+            lines.append(f"github: {metadata['github']}")
 
         if metadata.get("archive"):
             lines.append(f"archive: {metadata['archive']}")

@@ -478,7 +478,7 @@ surf "https://www.xiaohongshu.com/..." -l trans
 - 优先提取语言特定的 README（如 README_zh.md）
 - 自动移除 permalink 锚点链接，避免空链接显示
 - 提取仓库标题和描述信息
-- 仓库页（如 `https://github.com/USER/REPO`）会从实际 README Markdown 文件抓取内容，但 front matter 的 `source` 保留仓库页 URL
+- 仓库页（如 `https://github.com/USER/REPO`）会从实际 README Markdown 文件抓取内容。front matter 的 `source` 默认是仓库页 URL；如果仓库右侧 About 里声明了项目主页（如 `<a href="https://preactjs.com">preactjs.com</a>`），则 `source` 写该主页，GitHub 地址移到独立的 `github` 字段。主页只从「同时列出仓库 Resources 的最内层 About 区块」读取，因此站点级菜单（About Partners Changelog）与侧栏导航（topics、readme 锚点、forks、activity）不会被误取
 - 不带分支的 Markdown 文件 URL（如 `https://github.com/USER/REPO/PATH/TO/FILE.md`）会尝试从 `main` / `master` 分支抓取实际文件，但 front matter 的 `source` 保留用户输入的无分支 URL
 - 直接抓取到的 Markdown 中若包含内嵌 HTML 片段，会继续转换为 Markdown；代码围栏中的 HTML 示例保持原样
 - Markdown 正文中的相对链接仍按实际抓取的 blob 文件 URL 解析，不受 `source` 保留策略影响

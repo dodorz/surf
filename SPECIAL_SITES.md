@@ -221,7 +221,7 @@ For exact regex patterns and handler names, see `SPECIAL_SITE_HANDLERS` in `surf
 - Falls back to abstract page content extraction if the HTML version is unavailable.
 
 ### GitHub
-- Repo URLs such as `https://github.com/USER/REPO` fetch the best matching README Markdown file directly, while front matter `source` remains the repo URL.
+- Repo URLs such as `https://github.com/USER/REPO` fetch the best matching README Markdown file directly. Front matter `source` is the repository URL unless the repo's About sidebar declares a project homepage (`<a href="https://preactjs.com">preactjs.com</a>`), in which case `source` becomes that homepage and the GitHub URL moves to a separate `github` field. The homepage is read from the innermost About block that also lists the repo's Resources, so the site-wide "About Partners Changelog" menu and sidebar links (topics, readme anchor, forks, activity) are never picked.
 - Branchless Markdown URLs such as `https://github.com/USER/REPO/PATH/TO/FILE.md` fetch from `main`/`master` candidates, while front matter `source` remains the branchless URL.
 - Embedded HTML fragments inside directly fetched Markdown are converted back to Markdown while fenced code examples are preserved.
 - Relative links inside fetched Markdown are resolved against the actual blob URL used for content, not the preserved source URL.
