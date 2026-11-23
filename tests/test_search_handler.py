@@ -515,3 +515,96 @@ def test_save_markdown_filename_prefix_and_search_query(tmp_path):
     text = (tmp_path / "kw-Example Title.md").read_text(encoding="utf-8")
     assert "title: Example Title" in text
     assert "search_query: example keywords" in text
+
+
+# --- configurable multi-engine order ----------------------------------------
+
+
+def test_engine_order_honours_the_configured_sequence():
+    config = _FakeConfig(
+        {
+            ("Search", "engine_order"): "deepseek, bing, duckduckgo",
+            ("Search", "deepseek_api_key"): "sk-deepseek",
+        }
+    )
+    order = surf.SearchHandler._engine_order(config)
+    # Written order first, unmentioned configured engines appended as a tail.
+    assert order == ["deepseek", "bing", "duckduckgo"]
+
+
+def test_engine_order_keeps_unmentioned_usable_engines_as_tail():
+    config = _FakeConfig(
+        {
+            ("Search", "engine_order"): "deepseek",
+            ("Search", "deepseek_api_key"): "sk-deepseek",
+        }
+    )
+    assert surf.SearchHandler._engine_order(config) == ["deepseek", "duckduckgo", "bing"]
+
+
+def test_engine_order_listing_an_unconfigured_engine_is_allowed():
+    # The key is missing, so deepseek will fail at call time - the order must
+    # still say "deepseek first", not silently drop it.
+    config = _FakeConfig({("Search", "engine_order"): "deepseek,metaso"})
+    assert surf.SearchHandler._engine_order(config) == ["deepseek", "metaso", "duckduckgo", "bing"]
+
+
+def test_engine_order_ignores_unknown_names(caplog):
+    config = _FakeConfig({("Search", "engine_order"): "deepseek,altavista,bing"})
+    assert surf.SearchHandler._engine_order(config) == ["deepseek", "bing", "duckduckgo"]
+    assert "altavista" in caplog.text
+
+
+def test_engine_order_defaults_without_the_setting():
+    config = _FakeConfig({})
+    assert surf.SearchHandler._engine_order(config) == ["duckduckgo", "bing"]
+
+    config = _FakeConfig(
+        {
+            ("Search", "deepseek_api_key"): "sk-deepseek",
+            ("Search", "searxng_url"): "https://searx.example",
+            ("Search", "metaso_api_key"): "sk-metaso",
+        }
+    )
+    assert surf.SearchHandler._engine_order(config) == [
+        "duckduckgo",
+        "bing",
+        "deepseek",
+        "searxng",
+        "metaso",
+    ]
+
+
+def test_engine_order_is_used_for_engine_auto(monkeypatch):
+    order = surf.SearchHandler._engine_order(
+        _FakeConfig(
+            {
+                ("Search", "engine_order"): "deepseek,bing",
+                ("Search", "deepseek_api_key"): "sk-deepseek",
+            }
+        )
+    )
+    tried = []
+
+    def fake_engine(engine_name, query, max_results, proxies, config):
+        tried.append(engine_name)
+        if engine_name == "deepseek":
+            raise RuntimeError("deepseek down")
+        return [{"title": "t", "url": "https://example.com/a"}]
+
+    monkeypatch.setattr(surf.SearchHandler, "_search_engine", fake_engine)
+    results = surf.SearchHandler.search(
+        "kw",
+        engine="auto",
+        config=_FakeConfig(
+            {
+                ("Search", "engine_order"): "deepseek,bing",
+                ("Search", "deepseek_api_key"): "sk-deepseek",
+            }
+        ),
+    )
+
+    assert results
+    # deepseek was tried first and failed, then the next engine in the order.
+    assert tried[:2] == ["deepseek", "bing"]
+    assert order[0] == "deepseek"

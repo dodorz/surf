@@ -679,12 +679,14 @@ normal fetch → extract → translate → save pipeline. One failing result is 
 skipped instead of aborting the batch.
 
 **Engines** — `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek` (default:
-`[Search] engine`, `auto`). `auto` tries DuckDuckGo, then Bing, then any configured
-DeepSeek/SearXNG/Metaso API.
+`[Search] engine`, `auto`). `auto` follows `[Search] engine_order`, which defaults to
+keyless engines first (DuckDuckGo → Bing) and then the configured API engines
+(DeepSeek → SearXNG → Metaso).
 
 ```ini
 [Search]
 engine = auto
+engine_order =                        ; e.g. deepseek, bing, duckduckgo
 limit = 5             ; results retrieved per run, 1-20
 preview = 5           ; rows shown in the interactive picker
 searxng_url =         ; self-hosted instance with the JSON API enabled
@@ -692,6 +694,12 @@ metaso_api_key =      ; https://metaso.cn open API
 deepseek_api_key =    ; POST https://api.deepseek.com/v1/tools/search
 deepseek_url =        ; optional endpoint override
 ```
+
+`engine_order` is honoured as written: the listed engines are tried in that order, and any
+usable engine you left out is appended as a last-resort tail (so a stale key on your first
+choice cannot silence the search). Naming an engine whose credentials are missing is
+allowed — it simply fails and the next candidate runs. Unknown names are ignored with a
+warning. The chosen order is logged as `Search engine order: a -> b -> c`.
 
 DeepSeek search supports `site:`, `lang:`, `after:`, `before:`, exact phrases, and
 exclusion.

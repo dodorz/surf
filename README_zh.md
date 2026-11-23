@@ -501,11 +501,12 @@ uv run surf -S "python asyncio 教程" --search-preview 3 --search-delay 2
 
 `-S` 把位置参数变成关键词。Surf 先搜索，把前 `--search-preview` 条结果打印成编号列表，再让选中的 URL 走完整的 抓取 → 提取 → 翻译 → 保存 流程。单条失败只记日志并跳过，不会中断整批。
 
-**引擎** —— `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek`（默认取 `[Search] engine`，即 `auto`）。`auto` 依次尝试 DuckDuckGo、Bing，再尝试已配置的 DeepSeek/SearXNG/Metaso API。
+**引擎** —— `--search-engine auto|duckduckgo|bing|searxng|metaso|deepseek`（默认取 `[Search] engine`，即 `auto`）。`auto` 按 `[Search] engine_order` 指定的顺序尝试；默认顺序是免 key 的引擎在前（DuckDuckGo → Bing），再接已配置的 API 引擎（DeepSeek → SearXNG → Metaso）。
 
 ```ini
 [Search]
 engine = auto
+engine_order =                        ; 例如 deepseek, bing, duckduckgo
 limit = 5             ; 每次获取的结果数，1-20
 preview = 5           ; 交互列表显示的行数
 searxng_url =         ; 已开启 JSON API 的自建实例
@@ -513,6 +514,8 @@ metaso_api_key =      ; https://metaso.cn 开放 API
 deepseek_api_key =    ; POST https://api.deepseek.com/v1/tools/search
 deepseek_url =        ; 可选接口覆盖
 ```
+
+`engine_order` 按字面顺序生效：列出的引擎依次尝试，未列出但可用的引擎会追加在末尾兜底（避免首选 key 失效就什么都搜不到）。可以写尚未配置凭证的引擎——它只会失败一次，接着试下一个。无法识别的名字会被忽略并告警。最终采用的顺序会以 `Search engine order: a -> b -> c` 写进日志。
 
 DeepSeek 搜索支持 `site:`、`lang:`、`after:`、`before:`、精确短语和排除语法。
 

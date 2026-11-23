@@ -49,8 +49,17 @@ extractor = auto
 
 [Search]
 ; Keywords -> search engine -> interactive pick -> fetch/convert/save (CLI -S/--search).
-; Engine: auto (DuckDuckGo, Bing, then configured DeepSeek/SearXNG/Metaso), duckduckgo, bing, searxng, metaso, deepseek
+; Engine: auto (follow engine_order below), duckduckgo, bing, searxng, metaso, deepseek
 engine = auto
+; Engines tried, in this order, when engine = auto. Comma-separated; settings are
+; honoured as written, so listing a not-yet-configured engine is fine (it just fails
+; and the next one runs). Engines you leave out are appended as a last-resort tail.
+; Leave empty for the default: keyless engines first (DuckDuckGo, Bing), then any
+; configured API engine (DeepSeek, SearXNG, Metaso).
+; Example for a DeepSeek-only setup behind a Chinese network:
+;   engine_order = deepseek, bing, duckduckgo
+engine_order =
+
 ; Number of search results to retrieve per run (1-20)
 limit = 5
 ; Interactive picker size when --search-preview is not given

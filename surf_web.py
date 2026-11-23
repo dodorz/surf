@@ -3090,7 +3090,7 @@ def get_web_ui_context(config):
         default_search_limit = SearchHandler.DEFAULT_LIMIT
     default_search_limit = max(1, min(default_search_limit, SearchHandler.MAX_LIMIT))
     search_engine_labels = {
-        "auto": "自动（DuckDuckGo → Bing → DeepSeek/SearXNG/Metaso）",
+        "auto": "自动（按 [Search] engine_order）",
         "duckduckgo": "DuckDuckGo",
         "bing": "Bing",
         "searxng": "SearXNG（需配置实例）",

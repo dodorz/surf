@@ -13882,17 +13882,66 @@ class SearchHandler:
             raise ValueError(f"DeepSeek search API error: {message}")
         return cls._parse_json_results(payload, max_results)
 
+    # Engines usable in ``[Search] engine_order``; ``auto`` itself is not one.
+    DEFAULT_ENGINE_ORDER = ("duckduckgo", "bing", "deepseek", "searxng", "metaso")
+
     @classmethod
-    def _auto_engine_order(cls, config):
-        order = ["duckduckgo", "bing"]
+    def _configured_engines(cls, config):
+        """Engines that are actually usable with the current config."""
+        usable = {"duckduckgo", "bing"}
         if config is not None:
             if (config.get("Search", "deepseek_api_key", fallback="") or "").strip():
-                order.append("deepseek")
+                usable.add("deepseek")
             if (config.get("Search", "searxng_url", fallback="") or "").strip():
-                order.append("searxng")
+                usable.add("searxng")
             if (config.get("Search", "metaso_api_key", fallback="") or "").strip():
-                order.append("metaso")
+                usable.add("metaso")
+        return usable
+
+    @classmethod
+    def _engine_order(cls, config):
+        """Engines to try, in order, when the caller did not pin one.
+
+        ``[Search] engine_order`` is a comma-separated list and is honoured as
+        written (an entry may name an engine that is not configured yet - it
+        then just fails and the next candidate runs). Without it, engines that
+        need credentials come after the keyless ones, so a missing key can never
+        be the reason a search returns nothing.
+        """
+        usable = cls._configured_engines(config)
+        order = []
+        if config is not None:
+            raw = (config.get("Search", "engine_order", fallback="") or "").strip()
+            for part in raw.split(","):
+                name = part.strip().lower()
+                if not name:
+                    continue
+                if name in order:
+                    continue
+                if name not in cls.ENGINES:
+                    logger.warning(
+                        "Ignoring unknown engine %r in [Search] engine_order (valid: %s)",
+                        name,
+                        ", ".join(cls.ENGINES),
+                    )
+                    continue
+                order.append(name)
+        if not order:
+            for name in cls.DEFAULT_ENGINE_ORDER:
+                if name in usable:
+                    order.append(name)
+        else:
+            # Keep engines the user did not mention as a last-resort tail so the
+            # list stays useful when credentials for the first choice go stale.
+            for name in cls.DEFAULT_ENGINE_ORDER:
+                if name in usable and name not in order:
+                    order.append(name)
         return order
+
+    @classmethod
+    def _auto_engine_order(cls, config):
+        """Engines tried for ``engine = auto`` (kept as the public entry point)."""
+        return cls._engine_order(config)
 
     @classmethod
     def search(cls, keywords, engine=None, limit=None, config=None,
@@ -13901,8 +13950,9 @@ class SearchHandler:
 
         Results are deduplicated, tracked query parameters are stripped,
         restricted to http(s) links, and truncated to *limit*. Search requests
-        honor the same proxy settings as page fetches. ``engine="auto"`` tries
-        DuckDuckGo, then Bing, and finally configured DeepSeek/SearXNG/Metaso APIs.
+        honor the same proxy settings as page fetches. ``engine="auto"`` follows
+        ``[Search] engine_order`` (see :meth:`_engine_order`); without it, keyless
+        engines run first (DuckDuckGo, Bing) and the configured API engines follow.
         """
         query = (keywords or "").strip()
         if not query:
@@ -13923,9 +13973,12 @@ class SearchHandler:
             proxies, _ = Fetcher._get_proxies(config, proxy_mode_override, custom_proxy_override)
 
         if engine_name == "auto":
-            candidates = cls._auto_engine_order(config)
+            candidates = cls._engine_order(config)
         else:
             candidates = (engine_name,)
+
+        if len(candidates) > 1:
+            logger.info("Search engine order: %s", " -> ".join(candidates))
 
         last_error = None
         for candidate in candidates:
@@ -19585,8 +19638,8 @@ Exit status is 0 on success and non-zero when the input could not be processed.
     group.add_argument(
         "--search-engine",
         choices=list(SearchHandler.ENGINE_CHOICES),
-        help="auto = DuckDuckGo, then Bing, then the configured DeepSeek/SearXNG/Metaso; or "
-        "force one engine (default: [Search] engine)",
+        help="auto = follow [Search] engine_order (default: DuckDuckGo, Bing, then the "
+        "configured DeepSeek/SearXNG/Metaso); or force one engine (default: [Search] engine)",
     )
     group.add_argument(
         "--search-limit",
