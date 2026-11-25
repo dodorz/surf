@@ -9,6 +9,8 @@ the existing form data into ``/api/save``, ``/api/save-async``, and
 """
 import asyncio
 
+import pytest
+
 import surf_web
 from surf import Config, TTSHandler, _apply_tts_overrides
 from surf_web import build_tts_voice_options
@@ -353,3 +355,80 @@ def test_web_play_audio_rejects_content_without_words(monkeypatch):
     payload = response.get_json()
     assert payload["success"] is False
     assert "没有可朗读的文字" in payload["error"]
+
+
+# --- retry on the transient "No audio was received" failures ---------------
+# Microsoft's TTS endpoint intermittently drops the websocket after ~2.5s even
+# for valid requests (edge-tts issues #473 / #512); a retry usually succeeds.
+
+
+def test_transient_tts_errors_are_retryable():
+    assert TTSHandler._is_transient_tts_error(RuntimeError("No audio was received")) is True
+    assert TTSHandler._is_transient_tts_error(RuntimeError("websocket closed 1006")) is True
+    assert TTSHandler._is_transient_tts_error(RuntimeError("Connection reset by peer")) is True
+    assert TTSHandler._is_transient_tts_error(RuntimeError("permission denied")) is False
+
+
+def test_generate_speech_retries_a_transient_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(TTSHandler, "TTS_RETRY_DELAY", 0)
+    calls = []
+
+    def fake_communicate(text, voice, rate="+0%", volume="+0%"):
+        calls.append(voice)
+
+        class _Fake:
+            async def save(self, path):
+                if len(calls) == 1:
+                    raise RuntimeError("No audio was received")
+                with open(path, "wb") as handle:
+                    handle.write(b"fake-mp3")
+
+        return _Fake()
+
+    monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
+    target = tmp_path / "retry.mp3"
+    asyncio.run(TTSHandler.generate_speech("测试句子。", str(target), _make_config(tmp_path)))
+
+    assert len(calls) == 2
+    assert target.stat().st_size > 0
+
+
+def test_generate_speech_gives_up_after_the_attempt_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(TTSHandler, "TTS_RETRY_DELAY", 0)
+    calls = []
+
+    def fake_communicate(text, voice, rate="+0%", volume="+0%"):
+        calls.append(voice)
+
+        class _Fake:
+            async def save(self, path):
+                raise RuntimeError("No audio was received")
+
+        return _Fake()
+
+    monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(TTSHandler.generate_speech("测试句子。", str(tmp_path / "x.mp3"), _make_config(tmp_path)))
+
+    assert len(calls) == TTSHandler.TTS_ATTEMPTS
+    assert "attempt" in str(excinfo.value)
+
+
+def test_generate_speech_does_not_retry_a_non_transient_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(TTSHandler, "TTS_RETRY_DELAY", 0)
+    calls = []
+
+    def fake_communicate(text, voice, rate="+0%", volume="+0%"):
+        calls.append(voice)
+
+        class _Fake:
+            async def save(self, path):
+                raise RuntimeError("permission denied")
+
+        return _Fake()
+
+    monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
+    with pytest.raises(RuntimeError):
+        asyncio.run(TTSHandler.generate_speech("测试句子。", str(tmp_path / "y.mp3"), _make_config(tmp_path)))
+
+    assert len(calls) == 1

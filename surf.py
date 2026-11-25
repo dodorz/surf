@@ -18451,8 +18451,39 @@ class TTSHandler:
             and cls._has_words(cleaned)
         )
 
+    # Microsoft's TTS endpoint drops connections transiently: upstream reports
+    # intermittent ``NoAudioReceived`` with WebSocket close code 1006 after ~2.5s
+    # even for valid requests (rany2/edge-tts issues #473 and #512), and a
+    # retry a few seconds later usually succeeds. Three attempts, a small
+    # backoff, and only transient-looking failures get retried.
+    TTS_ATTEMPTS = 3
+    TTS_RETRY_DELAY = 2.0
+
     @staticmethod
-    async def generate_speech(text, output_file, config):
+    def _is_transient_tts_error(error):
+        """Whether a TTS failure is worth retrying.
+
+        An invalid voice name also surfaces as "No audio was received", so this
+        cannot be perfectly precise; retrying a bad name costs a few seconds and
+        the final message still points at the voice setting.
+        """
+        text = str(error or "").lower()
+        transient_markers = (
+            "no audio was received",
+            "websocket",
+            "cannot connect",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+            "temporarily unavailable",
+            "server disconnected",
+            "1006",
+        )
+        return any(marker in text for marker in transient_markers)
+
+    @classmethod
+    async def generate_speech(cls, text, output_file, config):
         voice = config.get("TTS", "voice", fallback="zh-CN-XiaoxiaoNeural")
         rate = config.get("TTS", "rate", fallback="+0%")
         volume = config.get("TTS", "volume", fallback="+0%")
@@ -18464,22 +18495,40 @@ class TTSHandler:
         # Surf used to produce empty .mp3 files.
         target = resolve_user_path(output_file)
         temp_path = f"{target}.part"
-        try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
-            await communicate.save(temp_path)
-            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                raise RuntimeError(
-                    "edge-tts produced no audio "
-                    "(check the voice name, the text language, and network access to the TTS service)"
-                )
-            os.replace(temp_path, target)
-        finally:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-        logger.info(f"Audio saved to {target} ({os.path.getsize(target)} bytes)")
+
+        last_error = None
+        for attempt in range(1, cls.TTS_ATTEMPTS + 1):
+            try:
+                communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+                await communicate.save(temp_path)
+                if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                    raise RuntimeError("edge-tts produced no audio")
+                os.replace(temp_path, target)
+                logger.info(f"Audio saved to {target} ({os.path.getsize(target)} bytes)")
+                return
+            except Exception as exc:
+                last_error = exc
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                if attempt < cls.TTS_ATTEMPTS and cls._is_transient_tts_error(exc):
+                    logger.warning(
+                        "TTS attempt %d/%d failed (%s); retrying in %.1fs",
+                        attempt,
+                        cls.TTS_ATTEMPTS,
+                        exc,
+                        cls.TTS_RETRY_DELAY * attempt,
+                    )
+                    await asyncio.sleep(cls.TTS_RETRY_DELAY * attempt)
+                    continue
+                break
+
+        raise RuntimeError(
+            f"edge-tts failed after {cls.TTS_ATTEMPTS} attempt(s): {last_error}. "
+            f"Check [TTS] voice ({voice}) and network access to the TTS service."
+        )
 
     @staticmethod
     def play_audio(file_path):
