@@ -311,6 +311,12 @@ can be overridden per run. For Pocket Casts and Xiaoyuzhou episodes, `-a` downlo
 original episode audio instead (keeping the source extension, e.g. `.m4a`), bounded by
 `[Transcription] max_audio_mb` and `audio_timeout`.
 
+Audio is synthesised into a `*.part` file and only moved into place once it actually
+contains audio, so an empty `.mp3` is never produced. A page whose text is only images,
+symbols or whitespace is reported (`TTS skipped: nothing to read aloud here`) and the
+command exits non-zero; a failed synthesis also removes its leftovers instead of leaving a
+0-byte file behind.
+
 ### Pastebin
 
 ```bash

@@ -76,13 +76,17 @@ def test_tts_handler_reads_overridden_config(tmp_path, monkeypatch):
 
         class _Fake:
             async def save(self, path):
-                return None
+                # generate_speech writes to "<target>.part" and only publishes a
+                # file that actually contains audio.
+                with open(path, "wb") as handle:
+                    handle.write(b"fake-mp3")
 
         return _Fake()
 
     monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
     asyncio.run(TTSHandler.generate_speech("hello", str(tmp_path / "out.mp3"), config))
     assert captured == {"voice": "en-US-AriaNeural", "rate": "+10%", "volume": "-20%"}
+    assert (tmp_path / "out.mp3").stat().st_size > 0
 
 
 # --- Web UI voice options ---------------------------------------------------
@@ -141,6 +145,7 @@ def test_save_audio_applies_tts_overrides_from_form_data(monkeypatch, tmp_path):
             rate=config.get("TTS", "rate"),
             volume=config.get("TTS", "volume"),
         )
+        return save_path
 
     monkeypatch.setattr(surf_web.TTSHandler, "run_tts", staticmethod(fake_run_tts))
     response = surf_web.app.test_client().post(
@@ -171,6 +176,7 @@ def test_save_audio_without_tts_fields_keeps_config_defaults(monkeypatch, tmp_pa
             rate=config.get("TTS", "rate", fallback="+0%"),
             volume=config.get("TTS", "volume", fallback="+0%"),
         )
+        return save_path
 
     monkeypatch.setattr(surf_web.TTSHandler, "run_tts", staticmethod(fake_run_tts))
     monkeypatch.setattr(
@@ -195,6 +201,7 @@ def test_save_job_audio_applies_tts_overrides(monkeypatch):
 
     def fake_run_tts(title, content, config, speak=False, save_path=None):
         captured.update(voice=config.get("TTS", "voice"))
+        return save_path
 
     monkeypatch.setattr(surf_web.TTSHandler, "run_tts", staticmethod(fake_run_tts))
     monkeypatch.setattr(
@@ -245,3 +252,104 @@ def test_play_audio_applies_tts_overrides(monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["success"] is True
     assert captured["voice"] == "en-US-JennyNeural"
+
+
+# --- empty audio files ------------------------------------------------------
+# edge-tts creates the destination up front and leaves 0 bytes when the request
+# yields no audio. Surf used to hand that file to the user; it must instead
+# refuse to synthesise and clean up after a failure.
+
+
+def test_text_cleaning_strips_markdown_scaffolding():
+    cleaned = TTSHandler.clean_text_for_tts(
+        "![](http://a/b.jpg)\n\n# 标题\n\n**粗体** [链接](http://x)\n\n---\n<p>html</p>"
+    )
+    assert "http" not in cleaned
+    assert "标题" in cleaned and "粗体" in cleaned and "链接" in cleaned
+    assert "#" not in cleaned and "*" not in cleaned and "<p>" not in cleaned
+
+
+def test_only_images_symbols_or_whitespace_are_not_speakable():
+    for content in (
+        "",
+        " \n \n \n",
+        "---\n###\n**\n```",
+        "![](http://a/b.jpg)",
+        "！！！……？？",
+    ):
+        assert TTSHandler.has_speakable_text(content) is False, repr(content)
+
+
+def test_real_text_is_speakable():
+    assert TTSHandler.has_speakable_text("这是测试文本内容。") is True
+    assert TTSHandler.has_speakable_text("Hello world.") is True
+
+
+def test_run_tts_skips_empty_content_without_leaving_a_file(tmp_path):
+    out = tmp_path / "empty.mp3"
+    assert TTSHandler.run_tts("t", "![](http://a/b.jpg)", _make_config(tmp_path), save_path=str(out)) is None
+    assert not out.exists()
+
+
+def test_run_tts_does_not_publish_a_zero_byte_file(tmp_path, monkeypatch):
+    config = _make_config(tmp_path)
+    out = tmp_path / "zero.mp3"
+
+    def fake_communicate(text, voice, rate="+0%", volume="+0%"):
+        class _Fake:
+            async def save(self, path):
+                # What edge-tts does when the request returns no audio.
+                open(path, "wb").close()
+
+        return _Fake()
+
+    monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
+    assert TTSHandler.run_tts("t", "这是一个足够长的测试句子。", config, save_path=str(out)) is None
+    assert not out.exists()
+    assert not out.with_name("zero.mp3.part").exists()
+
+
+def test_run_tts_returns_the_path_on_success(tmp_path, monkeypatch):
+    config = _make_config(tmp_path)
+    out = tmp_path / "ok.mp3"
+
+    def fake_communicate(text, voice, rate="+0%", volume="+0%"):
+        class _Fake:
+            async def save(self, path):
+                with open(path, "wb") as handle:
+                    handle.write(b"fake-mp3")
+
+        return _Fake()
+
+    monkeypatch.setattr("edge_tts.Communicate", fake_communicate)
+    result = TTSHandler.run_tts("t", "这是一个足够长的测试句子。", config, save_path=str(out))
+    assert result == str(out)
+    assert out.stat().st_size > 0
+
+
+def test_web_save_audio_reports_failure_instead_of_an_empty_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        surf_web.TTSHandler, "run_tts", staticmethod(lambda *a, **k: None)
+    )
+    response = surf_web.app.test_client().post(
+        "/api/save",
+        json={
+            "fileType": "audio",
+            "saveDir": str(tmp_path),
+            "customTitle": "T",
+            "data": {"markdown": "hello", "title": "T", "metadata": {}},
+        },
+    )
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert "音频生成失败" in payload["error"]
+
+
+def test_web_play_audio_rejects_content_without_words(monkeypatch):
+    response = surf_web.app.test_client().post(
+        "/api/play-audio",
+        json={"data": {"markdown": "![](http://a/b.jpg)", "title": "T"}, "formData": {}},
+    )
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert "没有可朗读的文字" in payload["error"]

@@ -18408,6 +18408,49 @@ print(json.dumps(cookies, ensure_ascii=False))
             return browser.new_context(**context_options)
 
 class TTSHandler:
+    # Shortest piece of speakable text worth synthesising. Chinese packs a
+    # sentence into ~9 characters while English needs a word or two, so the
+    # threshold stays low; the real guard is "contains letters or CJK, not just
+    # punctuation". Below this edge-tts accepts the request, receives no audio,
+    # and leaves an empty file behind.
+    MIN_SPEAKABLE_CHARS = 4
+
+    @staticmethod
+    def clean_text_for_tts(content):
+        """Strip Markdown scaffolding so only speakable words are left.
+
+        Images vanish entirely, links keep their text, and heading markers,
+        emphasis marks and horizontal rules are dropped. What remains is what
+        the voice would actually read, which is also what decides whether the
+        synthesis is worth starting at all.
+        """
+        text = content or ""
+        text = re.sub(r"!\[.*?\]\(.*?\)", "", text)
+        text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
+        text = text.replace("#", "").replace("*", "").replace("`", "").replace("---", "")
+        # Inline HTML tags are noise to a voice.
+        text = re.sub(r"<[^>]+>", "", text)
+        return re.sub(r"[ \t\r\f\v]+", " ", text).strip()
+
+    @staticmethod
+    def _speakable_chars(text):
+        """Count real characters, ignoring whitespace and bare punctuation."""
+        return len([c for c in (text or "") if not c.isspace() and c.isprintable()])
+
+    @classmethod
+    def _has_words(cls, text):
+        """Whether *text* carries actual words rather than only symbols."""
+        return any(c.isalpha() for c in (text or ""))
+
+    @classmethod
+    def has_speakable_text(cls, content):
+        """Whether *content* carries enough words for a usable audio file."""
+        cleaned = cls.clean_text_for_tts(content)
+        return (
+            cls._speakable_chars(cleaned) >= cls.MIN_SPEAKABLE_CHARS
+            and cls._has_words(cleaned)
+        )
+
     @staticmethod
     async def generate_speech(text, output_file, config):
         voice = config.get("TTS", "voice", fallback="zh-CN-XiaoxiaoNeural")
@@ -18415,9 +18458,28 @@ class TTSHandler:
         volume = config.get("TTS", "volume", fallback="+0%")
 
         logger.info(f"Generating TTS audio with voice: {voice}, rate: {rate}, volume: {volume}...")
-        communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
-        await communicate.save(output_file)
-        logger.info(f"Audio saved to {output_file}")
+        # Synthesise into a sibling temp file and only move it into place once it
+        # actually contains audio. edge-tts creates the destination up front and
+        # leaves it at 0 bytes when the request yields nothing, which is how
+        # Surf used to produce empty .mp3 files.
+        target = resolve_user_path(output_file)
+        temp_path = f"{target}.part"
+        try:
+            communicate = edge_tts.Communicate(text, voice, rate=rate, volume=volume)
+            await communicate.save(temp_path)
+            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                raise RuntimeError(
+                    "edge-tts produced no audio "
+                    "(check the voice name, the text language, and network access to the TTS service)"
+                )
+            os.replace(temp_path, target)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        logger.info(f"Audio saved to {target} ({os.path.getsize(target)} bytes)")
 
     @staticmethod
     def play_audio(file_path):
@@ -18426,32 +18488,54 @@ class TTSHandler:
         playsound(file_path)
         logger.info("Playback finished.")
 
-    @staticmethod
-    def run_tts(title, content, config, speak=False, save_path=None):
-        # Professional cleanup for TTS: remove markdown artifacts, images, and only keep link text
-        # Remove ![alt](url)
-        clean_text = re.sub(r"!\[.*?\]\(.*?\)", "", content)
-        # Remove [link text](url) -> keep 'link text'
-        clean_text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", clean_text)
-        # Remove other common MD artifacts
-        clean_text = clean_text.replace("#", "").replace("*", "").replace("`", "").replace("---", "")
+    @classmethod
+    def run_tts(cls, title, content, config, speak=False, save_path=None):
+        """Synthesise speech for *content*; return the audio path or None.
+
+        Returns ``None`` (and leaves no file behind) when there is nothing
+        speakable or the synthesis fails, so callers can report the failure
+        instead of handing the user a 0-byte file.
+        """
+        clean_text = cls.clean_text_for_tts(content)
+        if (
+            cls._speakable_chars(clean_text) < cls.MIN_SPEAKABLE_CHARS
+            or not cls._has_words(clean_text)
+        ):
+            logger.warning(
+                "TTS skipped: nothing to read aloud here. The text left after "
+                "stripping Markdown is %d characters (%r); a page that only has "
+                "images, punctuation or whitespace cannot produce audio.",
+                cls._speakable_chars(clean_text),
+                clean_text[:40],
+            )
+            return None
 
         # If output file not specified but speak is needed, use temp
         temp_file = "tts_temp.mp3"
         filename = resolve_user_path(save_path) if save_path else temp_file
 
         try:
-            asyncio.run(TTSHandler.generate_speech(clean_text, filename, config))
+            asyncio.run(cls.generate_speech(clean_text, filename, config))
 
             if speak:
-                TTSHandler.play_audio(filename)
+                cls.play_audio(filename)
 
             # If we used a temp file and didn't ask to save, clean it up
             if speak and not save_path and os.path.exists(temp_file):
                 os.remove(temp_file)
 
+            return filename
+
         except Exception as e:
             logger.error(f"TTS operation failed: {e}")
+            # Never leave a half-written or empty audio file behind.
+            for path in (filename, f"{filename}.part"):
+                try:
+                    if os.path.exists(path) and os.path.getsize(path) == 0:
+                        os.remove(path)
+                except OSError:
+                    pass
+            return None
 
 def build_search_filename_prefix(prefix_value, keywords):
     """Return the mandatory ``[<prefix>]`` search filename prefix.
@@ -19022,7 +19106,13 @@ def _save_single_result(prepared, args, config, filename_prefix="", search_query
                 os.makedirs(audio_dir, exist_ok=True)
                 safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=120)
                 save_path = os.path.join(audio_dir, f"{safe_title}.mp3")
-            TTSHandler.run_tts(title, md_content, config, speak=args.speak, save_path=save_path)
+            audio_path = TTSHandler.run_tts(
+                title, md_content, config, speak=args.speak, save_path=save_path
+            )
+            if audio_path:
+                print(audio_path)
+            else:
+                sys.exit(1)
 
     elif output_format == "publish":
         # Publish to pastebin (md content without YAML front matter)
@@ -19067,7 +19157,8 @@ def _save_single_result(prepared, args, config, filename_prefix="", search_query
             )
 
         if args.speak:
-            TTSHandler.run_tts(title, md_content, config, speak=True)
+            if not TTSHandler.run_tts(title, md_content, config, speak=True):
+                sys.exit(1)
         elif output_path == "-":
             # Output to stdout
             _configure_stdout_utf8()
@@ -19191,7 +19282,11 @@ def _save_merged_search_results(prepared_results, args, config, keywords, filena
         os.makedirs(audio_dir, exist_ok=True)
         safe_title = OutputHandler._safe_filename_title(f"{filename_prefix}{title}", max_len=120)
         save_path = output_path if output_path and output_path != "-" else os.path.join(audio_dir, f"{safe_title}.mp3")
-        TTSHandler.run_tts(title, merged_markdown, config, speak=args.speak, save_path=save_path)
+        if not TTSHandler.run_tts(
+            title, merged_markdown, config, speak=args.speak, save_path=save_path
+        ):
+            logger.error("Failed to generate audio for the merged search results.")
+            sys.exit(1)
         return
 
     if output_format == "publish":

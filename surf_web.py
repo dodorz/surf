@@ -3486,10 +3486,14 @@ def _run_web_save_job(job_id):
                         formData.get("tts_rate"),
                         formData.get("tts_volume"),
                     )
-                TTSHandler.run_tts(
+                audio_path = TTSHandler.run_tts(
                     title, md_content, config, speak=speak, save_path=output_path
                 )
-                save_path = output_path
+                if not audio_path:
+                    raise ValueError(
+                        "音频生成失败：提取到的内容没有可朗读的文字，或 TTS 服务未返回音频"
+                    )
+                save_path = audio_path
         else:
             raise ValueError(f"Unsupported file type: {fileType}")
 
@@ -4141,8 +4145,11 @@ def play_audio():
         config = get_config()
         title = resultData.get("title", "Untitled")
         md_content = resultData.get("markdown", "")
-        if not md_content.strip():
-            return jsonify({"success": False, "error": "No text content to speak"})
+        if not TTSHandler.has_speakable_text(md_content):
+            return jsonify({
+                "success": False,
+                "error": "没有可朗读的文字（图片、符号或空白不算）",
+            })
         form_data = data.get("formData") or {}
         _apply_tts_overrides(
             config,
@@ -4298,11 +4305,16 @@ def save_file():
                 form_data.get("tts_rate"),
                 form_data.get("tts_volume"),
             )
-            TTSHandler.run_tts(
+            audio_path = TTSHandler.run_tts(
                 title, md_content, config, speak=speak, save_path=output_path
             )
+            if not audio_path:
+                return jsonify({
+                    "success": False,
+                    "error": "音频生成失败：提取到的内容没有可朗读的文字，或 TTS 服务未返回音频",
+                })
 
-            return jsonify({"success": True, "savePath": output_path})
+            return jsonify({"success": True, "savePath": audio_path})
 
         else:
             return jsonify({"success": False, "error": "Unsupported file type"})

@@ -253,6 +253,8 @@ uv run surf "https://example.com" -a --tts-rate +10% --tts-volume -20%
 
 语音由 `edge-tts` 提供；语音、语速、音量默认取 `[TTS]` 小节，可按次覆盖。对 Pocket Casts 和小宇宙剧集，`-a` 改为下载原始音频（保留 `.m4a` 等源扩展名），受 `[Transcription] max_audio_mb` 与 `audio_timeout` 限制。
 
+音频先写成 `*.part`，确认确实有音频内容后才改名到位，因此不会产出 0 字节的 `.mp3`。若页面正文只剩图片、符号或空白，会提示 `TTS skipped: nothing to read aloud here` 并以非零状态退出；合成失败时同样会清理残留文件，而不是留下空文件。
+
 ### Pastebin
 
 ```bash
